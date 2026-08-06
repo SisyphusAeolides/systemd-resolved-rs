@@ -24,5 +24,15 @@ int main(void) {
                                 strlen(parent), 0, 0, 0) == -1);
     assert(resolved_route_score(name, strlen(name), "", 0, 0, 0, 0) == 0);
     assert(resolved_notify(NULL) < 0);
+
+    assert(resolved_udp_path_mtu(-1, 0) < 0);
+    assert(resolved_udp_enable_recvfragsize(-1, 0) < 0);
+    assert(resolved_dns_udp_payload_size(1500, 0, 0, 0, 0) == 1472);
+    assert(resolved_dns_udp_payload_size(1500, 1, 0, 0, 0) == 1452);
+    assert(resolved_dns_udp_payload_size(9000, 0, 0, 0, 0) == 4096);
+    assert(resolved_dns_udp_payload_size(1500, 0, 0, 1, 1172) == 1172);
+    assert(resolved_dns_udp_payload_size(0, 0, 0, 0, 0) == 1232);
+    assert(resolved_dns_udp_payload_size(0, 0, 1, 0, 0) == 65508);
+    assert(resolved_dns_udp_payload_size(0, 1, 1, 0, 0) == 65488);
     return 0;
 }
