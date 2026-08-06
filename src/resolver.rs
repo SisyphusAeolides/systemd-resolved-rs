@@ -96,19 +96,19 @@ impl Resolver {
     fn states(&self) -> MutexGuard<'_, Vec<ServerState>> {
         self.states
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn hosts(&self) -> RwLockReadGuard<'_, Hosts> {
         self.hosts
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn hosts_mut(&self) -> RwLockWriteGuard<'_, Hosts> {
         self.hosts
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn transaction_id(&self) -> u16 {
@@ -201,8 +201,7 @@ impl Resolver {
                 metric.cooldown_ms = state
                     .cooldown_until
                     .and_then(|until| until.checked_duration_since(now))
-                    .map(duration_milliseconds)
-                    .unwrap_or(0);
+                    .map_or(0, duration_milliseconds);
                 if attempted.contains(&index) {
                     metric.cooldown_ms = i32::MAX;
                     metric.failures = i32::MAX / 1000;
