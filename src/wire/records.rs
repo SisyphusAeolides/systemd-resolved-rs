@@ -39,6 +39,65 @@ pub fn extract_answer_records(packet: &[u8]) -> Result<Vec<AnswerRecord>, WireEr
     Ok(output)
 }
 
+pub fn extract_service_records(packet: &[u8]) -> Result<ServiceRecords, WireError> {
+    let header = Header::parse(packet)?;
+    if !header.is_response() {
+        return Err(WireError::WrongDirection);
+    }
+    let mut offset = DNS_HEADER_LEN;
+    for _ in 0..header.question_count {
+        offset = parse_question(packet, offset)?.next_offset;
+    }
+
+    let mut output = ServiceRecords::default();
+    for _ in 0..header.answer_count {
+        let record = parse_record(packet, offset)?;
+        offset = record.next_offset;
+        if record.class != CLASS_IN {
+            continue;
+        }
+
+        match record.rr_type {
+            TYPE_SRV => {
+                if record.rdata.len() < 7 {
+                    return Err(WireError::InvalidRecord);
+                }
+                let target_offset = checked_end(record.rdata_offset, 6)?;
+                let (target, target_end) = read_name(packet, target_offset)?;
+                if target_end != record.next_offset {
+                    return Err(WireError::InvalidRecord);
+                }
+                output.srv.push(SrvRecord {
+                    priority: read_u16(packet, record.rdata_offset)?,
+                    weight: read_u16(packet, record.rdata_offset + 2)?,
+                    port: read_u16(packet, record.rdata_offset + 4)?,
+                    target,
+                });
+            }
+            TYPE_TXT => {
+                let mut cursor = record.rdata_offset;
+                while cursor < record.next_offset {
+                    let length = usize::from(
+                        *packet.get(cursor).ok_or(WireError::ShortPacket)?,
+                    );
+                    cursor = checked_end(cursor, 1)?;
+                    let end = checked_end(cursor, length)?;
+                    let item = packet
+                        .get(cursor..end)
+                        .filter(|_| end <= record.next_offset)
+                        .ok_or(WireError::InvalidRecord)?;
+                    if !item.is_empty() {
+                        output.txt.push(item.to_vec());
+                    }
+                    cursor = end;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(output)
+}
+
 pub fn extract_addresses(
     packet: &[u8],
     family: Option<i32>,

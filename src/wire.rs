@@ -10,7 +10,9 @@ pub const TYPE_A: u16 = 1;
 pub const TYPE_CNAME: u16 = 5;
 pub const TYPE_SOA: u16 = 6;
 pub const TYPE_PTR: u16 = 12;
+pub const TYPE_TXT: u16 = 16;
 pub const TYPE_AAAA: u16 = 28;
+pub const TYPE_SRV: u16 = 33;
 pub const TYPE_OPT: u16 = 41;
 pub const TYPE_TSIG: u16 = 250;
 
@@ -118,6 +120,20 @@ pub struct AnswerRecord {
     pub class: u16,
     pub ttl: u32,
     pub raw: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SrvRecord {
+    pub priority: u16,
+    pub weight: u16,
+    pub port: u16,
+    pub target: DnsName,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ServiceRecords {
+    pub srv: Vec<SrvRecord>,
+    pub txt: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
