@@ -28,6 +28,7 @@ impl Resolver {
         let mut transport_retries = 0usize;
 
         loop {
+            let path_mtu = self.udp_path_mtu(server);
             let (level, transport, payload_size) = {
                 let mut states = self.states();
                 let state = states.entry(server).or_default();
@@ -43,17 +44,21 @@ impl Resolver {
                         .features
                         .possible_level(best_level, Instant::now())
                 });
-                let payload_size = state
-                    .transport
-                    .advertised_payload_size()
-                    .unwrap_or(edns::DEFAULT_UDP_PAYLOAD_SIZE);
+                let payload_size = native::dns_udp_payload_size(
+                    path_mtu,
+                    server.is_ipv6(),
+                    server.ip().is_loopback(),
+                    state.transport.packet_fragmented(),
+                    state.transport.received_udp_fragment_max(),
+                );
                 (level, state.transport.mode(), payload_size)
             };
             let outbound = edns::prepare_query(query, level, payload_size)?;
 
             let (response, response_transport) = match transport {
                 TransportMode::Udp => match self.exchange_udp(server, &outbound.packet) {
-                    Ok(response) => {
+                    Ok((response, fragment_size)) => {
+                        self.record_udp_packet(server, response.len(), fragment_size);
                         if Header::parse(&response)?.truncated() {
                             self.record_transport_success(server, TransportMode::Udp);
                             self.record_transport_truncated(server);
@@ -141,11 +146,6 @@ impl Resolver {
             let opt = edns::inspect_opt(&response)?;
             let rcode = edns::full_rcode(&response, opt.as_ref())?;
 
-            // Track server-advertised UDP payload size for adaptive MTU
-            if let Some(ref opt_record) = opt {
-                self.record_advertised_payload_size(server, opt_record.udp_payload_size);
-            }
-
             if outbound.managed_opt && outbound.sent_edns {
                 let Some(opt) = opt.as_ref() else {
                     if self.config.dnssec == ValidationMode::Yes {
@@ -153,18 +153,13 @@ impl Resolver {
                             "DNS server omitted a required EDNS response",
                         ));
                     }
-                    // Record the feature downgrade for future queries
                     let lower = self.record_bad_opt(server, level);
 
-                    // For successful responses without EDNS, return the response now and let
-                    // the higher-level code process it (including any redirect chains).
-                    // For error responses, only retry if the error might be due to EDNS.
                     if rcode == 0 || !rcode_requests_feature_downgrade(rcode) {
                         return edns::response_for_client(query, &response)
                             .map_err(ResolveError::from);
                     }
 
-                    // Error that requests feature downgrade - retry with lower level
                     if feature_retries < MAX_FEATURE_RETRIES {
                         feature_retries += 1;
                         forced_level = Some(lower);
@@ -335,13 +330,12 @@ impl Resolver {
             .clear_failures();
     }
 
-    fn record_advertised_payload_size(&self, server: SocketAddr, size: u16) {
+    fn record_udp_packet(&self, server: SocketAddr, dns_size: usize, fragment_size: u32) {
         let mut states = self.states();
-        states
-            .entry(server)
-            .or_default()
+        let state = states.entry(server).or_default();
+        state
             .transport
-            .set_advertised_payload_size(size);
+            .record_udp_packet(dns_size, fragment_size, server.is_ipv6());
     }
 }
 
