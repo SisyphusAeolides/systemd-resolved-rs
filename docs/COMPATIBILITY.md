@@ -76,7 +76,8 @@ The pinned D-Bus signatures live in `compat/`.
 - [ ] split-DNS parallel scope behavior
 - [ ] interface binding and scoped IPv6 upstreams
 - [x] credential-based `network.dns` and `network.search_domains` configuration with explicit-setting precedence
-- [ ] static `.rr` record files
+- [x] exact-name static `.rr` A, AAAA, PTR, NS, CNAME, and DNAME records with drop-in precedence, `/dev/null` masking, bounded reads, and two-second rechecks
+- [ ] `ReadStaticRecords=` text-configuration toggle and complete static-record diagnostics parity
 
 ## Service behavior
 
