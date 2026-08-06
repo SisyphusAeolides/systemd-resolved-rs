@@ -75,7 +75,7 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] default-route link inference
 - [ ] split-DNS parallel scope behavior
 - [ ] interface binding and scoped IPv6 upstreams
-- [ ] credential-based DNS and search-domain configuration
+- [x] credential-based `network.dns` and `network.search_domains` configuration with explicit-setting precedence
 - [ ] static `.rr` record files
 
 ## Service behavior
