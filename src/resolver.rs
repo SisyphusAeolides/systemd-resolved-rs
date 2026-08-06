@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use crate::cache::{Cache, CacheKey};
-use crate::config::Config;
+use crate::config::{Config, Domain};
 use crate::hosts::Hosts;
 use crate::policy::{choose_server, update_rtt, ServerMetric};
 use crate::wire::{
@@ -121,7 +121,7 @@ impl Resolver {
         let question = first_question(query)?;
         self.counters.transactions.fetch_add(1, Ordering::Relaxed);
 
-        if mode == QueryMode::Full && self.config.read_etc_hosts {
+        if mode == QueryMode::Full {
             if let Some(records) = self.hosts().lookup(&question) {
                 self.counters.local_answers.fetch_add(1, Ordering::Relaxed);
                 return Ok(local_response(query, &records, 0)?);
@@ -290,6 +290,38 @@ impl Resolver {
             10 => &[TYPE_AAAA],
             _ => return Err(ResolveError::UnsupportedFamily(family)),
         };
+        if self.has_local_name(name, types)? {
+            return self.lookup_name_exact(name, types);
+        }
+
+        let candidates = lookup_candidates(
+            name,
+            &self.config.domains,
+            self.config.resolve_unicast_single_label,
+        );
+        let mut last_error = None;
+        for candidate in candidates {
+            match self.lookup_name_exact(&candidate, types) {
+                Ok(result) => return Ok(result),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or(ResolveError::NoSuchResourceRecord))
+    }
+
+    fn has_local_name(&self, name: &str, types: &[u16]) -> Result<bool, ResolveError> {
+        let hosts = self.hosts();
+        for &rr_type in types {
+            let query = make_query(name, rr_type, 0)?;
+            let question = first_question(&query)?;
+            if hosts.lookup(&question).is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn lookup_name_exact(&self, name: &str, types: &[u16]) -> Result<NameLookup, ResolveError> {
         let mut addresses = Vec::new();
         let mut canonical_name = None;
         let mut last_error = None;
@@ -388,6 +420,39 @@ impl Resolver {
             cache_entries: self.cache.len(),
         }
     }
+}
+
+fn lookup_candidates(
+    name: &str,
+    domains: &[Domain],
+    resolve_unicast_single_label: bool,
+) -> Vec<String> {
+    let relative = name.trim_end_matches('.');
+    if relative.is_empty() || name.ends_with('.') || relative.contains('.') {
+        return vec![name.to_owned()];
+    }
+
+    let mut candidates = Vec::new();
+    for domain in domains {
+        if domain.route_only || domain.name == "." {
+            continue;
+        }
+        let candidate = format!("{relative}.{}", domain.name);
+        if !candidates
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&candidate))
+        {
+            candidates.push(candidate);
+        }
+    }
+    if resolve_unicast_single_label
+        && !candidates
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(relative))
+    {
+        candidates.push(relative.to_owned());
+    }
+    candidates
 }
 
 fn duration_milliseconds(duration: Duration) -> i32 {
@@ -557,6 +622,127 @@ mod tests {
                 .to_be_bytes(),
         );
         packet.extend_from_slice(rdata);
+    }
+
+    #[test]
+    fn synthetic_answers_do_not_depend_on_reading_etc_hosts() {
+        let config = Config {
+            upstreams: Vec::new(),
+            fallback_upstreams: Vec::new(),
+            read_etc_hosts: false,
+            ..Config::default()
+        };
+        let lookup = Resolver::new(config)
+            .lookup_name("localhost", 2)
+            .expect("synthetic lookup");
+        assert_eq!(lookup.addresses, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+    }
+
+    #[test]
+    fn candidate_expansion_skips_route_only_domains() {
+        let domains = vec![
+            Domain {
+                name: "route.test".to_owned(),
+                route_only: true,
+            },
+            Domain {
+                name: "example.test".to_owned(),
+                route_only: false,
+            },
+            Domain {
+                name: "lab.test".to_owned(),
+                route_only: false,
+            },
+        ];
+        assert_eq!(
+            lookup_candidates("host", &domains, false),
+            vec!["host.example.test".to_owned(), "host.lab.test".to_owned()]
+        );
+        assert_eq!(
+            lookup_candidates("host", &domains, true),
+            vec![
+                "host.example.test".to_owned(),
+                "host.lab.test".to_owned(),
+                "host".to_owned(),
+            ]
+        );
+        assert!(lookup_candidates("host", &[], false).is_empty());
+        assert_eq!(
+            lookup_candidates("host.example", &domains, false),
+            vec!["host.example".to_owned()]
+        );
+        assert_eq!(
+            lookup_candidates("host.", &domains, false),
+            vec!["host.".to_owned()]
+        );
+    }
+
+    #[test]
+    fn lookup_name_tries_search_domains_in_order() {
+        use crate::wire::question_end;
+        use std::thread;
+
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind test DNS server");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set test timeout");
+        let server = socket.local_addr().expect("test DNS server address");
+        let worker = thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            for (index, expected_name) in ["host.example.test", "host.lab.test"]
+                .into_iter()
+                .enumerate()
+            {
+                let (length, peer) = socket.recv_from(&mut buffer).expect("receive query");
+                let query = &buffer[..length];
+                let question = first_question(query).expect("question");
+                assert_eq!(question.name.text(), expected_name);
+                let end = question_end(query).expect("question end");
+                let mut response = query[..end].to_vec();
+                let flags = if index == 0 { 0x8183u16 } else { 0x8180u16 };
+                response[2..4].copy_from_slice(&flags.to_be_bytes());
+                response[6..12].fill(0);
+                if index == 1 {
+                    response[6..8].copy_from_slice(&1u16.to_be_bytes());
+                    append_test_answer(&mut response, &[0xc0, 0x0c], TYPE_A, &[192, 0, 2, 77]);
+                }
+                socket.send_to(&response, peer).expect("send DNS response");
+            }
+        });
+
+        let config = Config {
+            upstreams: vec![server],
+            fallback_upstreams: Vec::new(),
+            domains: vec![
+                Domain {
+                    name: "route.test".to_owned(),
+                    route_only: true,
+                },
+                Domain {
+                    name: "example.test".to_owned(),
+                    route_only: false,
+                },
+                Domain {
+                    name: "lab.test".to_owned(),
+                    route_only: false,
+                },
+            ],
+            query_timeout: Duration::from_secs(1),
+            attempts: 1,
+            cache: false,
+            read_etc_hosts: false,
+            resolve_unicast_single_label: false,
+            ..Config::default()
+        };
+        let lookup = Resolver::new(config)
+            .lookup_name("host", 2)
+            .expect("search-domain lookup");
+        worker.join().expect("test DNS worker");
+        assert_eq!(
+            lookup.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77))]
+        );
+        assert_eq!(lookup.canonical_name, "host.lab.test");
     }
 
     #[test]
