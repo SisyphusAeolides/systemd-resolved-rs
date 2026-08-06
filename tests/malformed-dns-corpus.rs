@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
+#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 use resolved::{edns, wire};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
