@@ -60,6 +60,15 @@ pub fn response_matches(query: &[u8], response: &[u8]) -> Result<(), WireError> 
 }
 
 pub fn make_query(name: &str, rr_type: u16, id: u16) -> Result<Vec<u8>, WireError> {
+    make_query_with_class(name, rr_type, CLASS_IN, id)
+}
+
+pub fn make_query_with_class(
+    name: &str,
+    rr_type: u16,
+    class: u16,
+    id: u16,
+) -> Result<Vec<u8>, WireError> {
     let encoded_name = encode_name(name)?;
     let mut packet = Vec::with_capacity(DNS_HEADER_LEN + encoded_name.len() + 4);
     packet.extend_from_slice(&id.to_be_bytes());
@@ -68,7 +77,7 @@ pub fn make_query(name: &str, rr_type: u16, id: u16) -> Result<Vec<u8>, WireErro
     packet.extend_from_slice(&[0; 6]);
     packet.extend_from_slice(&encoded_name);
     packet.extend_from_slice(&rr_type.to_be_bytes());
-    packet.extend_from_slice(&CLASS_IN.to_be_bytes());
+    packet.extend_from_slice(&class.to_be_bytes());
     Ok(packet)
 }
 
