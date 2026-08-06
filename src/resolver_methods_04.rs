@@ -1,5 +1,9 @@
 impl Resolver {
-    fn exchange_udp(&self, server: SocketAddr, query: &[u8]) -> Result<Vec<u8>, ResolveError> {
+    fn exchange_udp(
+        &self,
+        server: SocketAddr,
+        query: &[u8],
+    ) -> Result<(Vec<u8>, u32), ResolveError> {
         let bind_address = if server.is_ipv4() {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
         } else {
@@ -9,14 +13,39 @@ impl Resolver {
         socket.set_read_timeout(Some(self.config.query_timeout))?;
         socket.set_write_timeout(Some(self.config.query_timeout))?;
         socket.connect(server)?;
+        let _ = native::enable_udp_fragment_size(socket.as_raw_fd(), server.is_ipv6());
         if socket.send(query)? != query.len() {
             return Err(ResolveError::Protocol("short UDP send"));
         }
+
+        let started = Instant::now();
         let mut response = vec![0; usize::from(u16::MAX)];
-        let length = socket.recv(&mut response)?;
-        response.truncate(length);
-        response_matches(query, &response)?;
-        Ok(response)
+        loop {
+            let Some(remaining) = self.config.query_timeout.checked_sub(started.elapsed()) else {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "DNS UDP query timed out").into());
+            };
+            if remaining.is_zero() {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "DNS UDP query timed out").into());
+            }
+            socket.set_read_timeout(Some(remaining))?;
+            let (length, fragment_size) = native::udp_recv(socket.as_raw_fd(), &mut response)?;
+            if response_matches(query, &response[..length]).is_err() {
+                continue;
+            }
+            response.truncate(length);
+            return Ok((response, fragment_size));
+        }
+    }
+
+    fn udp_path_mtu(&self, server: SocketAddr) -> Option<u32> {
+        let bind_address = if server.is_ipv4() {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+        } else {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
+        };
+        let socket = UdpSocket::bind(bind_address).ok()?;
+        socket.connect(server).ok()?;
+        native::udp_path_mtu(socket.as_raw_fd(), server.is_ipv6()).ok()
     }
 
     fn exchange_tcp(&self, server: SocketAddr, query: &[u8]) -> Result<Vec<u8>, ResolveError> {
