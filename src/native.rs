@@ -48,12 +48,18 @@ pub fn notify(state: &str) -> io::Result<bool> {
 }
 
 pub fn peer_credentials(fd: c_int) -> io::Result<PeerCredentials> {
-    let mut pid = 0;
-    let mut uid = 0;
-    let mut gid = 0;
+    let mut process_id = 0;
+    let mut user_id = 0;
+    let mut group_id = 0;
     // SAFETY: all output pointers refer to initialized writable u32 values.
-    result(unsafe { resolved_peer_credentials(fd, &mut pid, &mut uid, &mut gid) })?;
-    Ok(PeerCredentials { pid, uid, gid })
+    result(unsafe {
+        resolved_peer_credentials(fd, &mut process_id, &mut user_id, &mut group_id)
+    })?;
+    Ok(PeerCredentials {
+        pid: process_id,
+        uid: user_id,
+        gid: group_id,
+    })
 }
 
 fn result(value: c_int) -> io::Result<c_int> {
