@@ -59,9 +59,12 @@ impl Resolver {
                 TransportMode::Udp => match self.exchange_udp(server, &outbound.packet) {
                     Ok((response, fragment_size)) => {
                         self.record_udp_packet(server, response.len(), fragment_size);
-                        if Header::parse(&response)?.truncated() {
+                        let truncated = Header::parse(&response)?.truncated();
+                        if udp_requires_tcp_retry(truncated, fragment_size, level) {
                             self.record_transport_success(server, TransportMode::Udp);
-                            self.record_transport_truncated(server);
+                            if truncated {
+                                self.record_transport_truncated(server);
+                            }
                             match self.exchange_tcp(server, &outbound.packet) {
                                 Ok(response) => {
                                     self.record_transport_success(server, TransportMode::Tcp);
@@ -337,6 +340,10 @@ impl Resolver {
             .transport
             .record_udp_packet(dns_size, fragment_size, server.is_ipv6());
     }
+}
+
+fn udp_requires_tcp_retry(truncated: bool, fragment_size: u32, level: FeatureLevel) -> bool {
+    truncated || (fragment_size != 0 && level > FeatureLevel::Udp)
 }
 
 fn rcode_requests_feature_downgrade(rcode: u16) -> bool {
