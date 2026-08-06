@@ -45,7 +45,8 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] in-answer CNAME and DNAME redirect-chain validation
 - [x] cross-transaction CNAME and DNAME follow-up for high-level lookups with loop detection and the upstream 16-redirect limit
 - [ ] accumulated redirect-chain record reporting and complete redirect flag/error parity
-- [ ] EDNS feature negotiation, downgrade state, and DNS cookies
+- [x] EDNS0/DO feature negotiation with per-server retry downgrade, exponential recovery grace periods, 1232-byte UDP sizing, and RFC 6975 algorithm signaling
+- [ ] adaptive MTU/fragment telemetry, TCP/TLS feature levels, RRSIG-missing detection, and exact upstream retry timing
 - [ ] complete resource-record validation and compression expansion
 - [x] concurrent identical transaction coalescing with per-client ID restoration and one-upstream regression coverage
 - [ ] parallel queries across equivalent scopes
@@ -77,7 +78,8 @@ The pinned D-Bus signatures live in `compat/`.
 - [ ] interface binding and scoped IPv6 upstreams
 - [x] credential-based `network.dns` and `network.search_domains` configuration with explicit-setting precedence
 - [x] exact-name static `.rr` A, AAAA, PTR, NS, CNAME, and DNAME records with drop-in precedence, `/dev/null` masking, bounded reads, and two-second rechecks
-- [ ] `ReadStaticRecords=` text-configuration toggle and complete static-record diagnostics parity
+- [x] `ReadStaticRecords=` text-configuration toggle
+- [ ] complete static-record diagnostics parity
 
 ## Service behavior
 
