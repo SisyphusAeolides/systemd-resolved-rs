@@ -82,16 +82,17 @@ fn prepare_socket_path(path: &Path) -> io::Result<()> {
 
 fn serve_connection(mut stream: UnixStream, resolver: &Resolver) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    let can_control = native::peer_credentials(stream.as_raw_fd())
-        .map(|credentials| credentials.uid == 0)
-        .unwrap_or(false);
+    let can_control = matches!(
+        native::peer_credentials(stream.as_raw_fd()),
+        Ok(credentials) if credentials.uid == 0
+    );
     let mut pending = Vec::new();
     let mut chunk = [0; 8192];
     loop {
         if let Some(end) = pending.iter().position(|byte| *byte == 0) {
             let message: Vec<_> = pending.drain(..=end).collect();
             let reply = match std::str::from_utf8(&message[..message.len() - 1]) {
-                Ok(text) => dispatch_with_access(text, &resolver, can_control),
+                Ok(text) => dispatch_with_access(text, resolver, can_control),
                 Err(_) => invalid_parameter("message"),
             };
             stream.write_all(reply.to_json().as_bytes())?;
@@ -307,15 +308,13 @@ fn resolve_record(parameters: &Value, resolver: &Resolver) -> Value {
         Ok(_) => return error("io.systemd.Resolve.NoSuchResourceRecord"),
         Err(_) => return error("io.systemd.Resolve.InvalidReply"),
     };
-    let flags = Header::parse(&response)
-        .map(|header| {
-            let mut flags = 1u64 << 10;
-            if header.flags & 0x0020 != 0 {
-                flags |= 1u64 << 9;
-            }
-            flags
-        })
-        .unwrap_or(0);
+    let flags = Header::parse(&response).map_or(0, |header| {
+        let mut flags = 1u64 << 10;
+        if header.flags & 0x0020 != 0 {
+            flags |= 1u64 << 9;
+        }
+        flags
+    });
     let rrs = records
         .into_iter()
         .map(|record| {
