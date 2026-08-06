@@ -64,13 +64,13 @@ pub fn notify(state: &str) -> io::Result<bool> {
 
 pub fn udp_path_mtu(fd: c_int, ipv6: bool) -> io::Result<u32> {
     // SAFETY: the descriptor is borrowed for the duration of the getsockopt call.
-    let mtu = result(unsafe { resolved_udp_path_mtu(fd, c_int::from(ipv6)) })?;
+    let mtu = result(unsafe { resolved_udp_path_mtu(fd, bool_to_c_int(ipv6)) })?;
     u32::try_from(mtu).map_err(|_| io::Error::from_raw_os_error(libc_einval()))
 }
 
 pub fn enable_udp_fragment_size(fd: c_int, ipv6: bool) -> io::Result<bool> {
     // SAFETY: the descriptor is borrowed and the function only changes a socket option.
-    result(unsafe { resolved_udp_enable_recvfragsize(fd, c_int::from(ipv6)) })
+    result(unsafe { resolved_udp_enable_recvfragsize(fd, bool_to_c_int(ipv6)) })
         .map(|value| value != 0)
 }
 
@@ -89,8 +89,8 @@ pub fn udp_recv(fd: c_int, buffer: &mut [u8]) -> io::Result<(usize, u32)> {
         let errno = i32::try_from(-length).unwrap_or(libc_einval());
         return Err(io::Error::from_raw_os_error(errno));
     }
-    let length = usize::try_from(length)
-        .map_err(|_| io::Error::from_raw_os_error(libc_einval()))?;
+    let length =
+        usize::try_from(length).map_err(|_| io::Error::from_raw_os_error(libc_einval()))?;
     if length > buffer.len() {
         return Err(io::Error::from_raw_os_error(libc_einval()));
     }
@@ -109,9 +109,9 @@ pub fn dns_udp_payload_size(
     unsafe {
         resolved_dns_udp_payload_size(
             path_mtu.unwrap_or(0),
-            c_int::from(ipv6),
-            c_int::from(loopback),
-            c_int::from(fragmented),
+            bool_to_c_int(ipv6),
+            bool_to_c_int(loopback),
+            bool_to_c_int(fragmented),
             received_udp_fragment_max,
         )
     }
@@ -135,6 +135,14 @@ fn result(value: c_int) -> io::Result<c_int> {
         Err(io::Error::from_raw_os_error(-value))
     } else {
         Ok(value)
+    }
+}
+
+const fn bool_to_c_int(value: bool) -> c_int {
+    if value {
+        1
+    } else {
+        0
     }
 }
 
