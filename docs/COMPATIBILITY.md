@@ -52,7 +52,7 @@ The pinned D-Bus signatures live in `compat/`.
 - [ ] TLS feature levels and exact upstream retry timing
 - [ ] complete resource-record validation and compression expansion
 - [x] concurrent identical transaction coalescing with per-client ID restoration and one-upstream regression coverage
-- [ ] parallel queries across equivalent scopes
+- [x] parallel queries across equivalent scopes
 - [ ] TCP and UDP connection pooling matching upstream behavior
 
 ## Secure and local-link protocols
