@@ -20,6 +20,9 @@ path = "src/main.rs"
 name = "resolvectl"
 path = "src/bin/resolvectl.rs"
 
+[dependencies]
+zbus = "=3.15.2"
+
 [features]
 default = ["fortran-routing"]
 fortran-routing = []

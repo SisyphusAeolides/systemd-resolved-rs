@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use resolved::config::{parse_server, Config};
 use resolved::daemon::{install_signal_handlers, request_stop, run_stub};
+use resolved::dbus::DbusServer;
 use resolved::resolver::Resolver;
 use resolved::varlink::VarlinkServer;
 use std::env;
@@ -11,6 +12,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::thread;
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 struct Options {
     config: PathBuf,
@@ -24,6 +26,7 @@ struct Options {
     check_config: bool,
     no_stub: bool,
     no_varlink: bool,
+    no_dbus: bool,
 }
 
 impl Default for Options {
@@ -40,6 +43,7 @@ impl Default for Options {
             check_config: false,
             no_stub: false,
             no_varlink: false,
+            no_dbus: false,
         }
     }
 }
@@ -105,6 +109,22 @@ fn execute() -> Result<(), Box<dyn Error>> {
         eprintln!("systemd-resolved: warning: no upstream DNS servers are configured");
     }
 
+    let dbus_thread = if options.no_dbus {
+        None
+    } else {
+        let server = DbusServer::new(Arc::clone(&resolver));
+        Some(
+            thread::Builder::new()
+                .name("resolved-dbus".to_owned())
+                .spawn(move || {
+                    if let Err(error) = server.run() {
+                        eprintln!("systemd-resolved: D-Bus server failed: {error}");
+                        request_stop();
+                    }
+                })?,
+        )
+    };
+
     let varlink_thread = if options.no_varlink {
         None
     } else {
@@ -131,6 +151,9 @@ fn execute() -> Result<(), Box<dyn Error>> {
     let result = run_stub(&resolver);
     request_stop();
     if let Some(thread) = varlink_thread {
+        let _ = thread.join();
+    }
+    if let Some(thread) = dbus_thread {
         let _ = thread.join();
     }
     result?;
@@ -209,6 +232,7 @@ fn parse_options() -> Result<Option<Options>, Box<dyn Error>> {
             "--check-config" => options.check_config = true,
             "--no-stub" => options.no_stub = true,
             "--no-varlink" => options.no_varlink = true,
+            "--no-dbus" => options.no_dbus = true,
             "--version" => {
                 println!("systemd-resolved {}", resolved::VERSION);
                 return Ok(None);
@@ -253,6 +277,7 @@ fn print_help() {
            --port PORT\n\
            --no-stub\n\
            --no-varlink\n\
+           --no-dbus\n\
            --check-config",
         resolved::VERSION
     );
