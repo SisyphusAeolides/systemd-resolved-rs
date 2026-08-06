@@ -52,9 +52,7 @@ pub fn peer_credentials(fd: c_int) -> io::Result<PeerCredentials> {
     let mut user_id = 0;
     let mut group_id = 0;
     // SAFETY: all output pointers refer to initialized writable u32 values.
-    result(unsafe {
-        resolved_peer_credentials(fd, &mut process_id, &mut user_id, &mut group_id)
-    })?;
+    result(unsafe { resolved_peer_credentials(fd, &mut process_id, &mut user_id, &mut group_id) })?;
     Ok(PeerCredentials {
         pid: process_id,
         uid: user_id,

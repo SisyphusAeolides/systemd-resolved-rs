@@ -67,7 +67,8 @@ impl Cache {
         let elapsed = now.saturating_duration_since(entry.inserted).as_secs();
         let elapsed = u32::try_from(elapsed).unwrap_or(u32::MAX);
         let mut packet = entry.packet.clone();
-        if rewrite_id(&mut packet, id).is_err() || age_ttls(&mut packet, elapsed, is_stale).is_err() {
+        if rewrite_id(&mut packet, id).is_err() || age_ttls(&mut packet, elapsed, is_stale).is_err()
+        {
             state.entries.remove(key);
             return None;
         }
