@@ -95,7 +95,7 @@ jobs:
         run: cargo build --release --all-features --locked
 
       - name: Check live D-Bus contracts
-        if: false
+        if: ${{ matrix.toolchain == 'stable' }}
         shell: bash
         run: bash tests/dbus-introspection.sh target/release/systemd-resolved
 
