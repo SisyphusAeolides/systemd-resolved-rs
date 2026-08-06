@@ -251,10 +251,12 @@ uint16_t resolved_dns_udp_payload_size(
     if (loopback != 0) {
         packet_size = 65536U - header_size;
     } else {
-        if (path_mtu > header_size) {
+        if (path_mtu == 0U) {
+            packet_size = DNS_PACKET_UNICAST_SIZE_LARGE_MAX;
+        } else if (path_mtu > header_size) {
             packet_size = path_mtu - header_size;
         } else {
-            packet_size = DNS_PACKET_UNICAST_SIZE_LARGE_MAX;
+            packet_size = 0U;
         }
 
         if (fragmented != 0 && received_udp_fragment_max > 0U &&
