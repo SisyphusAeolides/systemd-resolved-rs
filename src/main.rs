@@ -128,7 +128,7 @@ fn execute() -> Result<(), Box<dyn Error>> {
         eprintln!("systemd-resolved: proxy stub listening on {address} (UDP/TCP)");
     }
 
-    let result = run_stub(resolver);
+    let result = run_stub(&resolver);
     request_stop();
     if let Some(thread) = varlink_thread {
         let _ = thread.join();
