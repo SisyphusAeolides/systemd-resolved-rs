@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use crate::native;
 use crate::resolver::{QueryMode, Resolver};
+use std::env;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_UDP_PACKET: usize = 65_535;
 static LOCAL_STOP: AtomicBool = AtomicBool::new(false);
@@ -30,6 +31,35 @@ struct UdpEndpoint {
 struct TcpEndpoint {
     listener: TcpListener,
     mode: QueryMode,
+}
+
+#[derive(Debug)]
+struct Watchdog {
+    interval: Duration,
+    next: Instant,
+}
+
+impl Watchdog {
+    fn from_environment() -> Option<Self> {
+        let usec = env::var("WATCHDOG_USEC").ok();
+        let pid = env::var("WATCHDOG_PID").ok();
+        let interval = watchdog_interval(usec.as_deref(), pid.as_deref(), std::process::id())?;
+        let next = Instant::now().checked_add(interval)?;
+        Some(Self { interval, next })
+    }
+
+    fn ping_if_due(&mut self) {
+        let now = Instant::now();
+        if now < self.next {
+            return;
+        }
+        let _ = native::notify("WATCHDOG=1");
+        self.next = now.checked_add(self.interval).unwrap_or(now);
+    }
+
+    fn sleep_duration(&self) -> Duration {
+        self.interval.min(Duration::from_millis(200))
+    }
 }
 
 pub fn request_stop() {
@@ -91,6 +121,7 @@ pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
         );
     }
 
+    let mut watchdog = Watchdog::from_environment();
     let _ = native::notify("READY=1\nSTATUS=Processing requests");
     while !stop_requested() {
         if native::take_reload() {
@@ -100,7 +131,13 @@ pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
             }
             let _ = native::notify("READY=1\nSTATUS=Processing requests");
         }
-        thread::sleep(Duration::from_millis(200));
+        if let Some(watchdog) = watchdog.as_mut() {
+            watchdog.ping_if_due();
+        }
+        let sleep_duration = watchdog
+            .as_ref()
+            .map_or(Duration::from_millis(200), Watchdog::sleep_duration);
+        thread::sleep(sleep_duration);
     }
     let _ = native::notify("STOPPING=1\nSTATUS=Shutting down");
     drop(sender);
@@ -255,8 +292,59 @@ fn tcp_client(mut stream: TcpStream, resolver: &Resolver, mode: QueryMode) -> io
     Ok(())
 }
 
+fn watchdog_interval(
+    watchdog_usec: Option<&str>,
+    watchdog_pid: Option<&str>,
+    current_pid: u32,
+) -> Option<Duration> {
+    if let Some(pid) = watchdog_pid {
+        if pid.parse::<u32>().ok()? != current_pid {
+            return None;
+        }
+    }
+    let usec = watchdog_usec?.parse::<u64>().ok()?;
+    if usec == 0 {
+        return None;
+    }
+    Some(Duration::from_micros((usec / 2).max(1)))
+}
+
 fn join_all(threads: Vec<JoinHandle<()>>) {
     for thread in threads {
         let _ = thread.join();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watchdog_uses_half_the_configured_period() {
+        assert_eq!(
+            watchdog_interval(Some("1000000"), None, 42),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            watchdog_interval(Some("1000000"), Some("42"), 42),
+            Some(Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn watchdog_rejects_invalid_or_foreign_configuration() {
+        assert_eq!(watchdog_interval(None, None, 42), None);
+        assert_eq!(watchdog_interval(Some("0"), None, 42), None);
+        assert_eq!(watchdog_interval(Some("invalid"), None, 42), None);
+        assert_eq!(watchdog_interval(Some("1000"), Some("invalid"), 42), None);
+        assert_eq!(watchdog_interval(Some("1000"), Some("7"), 42), None);
+    }
+
+    #[test]
+    fn watchdog_never_uses_a_zero_ping_interval() {
+        assert_eq!(
+            watchdog_interval(Some("1"), None, 42),
+            Some(Duration::from_micros(1))
+        );
     }
 }
