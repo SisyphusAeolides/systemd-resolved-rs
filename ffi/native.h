@@ -12,6 +12,17 @@ int resolved_take_reload(void);
 int resolved_should_stop(void);
 int resolved_peer_credentials(int fd, uint32_t *pid, uint32_t *uid, uint32_t *gid);
 
+int resolved_udp_path_mtu(int fd, int ipv6);
+int resolved_udp_enable_recvfragsize(int fd, int ipv6);
+int64_t resolved_udp_recv(int fd, void *buffer, size_t capacity, uint32_t *fragment_size);
+uint16_t resolved_dns_udp_payload_size(
+    uint32_t path_mtu,
+    int ipv6,
+    int loopback,
+    int fragmented,
+    uint32_t received_udp_fragment_max
+);
+
 int64_t resolved_route_score(
     const char *name,
     size_t name_len,
