@@ -3,7 +3,7 @@ const RCODE_FORMERR: u16 = 1;
 const RCODE_SERVFAIL: u16 = 2;
 const RCODE_NOTIMP: u16 = 4;
 const RCODE_BADVERS: u16 = 16;
-const MAX_FEATURE_RETRIES: usize = 3;
+const MAX_FEATURE_RETRIES: usize = 2;
 const MAX_TRANSPORT_RETRIES: usize = 2;
 
 impl Resolver {
@@ -145,7 +145,18 @@ impl Resolver {
                             "DNS server omitted a required EDNS response",
                         ));
                     }
+                    // Record the feature downgrade for future queries
                     let lower = self.record_bad_opt(server, level);
+
+                    // For successful responses without EDNS, return the response now and let
+                    // the higher-level code process it (including any redirect chains).
+                    // For error responses, only retry if the error might be due to EDNS.
+                    if rcode == 0 || !rcode_requests_feature_downgrade(rcode) {
+                        return edns::response_for_client(query, &response)
+                            .map_err(ResolveError::from);
+                    }
+
+                    // Error that requests feature downgrade - retry with lower level
                     if feature_retries < MAX_FEATURE_RETRIES {
                         feature_retries += 1;
                         forced_level = Some(lower);
