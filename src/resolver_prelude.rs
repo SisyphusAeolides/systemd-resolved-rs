@@ -3,6 +3,7 @@ use crate::cache::{Cache, CacheKey};
 use crate::config::{Config, Domain, SupportMode, TlsMode, ValidationMode};
 use crate::edns::{self, FeatureLevel, ServerFeatureState};
 use crate::hosts::Hosts;
+use crate::native;
 use crate::policy::{choose_server, update_rtt, ServerMetric};
 use crate::routing::{LinkError, LinkState, RouteScope, RoutingTable};
 use crate::transport::{
@@ -18,6 +19,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
+use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{
