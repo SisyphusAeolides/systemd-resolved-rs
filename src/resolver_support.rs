@@ -84,6 +84,7 @@ impl ResolveError {
             Self::UnsupportedFamily(_) => "io.systemd.Resolve.BadAddressSize",
             Self::Link(LinkError::NoSuchLink(_)) => "io.systemd.Resolve.NoSuchLink",
             Self::Link(_) => "io.systemd.Resolve.InvalidParameter",
+            Self::Wire(WireError::CnameLoop) => "io.systemd.Resolve.CNAMELoop",
             Self::Io(error)
                 if matches!(
                     error.kind(),

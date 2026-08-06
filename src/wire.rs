@@ -16,6 +16,7 @@ pub const TYPE_SRV: u16 = 33;
 pub const TYPE_DNAME: u16 = 39;
 pub const TYPE_OPT: u16 = 41;
 pub const TYPE_TSIG: u16 = 250;
+pub const TYPE_ANY: u16 = 255;
 
 const FLAG_QR: u16 = 0x8000;
 const FLAG_OPCODE: u16 = 0x7800;
@@ -168,6 +169,7 @@ pub enum WireError {
     QuestionMismatch,
     InvalidName(String),
     InvalidRecord,
+    CnameLoop,
     ResponseTooLarge,
 }
 
@@ -190,6 +192,9 @@ impl fmt::Display for WireError {
             }
             Self::InvalidName(name) => write!(formatter, "invalid DNS name: {name}"),
             Self::InvalidRecord => formatter.write_str("invalid DNS resource record"),
+            Self::CnameLoop => {
+                formatter.write_str("CNAME or DNAME redirect loop or limit exceeded")
+            }
             Self::ResponseTooLarge => formatter.write_str("DNS response exceeds 65535 octets"),
         }
     }
@@ -200,4 +205,5 @@ impl Error for WireError {}
 include!("wire/codec.rs");
 include!("wire/packet.rs");
 include!("wire/records.rs");
+include!("wire/redirects.rs");
 include!("wire/tests.rs");

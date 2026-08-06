@@ -16,3 +16,4 @@ include!("resolver_test_07.rs");
 include!("resolver_test_08.rs");
 include!("resolver_test_09.rs");
 include!("resolver_test_10.rs");
+include!("resolver_test_11.rs");

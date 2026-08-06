@@ -1,4 +1,61 @@
+const CNAME_LOOP_PROTOCOL_ERROR: &str = "CNAME or DNAME redirect loop";
+
 impl Resolver {
+    fn query_following_redirects(
+        &self,
+        name: &str,
+        class: u16,
+        rr_type: u16,
+        ifindex: Option<i32>,
+    ) -> Result<(Vec<u8>, String), ResolveError> {
+        let mut current = name.to_owned();
+        let mut visited = HashSet::new();
+        let mut redirects = 0usize;
+
+        loop {
+            let query =
+                make_query_with_class(&current, rr_type, class, self.transaction_id())?;
+            let question = first_question(&query)?;
+            if !visited.insert(question.name.canonical_wire().to_vec()) {
+                return Err(ResolveError::Wire(WireError::CnameLoop));
+            }
+
+            let response = self.query_on_link(&query, QueryMode::Full, ifindex)?;
+            match wire::classify_redirect_answer(&response)? {
+                wire::RedirectAnswer::Direct {
+                    canonical_name,
+                    redirects: packet_redirects,
+                } => {
+                    redirects = redirects
+                        .checked_add(packet_redirects)
+                        .ok_or(ResolveError::Wire(WireError::CnameLoop))?;
+                    if redirects > wire::CNAME_REDIRECTS_MAX {
+                        return Err(ResolveError::Wire(WireError::CnameLoop));
+                    }
+                    return Ok((response, canonical_name));
+                }
+                wire::RedirectAnswer::Redirect {
+                    canonical_name,
+                    redirects: packet_redirects,
+                } => {
+                    if packet_redirects == 0 {
+                        return Err(ResolveError::Protocol(CNAME_LOOP_PROTOCOL_ERROR));
+                    }
+                    redirects = redirects
+                        .checked_add(packet_redirects)
+                        .ok_or(ResolveError::Wire(WireError::CnameLoop))?;
+                    if redirects > wire::CNAME_REDIRECTS_MAX {
+                        return Err(ResolveError::Wire(WireError::CnameLoop));
+                    }
+                    current = canonical_name;
+                }
+                wire::RedirectAnswer::NoData => {
+                    return Err(ResolveError::NoSuchResourceRecord);
+                }
+            }
+        }
+    }
+
     fn lookup_name_exact(
         &self,
         name: &str,
@@ -9,9 +66,8 @@ impl Resolver {
         let mut canonical_name = None;
         let mut last_error = None;
         for &rr_type in types {
-            let query = make_query(name, rr_type, self.transaction_id())?;
-            match self.query_on_link(&query, QueryMode::Full, ifindex) {
-                Ok(response) => {
+            match self.query_following_redirects(name, wire::CLASS_IN, rr_type, ifindex) {
+                Ok((response, followed_name)) => {
                     let response_family = match rr_type {
                         TYPE_A => Some(2),
                         TYPE_AAAA => Some(10),
@@ -19,7 +75,11 @@ impl Resolver {
                     };
                     let records = extract_address_records(&response, response_family)?;
                     if !records.addresses.is_empty() && canonical_name.is_none() {
-                        canonical_name = Some(records.canonical_name);
+                        canonical_name = Some(if records.canonical_name.is_empty() {
+                            followed_name
+                        } else {
+                            records.canonical_name
+                        });
                     }
                     for address in records.addresses {
                         if !addresses.contains(&address) {
@@ -49,8 +109,13 @@ impl Resolver {
         address: IpAddr,
         ifindex: Option<i32>,
     ) -> Result<AddressLookup, ResolveError> {
-        let query = make_query(&reverse_name(address), TYPE_PTR, self.transaction_id())?;
-        let names = extract_ptr_names(&self.query_on_link(&query, QueryMode::Full, ifindex)?)?;
+        let (response, _) = self.query_following_redirects(
+            &reverse_name(address),
+            wire::CLASS_IN,
+            TYPE_PTR,
+            ifindex,
+        )?;
+        let names = extract_ptr_names(&response)?;
         if names.is_empty() {
             Err(ResolveError::NoSuchResourceRecord)
         } else {
@@ -78,8 +143,8 @@ impl Resolver {
         rr_type: u16,
         ifindex: Option<i32>,
     ) -> Result<Vec<u8>, ResolveError> {
-        let query = make_query_with_class(name, rr_type, class, self.transaction_id())?;
-        self.query_on_link(&query, QueryMode::Full, ifindex)
+        self.query_following_redirects(name, class, rr_type, ifindex)
+            .map(|(response, _)| response)
     }
 
     pub fn reload_hosts(&self) -> io::Result<()> {
