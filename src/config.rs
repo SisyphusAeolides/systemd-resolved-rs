@@ -475,7 +475,7 @@ pub fn discover_resolv_conf(path: &Path) -> Result<Vec<SocketAddr>, ConfigError>
     };
     let mut output = Vec::new();
     for line in text.lines() {
-        let mut fields = line.trim().split_whitespace();
+        let mut fields = line.split_whitespace();
         if fields.next() != Some("nameserver") {
             continue;
         }
@@ -541,11 +541,13 @@ mod tests {
 
     #[test]
     fn local_stub_is_not_an_upstream() {
-        let mut config = Config::default();
-        config.upstreams = vec![
-            "127.0.0.53:53".parse().expect("stub"),
-            "192.0.2.53:53".parse().expect("uplink"),
-        ];
+        let config = Config {
+            upstreams: vec![
+                "127.0.0.53:53".parse().expect("stub"),
+                "192.0.2.53:53".parse().expect("uplink"),
+            ],
+            ..Config::default()
+        };
         assert_eq!(config.effective_upstreams().len(), 1);
     }
 }
