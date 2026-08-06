@@ -1,0 +1,38 @@
+[package]
+name = "systemd-resolved-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "LGPL-2.1-or-later"
+description = "A compatibility-oriented reimplementation of systemd-resolved"
+repository = "https://github.com/SisyphusAeolides/systemd-resolved-rs"
+build = "build.rs"
+
+[lib]
+name = "resolved"
+path = "src/lib.rs"
+
+[[bin]]
+name = "systemd-resolved"
+path = "src/main.rs"
+
+[[bin]]
+name = "resolvectl"
+path = "src/bin/resolvectl.rs"
+
+[features]
+default = ["fortran-routing"]
+fortran-routing = []
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

@@ -1,0 +1,28 @@
+<!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
+<node>
+  <interface name="org.freedesktop.resolve1.Link">
+    <method name="SetDNS"><arg name="addresses" type="a(iay)" direction="in"/></method>
+    <method name="SetDNSEx"><arg name="addresses" type="a(iayqs)" direction="in"/></method>
+    <method name="SetDomains"><arg name="domains" type="a(sb)" direction="in"/></method>
+    <method name="SetDefaultRoute"><arg name="enable" type="b" direction="in"/></method>
+    <method name="SetLLMNR"><arg name="mode" type="s" direction="in"/></method>
+    <method name="SetMulticastDNS"><arg name="mode" type="s" direction="in"/></method>
+    <method name="SetDNSOverTLS"><arg name="mode" type="s" direction="in"/></method>
+    <method name="SetDNSSEC"><arg name="mode" type="s" direction="in"/></method>
+    <method name="SetDNSSECNegativeTrustAnchors"><arg name="names" type="as" direction="in"/></method>
+    <method name="Revert"/>
+    <property name="ScopesMask" type="t" access="read"/>
+    <property name="DNS" type="a(iay)" access="read"/>
+    <property name="DNSEx" type="a(iayqs)" access="read"/>
+    <property name="CurrentDNSServer" type="(iay)" access="read"/>
+    <property name="CurrentDNSServerEx" type="(iayqs)" access="read"/>
+    <property name="Domains" type="a(sb)" access="read"/>
+    <property name="DefaultRoute" type="b" access="read"/>
+    <property name="LLMNR" type="s" access="read"/>
+    <property name="MulticastDNS" type="s" access="read"/>
+    <property name="DNSOverTLS" type="s" access="read"/>
+    <property name="DNSSEC" type="s" access="read"/>
+    <property name="DNSSECNegativeTrustAnchors" type="as" access="read"/>
+    <property name="DNSSECSupported" type="b" access="read"/>
+  </interface>
+</node>

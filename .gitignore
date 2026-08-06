@@ -1,0 +1,7 @@
+/target/
+/build/
+*.o
+*.a
+*.mod
+*.agdai
+formal/idris/build/
