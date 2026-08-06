@@ -12,6 +12,7 @@ pub mod cache;
 pub mod config;
 pub mod daemon;
 pub mod dbus;
+pub mod edns;
 pub mod hosts;
 pub mod json;
 pub mod native;
