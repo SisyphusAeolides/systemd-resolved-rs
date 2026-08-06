@@ -35,15 +35,15 @@ mod test_03_synthetic_and_parallel_scopes {
         let first_barrier = Arc::clone(&barrier);
         let first_thread = thread::spawn(move || {
             reply_after_both_scopes_arrive(
-                first_socket,
-                first_barrier,
+                &first_socket,
+                first_barrier.as_ref(),
                 Ipv4Addr::new(192, 0, 2, 21),
             );
         });
         let second_thread = thread::spawn(move || {
             reply_after_both_scopes_arrive(
-                second_socket,
-                barrier,
+                &second_socket,
+                barrier.as_ref(),
                 Ipv4Addr::new(192, 0, 2, 22),
             );
         });
@@ -90,11 +90,7 @@ mod test_03_synthetic_and_parallel_scopes {
         second_thread.join().expect("second mock DNS thread");
     }
 
-    fn reply_after_both_scopes_arrive(
-        socket: UdpSocket,
-        barrier: Arc<Barrier>,
-        address: Ipv4Addr,
-    ) {
+    fn reply_after_both_scopes_arrive(socket: &UdpSocket, barrier: &Barrier, address: Ipv4Addr) {
         let mut buffer = [0; 2048];
         let (length, peer) = socket.recv_from(&mut buffer).expect("mock scoped query");
         barrier.wait();
