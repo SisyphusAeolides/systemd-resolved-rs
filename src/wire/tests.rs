@@ -128,6 +128,136 @@ mod tests {
     }
 
     #[test]
+    fn dname_rewrites_the_most_specific_suffix() {
+        let query = make_query("Api.Branch.Example", TYPE_A, 0x1238).expect("query");
+        let end = question_end(&query).expect("question end");
+        let mut response = query[..end].to_vec();
+        response[2..4].copy_from_slice(&(FLAG_QR | FLAG_RA | FLAG_RD).to_be_bytes());
+        response[6..8].copy_from_slice(&4u16.to_be_bytes());
+
+        append_answer(
+            &mut response,
+            &encode_name("Example").expect("parent owner"),
+            TYPE_DNAME,
+            &encode_name("fallback.test").expect("parent target"),
+        );
+        append_answer(
+            &mut response,
+            &encode_name("Branch.Example").expect("specific owner"),
+            TYPE_DNAME,
+            &encode_name("Service.Test").expect("specific target"),
+        );
+        append_answer(
+            &mut response,
+            &encode_name("unrelated.test").expect("unrelated owner"),
+            TYPE_A,
+            &[203, 0, 113, 20],
+        );
+        append_answer(
+            &mut response,
+            &encode_name("api.service.test").expect("rewritten owner"),
+            TYPE_A,
+            &[192, 0, 2, 20],
+        );
+
+        let records = extract_address_records(&response, Some(2)).expect("address records");
+        assert_eq!(records.canonical_name, "Api.Service.Test");
+        assert_eq!(
+            records.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20))]
+        );
+    }
+
+    #[test]
+    fn explicit_cname_takes_precedence_over_covering_dname() {
+        let query = make_query("host.branch.example", TYPE_A, 0x1239).expect("query");
+        let end = question_end(&query).expect("question end");
+        let mut response = query[..end].to_vec();
+        response[2..4].copy_from_slice(&(FLAG_QR | FLAG_RA | FLAG_RD).to_be_bytes());
+        response[6..8].copy_from_slice(&3u16.to_be_bytes());
+
+        append_answer(
+            &mut response,
+            &encode_name("branch.example").expect("DNAME owner"),
+            TYPE_DNAME,
+            &encode_name("redirect.test").expect("DNAME target"),
+        );
+        append_answer(
+            &mut response,
+            &[0xc0, 0x0c],
+            TYPE_CNAME,
+            &encode_name("explicit.test").expect("CNAME target"),
+        );
+        append_answer(
+            &mut response,
+            &encode_name("explicit.test").expect("address owner"),
+            TYPE_A,
+            &[192, 0, 2, 21],
+        );
+
+        let records = extract_address_records(&response, Some(2)).expect("address records");
+        assert_eq!(records.canonical_name, "explicit.test");
+        assert_eq!(
+            records.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 21))]
+        );
+    }
+
+    #[test]
+    fn dname_loop_is_rejected() {
+        let query = make_query("host.a.test", TYPE_A, 0x1240).expect("query");
+        let end = question_end(&query).expect("question end");
+        let mut response = query[..end].to_vec();
+        response[2..4].copy_from_slice(&(FLAG_QR | FLAG_RA | FLAG_RD).to_be_bytes());
+        response[6..8].copy_from_slice(&2u16.to_be_bytes());
+
+        append_answer(
+            &mut response,
+            &encode_name("a.test").expect("first owner"),
+            TYPE_DNAME,
+            &encode_name("b.test").expect("first target"),
+        );
+        append_answer(
+            &mut response,
+            &encode_name("b.test").expect("second owner"),
+            TYPE_DNAME,
+            &encode_name("a.test").expect("second target"),
+        );
+
+        assert_eq!(
+            extract_address_records(&response, Some(2)),
+            Err(WireError::InvalidRecord)
+        );
+    }
+
+    #[test]
+    fn cname_and_dname_cannot_share_an_owner() {
+        let query = make_query("alias.example", TYPE_A, 0x1241).expect("query");
+        let end = question_end(&query).expect("question end");
+        let mut response = query[..end].to_vec();
+        response[2..4].copy_from_slice(&(FLAG_QR | FLAG_RA | FLAG_RD).to_be_bytes());
+        response[6..8].copy_from_slice(&2u16.to_be_bytes());
+
+        append_answer(
+            &mut response,
+            &[0xc0, 0x0c],
+            TYPE_CNAME,
+            &encode_name("real.example").expect("CNAME target"),
+        );
+        append_answer(
+            &mut response,
+            &[0xc0, 0x0c],
+            TYPE_DNAME,
+            &encode_name("redirect.example").expect("DNAME target"),
+        );
+
+        assert_eq!(
+            extract_address_records(&response, Some(2)),
+            Err(WireError::InvalidRecord)
+        );
+    }
+
+    #[test]
     fn reverse_names_round_trip() {
         let addresses = [
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),

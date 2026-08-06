@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-const MAX_CNAME_CHAIN: usize = 64;
+const MAX_REDIRECT_CHAIN: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddressRecords {
@@ -10,6 +10,7 @@ pub struct AddressRecords {
 #[derive(Default)]
 struct AddressAnswerSet {
     aliases: std::collections::HashMap<Vec<u8>, DnsName>,
+    dnames: std::collections::HashMap<Vec<u8>, DnsName>,
     addresses: std::collections::HashMap<Vec<u8>, Vec<IpAddr>>,
 }
 
@@ -142,7 +143,8 @@ fn parse_address_answers(
         }
         let owner = record.name.canonical_wire().to_vec();
         match record.rr_type {
-            TYPE_CNAME => insert_alias(packet, &record, owner, &mut output)?,
+            TYPE_CNAME => insert_redirect(packet, &record, owner, &mut output.aliases)?,
+            TYPE_DNAME => insert_redirect(packet, &record, owner, &mut output.dnames)?,
             TYPE_A => {
                 let [a, b, c, d] = record.rdata.as_slice() else {
                     return Err(WireError::InvalidRecord);
@@ -164,32 +166,30 @@ fn parse_address_answers(
             _ => {}
         }
     }
-    if output
-        .aliases
-        .keys()
-        .any(|owner| output.addresses.contains_key(owner))
-    {
+    if output.aliases.keys().any(|owner| {
+        output.addresses.contains_key(owner) || output.dnames.contains_key(owner)
+    }) {
         return Err(WireError::InvalidRecord);
     }
     Ok(output)
 }
 
-fn insert_alias(
+fn insert_redirect(
     packet: &[u8],
     record: &ResourceRecord,
     owner: Vec<u8>,
-    output: &mut AddressAnswerSet,
+    redirects: &mut std::collections::HashMap<Vec<u8>, DnsName>,
 ) -> Result<(), WireError> {
     let (target, end) = read_name(packet, record.rdata_offset)?;
     if end != record.next_offset {
         return Err(WireError::InvalidRecord);
     }
-    if let Some(existing) = output.aliases.get(&owner) {
+    if let Some(existing) = redirects.get(&owner) {
         if existing.canonical_wire() != target.canonical_wire() {
             return Err(WireError::InvalidRecord);
         }
     } else {
-        output.aliases.insert(owner, target);
+        redirects.insert(owner, target);
     }
     Ok(())
 }
@@ -206,30 +206,104 @@ fn resolve_address_chain(
     mut answers: AddressAnswerSet,
     family: Option<i32>,
 ) -> Result<AddressRecords, WireError> {
-    let mut current = question.canonical_wire().to_vec();
-    let mut canonical_name = question.text().to_owned();
+    let mut current = question.clone();
     let mut visited = std::collections::HashSet::new();
-    for _ in 0..MAX_CNAME_CHAIN {
-        if !visited.insert(current.clone()) {
+    for _ in 0..MAX_REDIRECT_CHAIN {
+        if !visited.insert(current.canonical_wire().to_vec()) {
             return Err(WireError::InvalidRecord);
         }
-        let Some(target) = answers.aliases.get(&current) else {
-            let addresses = answers
-                .addresses
-                .remove(&current)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|address| family_matches(family, address))
-                .collect();
-            return Ok(AddressRecords {
-                addresses,
-                canonical_name,
-            });
-        };
-        target.text().clone_into(&mut canonical_name);
-        current = target.canonical_wire().to_vec();
+        if let Some(target) = answers.aliases.get(current.canonical_wire()) {
+            current = target.clone();
+            continue;
+        }
+        if let Some(target) = rewrite_dname(&current, &answers.dnames)? {
+            current = target;
+            continue;
+        }
+
+        let addresses = answers
+            .addresses
+            .remove(current.canonical_wire())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|address| family_matches(family, address))
+            .collect();
+        return Ok(AddressRecords {
+            addresses,
+            canonical_name: current.text().to_owned(),
+        });
     }
     Err(WireError::InvalidRecord)
+}
+
+fn rewrite_dname(
+    current: &DnsName,
+    dnames: &std::collections::HashMap<Vec<u8>, DnsName>,
+) -> Result<Option<DnsName>, WireError> {
+    let canonical = current.canonical_wire();
+    let mut suffix_offset = 0usize;
+    let mut prefix_labels = 0usize;
+    loop {
+        if let Some(target) = dnames.get(&canonical[suffix_offset..]) {
+            let prefix = &canonical[..suffix_offset];
+            let length = prefix
+                .len()
+                .checked_add(target.canonical_wire().len())
+                .ok_or(WireError::NameTooLong)?;
+            if length > 255 {
+                return Err(WireError::NameTooLong);
+            }
+            let mut canonical_wire = Vec::with_capacity(length);
+            canonical_wire.extend_from_slice(prefix);
+            canonical_wire.extend_from_slice(target.canonical_wire());
+            let text = rewrite_dname_text(current.text(), prefix_labels, target.text())?;
+            return Ok(Some(DnsName {
+                text,
+                canonical_wire,
+            }));
+        }
+
+        let label_length = usize::from(
+            *canonical
+                .get(suffix_offset)
+                .ok_or(WireError::InvalidRecord)?,
+        );
+        if label_length == 0 {
+            return Ok(None);
+        }
+        if label_length > 63 {
+            return Err(WireError::InvalidRecord);
+        }
+        suffix_offset = suffix_offset
+            .checked_add(label_length + 1)
+            .ok_or(WireError::NameTooLong)?;
+        prefix_labels += 1;
+        if suffix_offset >= canonical.len() {
+            return Err(WireError::InvalidRecord);
+        }
+    }
+}
+
+fn rewrite_dname_text(
+    current: &str,
+    prefix_labels: usize,
+    target: &str,
+) -> Result<String, WireError> {
+    let labels: Vec<&str> = if current == "." {
+        Vec::new()
+    } else {
+        current.split('.').collect()
+    };
+    let prefix = labels
+        .get(..prefix_labels)
+        .ok_or(WireError::InvalidRecord)?
+        .join(".");
+    match (prefix.is_empty(), target == ".") {
+        (true, true) => Ok(".".to_owned()),
+        (true, false) => Ok(target.to_owned()),
+        (false, true) => Ok(prefix),
+        (false, false) => Ok(format!("{prefix}.{target}")),
+    }
 }
 
 fn family_matches(family: Option<i32>, address: &IpAddr) -> bool {
