@@ -272,7 +272,7 @@ fn resolve_address(parameters: &Value, resolver: &Resolver) -> Value {
     }
 }
 
-fn_resolve_record(parameters: &Value, resolver: &Resolver) -> Value {
+fn resolve_record(parameters: &Value, resolver: &Resolver) -> Value {
     let Some(name) = parameters.get("name").and_then(Value::as_str) else {
         return invalid_parameter("name");
     };
