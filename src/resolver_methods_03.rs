@@ -51,7 +51,7 @@ impl Resolver {
             };
             attempted.insert(server);
             let started = Instant::now();
-            match self.exchange(server, query) {
+            match self.exchange_with_features(server, query) {
                 Ok(response) => {
                     self.record_success(server, started.elapsed());
                     return Ok(response);
@@ -116,5 +116,4 @@ impl Resolver {
         let delay = 250u64.saturating_mul(1u64 << exponent).min(60_000);
         state.cooldown_until = Instant::now().checked_add(Duration::from_millis(delay));
     }
-
 }
