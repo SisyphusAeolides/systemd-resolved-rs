@@ -32,6 +32,8 @@ int main(void) {
     assert(resolved_dns_udp_payload_size(9000, 0, 0, 0, 0) == 4096);
     assert(resolved_dns_udp_payload_size(1500, 0, 0, 1, 1172) == 1172);
     assert(resolved_dns_udp_payload_size(0, 0, 0, 0, 0) == 1232);
+    assert(resolved_dns_udp_payload_size(20, 0, 0, 0, 0) == 512);
+    assert(resolved_dns_udp_payload_size(40, 1, 0, 0, 0) == 512);
     assert(resolved_dns_udp_payload_size(0, 0, 1, 0, 0) == 65508);
     assert(resolved_dns_udp_payload_size(0, 1, 1, 0, 0) == 65488);
     return 0;
