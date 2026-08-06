@@ -15,7 +15,8 @@ pub struct ServerTransportState {
     failed_udp: u8,
     failed_tcp: u8,
     packet_truncated: bool,
-    advertised_payload_size: Option<u16>,
+    packet_fragmented: bool,
+    received_udp_fragment_max: u32,
 }
 
 impl ServerTransportState {
@@ -68,12 +69,23 @@ impl ServerTransportState {
         self.failed_tcp = 0;
     }
 
-    pub const fn advertised_payload_size(&self) -> Option<u16> {
-        self.advertised_payload_size
+    pub const fn packet_fragmented(&self) -> bool {
+        self.packet_fragmented
     }
 
-    pub fn set_advertised_payload_size(&mut self, size: u16) {
-        self.advertised_payload_size = Some(size);
+    pub const fn received_udp_fragment_max(&self) -> u32 {
+        self.received_udp_fragment_max
+    }
+
+    pub fn record_udp_packet(&mut self, dns_size: usize, fragment_size: u32, ipv6: bool) {
+        let header_size = if ipv6 { 48 } else { 28 };
+        let unfragmented_size = if fragment_size == 0 {
+            u32::try_from(dns_size).unwrap_or(u32::MAX)
+        } else {
+            self.packet_fragmented = true;
+            fragment_size.saturating_sub(header_size)
+        };
+        self.received_udp_fragment_max = self.received_udp_fragment_max.max(unfragmented_size);
     }
 
     pub fn reset(&mut self) {
@@ -123,5 +135,20 @@ mod tests {
         assert_eq!(state.mode(), TransportMode::Udp);
         assert_eq!(state.failures(TransportMode::Tcp), TRANSPORT_RETRY_ATTEMPTS);
         assert!(state.packet_truncated());
+    }
+
+    #[test]
+    fn udp_fragment_telemetry_tracks_largest_unfragmented_payload() {
+        let mut state = ServerTransportState::default();
+        state.record_udp_packet(900, 0, false);
+        assert!(!state.packet_fragmented());
+        assert_eq!(state.received_udp_fragment_max(), 900);
+
+        state.record_udp_packet(1500, 1200, false);
+        assert!(state.packet_fragmented());
+        assert_eq!(state.received_udp_fragment_max(), 1172);
+
+        state.record_udp_packet(1500, 1280, true);
+        assert_eq!(state.received_udp_fragment_max(), 1232);
     }
 }
