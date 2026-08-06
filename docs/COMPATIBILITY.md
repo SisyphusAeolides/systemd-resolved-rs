@@ -43,7 +43,8 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] optional stale-answer retention with zeroed TTLs
 - [x] TSIG-bearing response cache exclusion
 - [x] in-answer CNAME and DNAME redirect-chain validation
-- [ ] cross-transaction CNAME and DNAME follow-up parity
+- [x] cross-transaction CNAME and DNAME follow-up for high-level lookups with loop detection and the upstream 16-redirect limit
+- [ ] accumulated redirect-chain record reporting and complete redirect flag/error parity
 - [ ] EDNS feature negotiation, downgrade state, and DNS cookies
 - [ ] complete resource-record validation and compression expansion
 - [x] concurrent identical transaction coalescing with per-client ID restoration and one-upstream regression coverage
