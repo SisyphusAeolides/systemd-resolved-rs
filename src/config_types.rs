@@ -73,6 +73,7 @@ impl ConfigAssignments {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     pub upstreams: Vec<SocketAddr>,
     pub fallback_upstreams: Vec<SocketAddr>,

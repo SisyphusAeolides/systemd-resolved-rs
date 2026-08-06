@@ -32,11 +32,11 @@ impl FeatureLevel {
         matches!(self, Self::DnssecOk)
     }
 
+    #[must_use]
     pub const fn lower(self) -> Self {
         match self {
             Self::DnssecOk => Self::Edns0,
-            Self::Edns0 => Self::Udp,
-            Self::Udp => Self::Udp,
+            Self::Edns0 | Self::Udp => Self::Udp,
         }
     }
 }
@@ -328,7 +328,7 @@ fn scan_packet(packet: &[u8]) -> Result<PacketLayout, WireError> {
 
         if record.rr_type == TYPE_OPT {
             if index < additional_start
-                || record.name.canonical_wire() != &[0]
+                || *record.name.canonical_wire() != [0]
                 || layout.opt.is_some()
             {
                 return Err(WireError::InvalidRecord);

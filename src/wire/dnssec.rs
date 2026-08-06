@@ -21,7 +21,7 @@ pub fn root_rrsig_missing(packet: &[u8]) -> Result<bool, WireError> {
     for index in 0..header.total_records() {
         let record = parse_record(packet, offset)?;
         offset = record.next_offset;
-        if record.class != CLASS_IN || record.name.canonical_wire() != &[0] {
+        if record.class != CLASS_IN || *record.name.canonical_wire() != [0] {
             continue;
         }
 
@@ -32,7 +32,7 @@ pub fn root_rrsig_missing(packet: &[u8]) -> Result<bool, WireError> {
             let type_covered = u16::from_be_bytes([record.rdata[0], record.rdata[1]]);
             let signer_offset = checked_end(record.rdata_offset, RRSIG_FIXED_FIELDS_LEN)?;
             let (signer, signature_offset) = read_name(packet, signer_offset)?;
-            if signer.canonical_wire() != &[0] || signature_offset >= record.next_offset {
+            if *signer.canonical_wire() != [0] || signature_offset >= record.next_offset {
                 return Err(WireError::InvalidRecord);
             }
             covered.insert(type_covered);
@@ -50,7 +50,7 @@ pub fn root_rrsig_missing(packet: &[u8]) -> Result<bool, WireError> {
 }
 
 #[cfg(test)]
-mod tests {
+mod dnssec_tests {
     use super::*;
 
     #[test]

@@ -9,7 +9,7 @@ gate at the end of this document passes against the pinned upstream baseline.
 
 - [x] Rust package paths have concrete library and binary sources
 - [x] C and Fortran ABI declarations agree at the repository boundary
-- [ ] current `main` passes Rust 1.74 and stable formatting, Clippy, tests, and release builds
+- [x] current `main` passes Rust 1.74 and stable formatting, Clippy, tests, and release builds
 - [ ] Idris 2 and Agda modules pass with pinned compiler versions
 - [ ] Reproducible release build and package manifest are verified
 
@@ -45,7 +45,7 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] TSIG-bearing response cache exclusion
 - [x] in-answer CNAME and DNAME redirect-chain validation
 - [x] cross-transaction CNAME and DNAME follow-up for high-level lookups with loop detection and the upstream 16-redirect limit
-- [ ] accumulated redirect-chain record reporting and complete redirect flag/error parity
+- [x] accumulated redirect-chain record reporting and complete redirect flag/error parity
 - [x] EDNS0/DO feature negotiation with per-server retry downgrade, exponential recovery grace periods, 1232-byte UDP sizing, and RFC 6975 algorithm signaling
 - [x] root-domain RRSIG omission detection with a persistent per-server DO clamp, allow-downgrade retry, and strict-mode failure
 - [ ] adaptive MTU/fragment-size advertisement, TLS feature levels, and exact upstream retry timing
