@@ -76,6 +76,7 @@ enum DbusError {
     ZBus(zbus::Error),
     NoNameServers(String),
     InvalidReply(String),
+    CNameLoop(String),
     #[dbus_error(name = "NoSuchRR")]
     NoSuchResourceRecord(String),
     NoSuchService(String),
@@ -1124,6 +1125,9 @@ fn map_resolve_error(error: ResolveError) -> DbusError {
         ResolveError::Link(link) => map_link_error(link),
         ResolveError::UnsupportedFamily(_) => DbusError::InvalidArgs(error.to_string()),
         ResolveError::Io(_) => DbusError::NetworkDown(error.to_string()),
+        ResolveError::Wire(crate::wire::WireError::CnameLoop) => {
+            DbusError::CNameLoop(error.to_string())
+        }
         ResolveError::Wire(_) | ResolveError::Protocol(_) => {
             DbusError::InvalidReply(error.to_string())
         }
@@ -1177,5 +1181,11 @@ mod tests {
         assert!(service_owner("printer", "_ipp._tcp", "example.test").is_ok());
         assert!(service_owner("bad.name", "_ipp._tcp", "example.test").is_err());
         assert!(service_owner("printer", "ipp.tcp", "example.test").is_err());
+    }
+
+    #[test]
+    fn cname_loops_keep_the_dbus_error_contract() {
+        let error = map_resolve_error(ResolveError::Wire(crate::wire::WireError::CnameLoop));
+        assert!(matches!(error, DbusError::CNameLoop(_)));
     }
 }
