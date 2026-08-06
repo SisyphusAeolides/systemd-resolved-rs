@@ -91,6 +91,14 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets --all-features --locked
 
+      - name: Repeat transaction coalescing regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            cargo test --locked concurrent_identical_queries_share_one_upstream_transaction
+          done
+
       - name: Build release binaries
         run: cargo build --release --all-features --locked
 
