@@ -7,6 +7,7 @@ pub const DNS_HEADER_LEN: usize = 12;
 pub const CLASS_IN: u16 = 1;
 pub const CLASS_ANY: u16 = 255;
 pub const TYPE_A: u16 = 1;
+pub const TYPE_NS: u16 = 2;
 pub const TYPE_CNAME: u16 = 5;
 pub const TYPE_SOA: u16 = 6;
 pub const TYPE_PTR: u16 = 12;
