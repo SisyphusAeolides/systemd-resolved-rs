@@ -6,6 +6,71 @@ mod test_13_transport_fallback {
     use std::net::TcpListener;
 
     #[test]
+    fn ignores_unrelated_udp_reply_and_uses_path_mtu_payload_size() {
+        let datagram_socket = UdpSocket::bind("127.0.0.1:0").expect("mock UDP bind");
+        let server_address = datagram_socket.local_addr().expect("mock DNS address");
+        datagram_socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("mock UDP timeout");
+
+        let datagram_thread = thread::spawn(move || {
+            let mut buffer = [0; 2048];
+            let (length, peer) = datagram_socket
+                .recv_from(&mut buffer)
+                .expect("mock UDP query");
+            let query = &buffer[..length];
+            let opt = edns::inspect_opt(query)
+                .expect("query OPT")
+                .expect("EDNS query");
+            assert_eq!(opt.udp_payload_size, 65_508);
+
+            let mut unrelated = local_response(
+                query,
+                &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 10))],
+                30,
+            )
+            .expect("unrelated response");
+            unrelated[0..2].copy_from_slice(&0x9999_u16.to_be_bytes());
+            datagram_socket
+                .send_to(&unrelated, peer)
+                .expect("unrelated UDP response");
+
+            let response = local_response(
+                query,
+                &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 11))],
+                30,
+            )
+            .expect("matching response");
+            datagram_socket
+                .send_to(&response, peer)
+                .expect("matching UDP response");
+        });
+
+        let resolver = Resolver::new(Config {
+            upstreams: vec![server_address],
+            fallback_upstreams: Vec::new(),
+            cache: false,
+            attempts: 1,
+            query_timeout: Duration::from_millis(500),
+            read_etc_hosts: false,
+            read_static_records: false,
+            dnssec: ValidationMode::No,
+            ..Config::default()
+        });
+        let query = make_query("udp-filter.example", TYPE_A, 0x7100).expect("client query");
+        let response = resolver
+            .query(&query, QueryMode::Full)
+            .expect("resolver response");
+        let records = extract_address_records(&response, Some(2)).expect("address records");
+        assert_eq!(
+            records.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11))]
+        );
+
+        datagram_thread.join().expect("mock UDP thread");
+    }
+
+    #[test]
     fn truncated_udp_uses_tcp_without_permanently_switching_transport() {
         let stream_listener = TcpListener::bind("127.0.0.1:0").expect("mock TCP bind");
         let server_address = stream_listener.local_addr().expect("mock DNS address");
