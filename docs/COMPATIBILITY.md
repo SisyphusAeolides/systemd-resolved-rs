@@ -46,7 +46,7 @@ The pinned D-Bus signatures live in `compat/`.
 - [ ] cross-transaction CNAME and DNAME follow-up parity
 - [ ] EDNS feature negotiation, downgrade state, and DNS cookies
 - [ ] complete resource-record validation and compression expansion
-- [ ] transaction coalescing
+- [x] concurrent identical transaction coalescing with per-client ID restoration
 - [ ] parallel queries across equivalent scopes
 - [ ] TCP and UDP connection pooling matching upstream behavior
 
