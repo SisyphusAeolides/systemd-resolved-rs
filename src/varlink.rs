@@ -8,10 +8,11 @@ use crate::wire::{
     TYPE_SRV, TYPE_TXT,
 };
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -32,20 +33,28 @@ method ResolveRecord(ifindex: ?int, name: string, class: ?int, type: int, flags:
 pub struct VarlinkServer {
     path: PathBuf,
     resolver: Arc<Resolver>,
+    activated_listener: Option<UnixListener>,
 }
 
 impl VarlinkServer {
-    pub fn new(path: impl Into<PathBuf>, resolver: Arc<Resolver>) -> Self {
-        Self {
+    pub fn new(path: impl Into<PathBuf>, resolver: Arc<Resolver>) -> io::Result<Self> {
+        let activated_listener = take_activated_listener()?;
+        Ok(Self {
             path: path.into(),
             resolver,
-        }
+            activated_listener,
+        })
     }
 
     pub fn run(&self) -> io::Result<()> {
-        prepare_socket_path(&self.path)?;
-        let listener = UnixListener::bind(&self.path)?;
-        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o666))?;
+        let (listener, remove_path) = if let Some(listener) = &self.activated_listener {
+            (listener.try_clone()?, false)
+        } else {
+            prepare_socket_path(&self.path)?;
+            let listener = UnixListener::bind(&self.path)?;
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o666))?;
+            (listener, true)
+        };
         listener.set_nonblocking(true)?;
         while !stop_requested() {
             match listener.accept() {
@@ -66,9 +75,44 @@ impl VarlinkServer {
                 Err(error) => return Err(error),
             }
         }
-        let _ = fs::remove_file(&self.path);
+        if remove_path {
+            let _ = fs::remove_file(&self.path);
+        }
         Ok(())
     }
+}
+
+fn take_activated_listener() -> io::Result<Option<UnixListener>> {
+    let names = env::var("LISTEN_FDNAMES").ok();
+    let count = native::listen_fds()?;
+    let Some(fd) = activated_varlink_fd(count, names.as_deref())? else {
+        return Ok(None);
+    };
+
+    // SAFETY: systemd activation descriptors start at 3; activated_varlink_fd validates
+    // that exactly one descriptor was supplied for this process before ownership moves here.
+    let listener = unsafe { UnixListener::from_raw_fd(fd) };
+    let _ = listener.local_addr()?;
+    Ok(Some(listener))
+}
+
+fn activated_varlink_fd(count: usize, names: Option<&str>) -> io::Result<Option<RawFd>> {
+    if count == 0 {
+        return Ok(None);
+    }
+    if count != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected exactly one activated Varlink descriptor",
+        ));
+    }
+    if matches!(names, Some(name) if !name.is_empty() && name != "varlink") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "activated descriptor is not named varlink",
+        ));
+    }
+    Ok(Some(3))
 }
 
 fn prepare_socket_path(path: &Path) -> io::Result<()> {
@@ -841,6 +885,21 @@ fn invalid_parameter(parameter: &str) -> Value {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn activation_descriptor_selection_is_strict() {
+        assert_eq!(activated_varlink_fd(0, None).expect("no activation"), None);
+        assert_eq!(
+            activated_varlink_fd(1, None).expect("unnamed activation"),
+            Some(3)
+        );
+        assert_eq!(
+            activated_varlink_fd(1, Some("varlink")).expect("named activation"),
+            Some(3)
+        );
+        assert!(activated_varlink_fd(1, Some("other")).is_err());
+        assert!(activated_varlink_fd(2, Some("varlink:other")).is_err());
+    }
 
     #[test]
     fn maintenance_call_requires_privileged_peer() {

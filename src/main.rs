@@ -108,7 +108,7 @@ fn execute() -> Result<(), Box<dyn Error>> {
     let varlink_thread = if options.no_varlink {
         None
     } else {
-        let server = VarlinkServer::new(config.varlink_path.clone(), Arc::clone(&resolver));
+        let server = VarlinkServer::new(config.varlink_path.clone(), Arc::clone(&resolver))?;
         Some(
             thread::Builder::new()
                 .name("resolved-varlink".to_owned())

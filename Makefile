@@ -36,6 +36,7 @@ install: build
 	install -Dm0755 target/release/systemd-resolved $(DESTDIR)$(LIBEXECDIR)/systemd-resolved
 	install -Dm0755 target/release/resolvectl $(DESTDIR)$(PREFIX)/bin/resolvectl
 	install -Dm0644 packaging/systemd/systemd-resolved.service $(DESTDIR)$(UNITDIR)/systemd-resolved.service
+	install -Dm0644 packaging/systemd/systemd-resolved-varlink.socket $(DESTDIR)$(UNITDIR)/systemd-resolved-varlink.socket
 	install -Dm0644 packaging/tmpfiles/systemd-resolved.conf $(DESTDIR)$(TMPFILESDIR)/systemd-resolved.conf
 
 clean:

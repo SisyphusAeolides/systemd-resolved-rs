@@ -91,6 +91,7 @@ The current Makefile installs:
 - `/usr/lib/systemd/systemd-resolved`
 - `/usr/bin/resolvectl`
 - `/usr/lib/systemd/system/systemd-resolved.service`
+- `/usr/lib/systemd/system/systemd-resolved-varlink.socket`
 - `/usr/lib/tmpfiles.d/systemd-resolved.conf`
 
 The service unit expects the standard `systemd-resolve` user. Installation does

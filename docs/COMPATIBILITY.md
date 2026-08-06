@@ -81,7 +81,8 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] hardened service unit and runtime directory
 - [x] privileged port operation through service capabilities
 - [x] bounded Varlink framing and peer-credential checks for maintenance calls
-- [ ] upstream socket-activation contract
+- [x] named `io.systemd.Resolve` Varlink socket activation
+- [ ] monitor socket and complete upstream socket-activation contract
 - [ ] watchdog keepalive
 - [ ] privilege-drop parity when launched directly as root
 - [ ] complete `systemd-resolved` command-line compatibility
