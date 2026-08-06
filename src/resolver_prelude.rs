@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use crate::cache::{Cache, CacheKey};
 use crate::config::{Config, Domain, SupportMode, TlsMode, ValidationMode};
+use crate::edns::{self, FeatureLevel, ServerFeatureState};
 use crate::hosts::Hosts;
 use crate::policy::{choose_server, update_rtt, ServerMetric};
 use crate::routing::{LinkError, LinkState, RouteScope, RoutingTable};
@@ -32,6 +33,7 @@ pub enum QueryMode {
 struct ServerState {
     metric: ServerMetric,
     cooldown_until: Option<Instant>,
+    features: ServerFeatureState,
 }
 
 #[derive(Debug, Default)]
