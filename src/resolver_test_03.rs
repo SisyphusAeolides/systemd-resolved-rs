@@ -20,6 +20,18 @@ mod test_03_synthetic_and_parallel_scopes {
     }
 
     #[test]
+    fn fragmented_edns_udp_retries_over_tcp() {
+        assert!(udp_requires_tcp_retry(false, 1280, FeatureLevel::Edns0));
+        assert!(udp_requires_tcp_retry(
+            false,
+            1280,
+            FeatureLevel::DnssecOk
+        ));
+        assert!(!udp_requires_tcp_retry(false, 1280, FeatureLevel::Udp));
+        assert!(udp_requires_tcp_retry(true, 0, FeatureLevel::Udp));
+    }
+
+    #[test]
     fn equivalent_scopes_dispatch_queries_in_parallel() {
         let first_socket = UdpSocket::bind("127.0.0.1:0").expect("first mock DNS bind");
         let second_socket = UdpSocket::bind("127.0.0.1:0").expect("second mock DNS bind");
