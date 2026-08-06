@@ -3,6 +3,19 @@
 mod tests {
     use super::*;
 
+    fn append_answer(packet: &mut Vec<u8>, owner: &[u8], rr_type: u16, rdata: &[u8]) {
+        packet.extend_from_slice(owner);
+        packet.extend_from_slice(&rr_type.to_be_bytes());
+        packet.extend_from_slice(&CLASS_IN.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(
+            &u16::try_from(rdata.len())
+                .expect("test RDATA length")
+                .to_be_bytes(),
+        );
+        packet.extend_from_slice(rdata);
+    }
+
     #[test]
     fn query_round_trip() {
         let packet = make_query("Example.COM.", TYPE_A, 0x1234).expect("query");
@@ -38,6 +51,79 @@ mod tests {
         assert_eq!(
             extract_addresses(&response, Some(2)).expect("addresses"),
             vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
+        );
+    }
+
+    #[test]
+    fn cname_chain_returns_only_the_canonical_owner_addresses() {
+        let query = make_query("Alias.Example", TYPE_A, 0x1235).expect("query");
+        let end = question_end(&query).expect("question end");
+        let mut response = query[..end].to_vec();
+        response[2..4].copy_from_slice(&(FLAG_QR | FLAG_RA | FLAG_RD).to_be_bytes());
+        response[6..8].copy_from_slice(&3u16.to_be_bytes());
+
+        let canonical = encode_name("Real.Example").expect("canonical name");
+        append_answer(&mut response, &[0xc0, 0x0c], TYPE_CNAME, &canonical);
+        append_answer(
+            &mut response,
+            &encode_name("unrelated.example").expect("unrelated owner"),
+            TYPE_A,
+            &[203, 0, 113, 9],
+        );
+        append_answer(
+            &mut response,
+            &canonical,
+            TYPE_A,
+            &[192, 0, 2, 10],
+        );
+
+        let records = extract_address_records(&response, Some(2)).expect("address records");
+        assert_eq!(records.canonical_name, "Real.Example");
+        assert_eq!(
+            records.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]
+        );
+    }
+
+    #[test]
+    fn cname_loop_is_rejected() {
+        let query = make_query("alias.example", TYPE_A, 0x1236).expect("query");
+        let end = question_end(&query).expect("question end");
+        let mut response = query[..end].to_vec();
+        response[2..4].copy_from_slice(&(FLAG_QR | FLAG_RA | FLAG_RD).to_be_bytes());
+        response[6..8].copy_from_slice(&2u16.to_be_bytes());
+
+        let second = encode_name("second.example").expect("second name");
+        let first = encode_name("alias.example").expect("first name");
+        append_answer(&mut response, &[0xc0, 0x0c], TYPE_CNAME, &second);
+        append_answer(&mut response, &second, TYPE_CNAME, &first);
+
+        assert_eq!(
+            extract_address_records(&response, Some(2)),
+            Err(WireError::InvalidRecord)
+        );
+    }
+
+    #[test]
+    fn cname_owner_cannot_also_hold_address_data() {
+        let query = make_query("alias.example", TYPE_A, 0x1237).expect("query");
+        let end = question_end(&query).expect("question end");
+        let mut response = query[..end].to_vec();
+        response[2..4].copy_from_slice(&(FLAG_QR | FLAG_RA | FLAG_RD).to_be_bytes());
+        response[6..8].copy_from_slice(&2u16.to_be_bytes());
+
+        let canonical = encode_name("real.example").expect("canonical name");
+        append_answer(&mut response, &[0xc0, 0x0c], TYPE_CNAME, &canonical);
+        append_answer(
+            &mut response,
+            &[0xc0, 0x0c],
+            TYPE_A,
+            &[192, 0, 2, 11],
+        );
+
+        assert_eq!(
+            extract_address_records(&response, Some(2)),
+            Err(WireError::InvalidRecord)
         );
     }
 

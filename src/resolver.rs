@@ -4,7 +4,7 @@ use crate::config::Config;
 use crate::hosts::Hosts;
 use crate::policy::{choose_server, update_rtt, ServerMetric};
 use crate::wire::{
-    self, extract_addresses, extract_ptr_names, first_question, local_response, make_query,
+    self, extract_address_records, extract_ptr_names, first_question, local_response, make_query,
     make_query_with_class, response_matches, reverse_name, servfail_for, validate, Header,
     WireError, TYPE_A, TYPE_AAAA, TYPE_PTR,
 };
@@ -291,14 +291,22 @@ impl Resolver {
             _ => return Err(ResolveError::UnsupportedFamily(family)),
         };
         let mut addresses = Vec::new();
+        let mut canonical_name = None;
         let mut last_error = None;
         for &rr_type in types {
             let query = make_query(name, rr_type, self.transaction_id())?;
             match self.query(&query, QueryMode::Full) {
                 Ok(response) => {
-                    for address in
-                        extract_addresses(&response, Some(family).filter(|value| *value != 0))?
-                    {
+                    let response_family = match rr_type {
+                        TYPE_A => Some(2),
+                        TYPE_AAAA => Some(10),
+                        _ => None,
+                    };
+                    let records = extract_address_records(&response, response_family)?;
+                    if !records.addresses.is_empty() && canonical_name.is_none() {
+                        canonical_name = Some(records.canonical_name);
+                    }
+                    for address in records.addresses {
                         if !addresses.contains(&address) {
                             addresses.push(address);
                         }
@@ -312,7 +320,7 @@ impl Resolver {
         }
         Ok(NameLookup {
             addresses,
-            canonical_name: name.trim_end_matches('.').to_owned(),
+            canonical_name: canonical_name.unwrap_or_else(|| name.trim_end_matches('.').to_owned()),
             flags: 0,
         })
     }
@@ -480,9 +488,75 @@ mod tests {
             .query(&query, QueryMode::Full)
             .expect("local response");
         assert_eq!(
-            extract_addresses(&response, Some(2)).expect("address"),
+            wire::extract_addresses(&response, Some(2)).expect("address"),
             vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
         );
+    }
+
+    #[test]
+    fn lookup_name_follows_cname_and_ignores_unrelated_addresses() {
+        use crate::wire::{encode_name, question_end, TYPE_CNAME};
+        use std::thread;
+
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind test DNS server");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set test timeout");
+        let server = socket.local_addr().expect("test DNS server address");
+        let worker = thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            let (length, peer) = socket.recv_from(&mut buffer).expect("receive query");
+            let query = &buffer[..length];
+            let end = question_end(query).expect("question end");
+            let mut response = query[..end].to_vec();
+            response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+            response[6..8].copy_from_slice(&3u16.to_be_bytes());
+            response[8..12].fill(0);
+
+            let canonical = encode_name("real.example.test").expect("canonical name");
+            append_test_answer(&mut response, &[0xc0, 0x0c], TYPE_CNAME, &canonical);
+            append_test_answer(
+                &mut response,
+                &encode_name("unrelated.example.test").expect("unrelated owner"),
+                TYPE_A,
+                &[203, 0, 113, 9],
+            );
+            append_test_answer(&mut response, &canonical, TYPE_A, &[192, 0, 2, 42]);
+            socket.send_to(&response, peer).expect("send DNS response");
+        });
+
+        let config = Config {
+            upstreams: vec![server],
+            fallback_upstreams: Vec::new(),
+            query_timeout: Duration::from_secs(1),
+            attempts: 1,
+            cache: false,
+            read_etc_hosts: false,
+            ..Config::default()
+        };
+        let lookup = Resolver::new(config)
+            .lookup_name("alias.example.test", 2)
+            .expect("CNAME lookup");
+        worker.join().expect("test DNS worker");
+
+        assert_eq!(lookup.canonical_name, "real.example.test");
+        assert_eq!(
+            lookup.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42))]
+        );
+    }
+
+    fn append_test_answer(packet: &mut Vec<u8>, owner: &[u8], rr_type: u16, rdata: &[u8]) {
+        packet.extend_from_slice(owner);
+        packet.extend_from_slice(&rr_type.to_be_bytes());
+        packet.extend_from_slice(&wire::CLASS_IN.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(
+            &u16::try_from(rdata.len())
+                .expect("test RDATA length")
+                .to_be_bytes(),
+        );
+        packet.extend_from_slice(rdata);
     }
 
     #[test]

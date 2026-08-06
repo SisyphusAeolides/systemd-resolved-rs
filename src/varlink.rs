@@ -528,9 +528,10 @@ fn service_question(
             if !service_type_is_valid(service_type) {
                 return None;
             }
-            let owner = match name {
-                Some(name) => format!("{name}.{service_type}.{domain}"),
-                None => format!("{service_type}.{domain}"),
+            let owner = if let Some(name) = name {
+                format!("{name}.{service_type}.{domain}")
+            } else {
+                format!("{service_type}.{domain}")
             };
             (
                 name.map(str::to_owned),
