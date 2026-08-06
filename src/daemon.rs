@@ -44,7 +44,7 @@ pub fn install_signal_handlers() -> io::Result<()> {
     native::install_signal_handlers()
 }
 
-pub fn run_stub(resolver: Arc<Resolver>) -> io::Result<()> {
+pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
     let mut udp_endpoints = Vec::new();
     let mut tcp_endpoints = Vec::new();
     bind_endpoints(
@@ -66,12 +66,12 @@ pub fn run_stub(resolver: Arc<Resolver>) -> io::Result<()> {
     let mut threads = Vec::new();
 
     for index in 0..workers {
-        let resolver = Arc::clone(&resolver);
+        let resolver = Arc::clone(resolver);
         let receiver = Arc::clone(&receiver);
         threads.push(
             thread::Builder::new()
                 .name(format!("resolved-udp-worker-{index}"))
-                .spawn(move || udp_worker(resolver, receiver))?,
+                .spawn(move || udp_worker(&resolver, &receiver))?,
         );
     }
     for (index, endpoint) in udp_endpoints.into_iter().enumerate() {
@@ -79,15 +79,15 @@ pub fn run_stub(resolver: Arc<Resolver>) -> io::Result<()> {
         threads.push(
             thread::Builder::new()
                 .name(format!("resolved-udp-listener-{index}"))
-                .spawn(move || udp_listener(endpoint, sender))?,
+                .spawn(move || udp_listener(&endpoint, &sender))?,
         );
     }
     for (index, endpoint) in tcp_endpoints.into_iter().enumerate() {
-        let resolver = Arc::clone(&resolver);
+        let resolver = Arc::clone(resolver);
         threads.push(
             thread::Builder::new()
                 .name(format!("resolved-tcp-listener-{index}"))
-                .spawn(move || tcp_listener(endpoint, resolver))?,
+                .spawn(move || tcp_listener(&endpoint, &resolver))?,
         );
     }
 
@@ -132,7 +132,7 @@ fn bind_endpoints(
     Ok(())
 }
 
-fn udp_listener(endpoint: UdpEndpoint, sender: SyncSender<UdpJob>) {
+fn udp_listener(endpoint: &UdpEndpoint, sender: &SyncSender<UdpJob>) {
     let mut buffer = vec![0; MAX_UDP_PACKET];
     while !stop_requested() {
         match endpoint.socket.recv_from(&mut buffer) {
@@ -163,11 +163,11 @@ fn udp_listener(endpoint: UdpEndpoint, sender: SyncSender<UdpJob>) {
     }
 }
 
-fn udp_worker(resolver: Arc<Resolver>, receiver: Arc<Mutex<Receiver<UdpJob>>>) {
+fn udp_worker(resolver: &Resolver, receiver: &Mutex<Receiver<UdpJob>>) {
     while !stop_requested() {
         let result = receiver
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .recv_timeout(Duration::from_millis(250));
         let job = match result {
             Ok(job) => job,
@@ -190,16 +190,16 @@ fn udp_worker(resolver: Arc<Resolver>, receiver: Arc<Mutex<Receiver<UdpJob>>>) {
     }
 }
 
-fn tcp_listener(endpoint: TcpEndpoint, resolver: Arc<Resolver>) {
+fn tcp_listener(endpoint: &TcpEndpoint, resolver: &Arc<Resolver>) {
     while !stop_requested() {
         match endpoint.listener.accept() {
             Ok((stream, peer)) => {
-                let resolver = Arc::clone(&resolver);
+                let resolver = Arc::clone(resolver);
                 let mode = endpoint.mode;
                 let _ = thread::Builder::new()
                     .name("resolved-tcp-client".to_owned())
                     .spawn(move || {
-                        if let Err(error) = tcp_client(stream, resolver, mode) {
+                        if let Err(error) = tcp_client(stream, &resolver, mode) {
                             eprintln!("systemd-resolved: TCP client {peer} failed: {error}");
                         }
                     });
@@ -216,7 +216,7 @@ fn tcp_listener(endpoint: TcpEndpoint, resolver: Arc<Resolver>) {
     }
 }
 
-fn tcp_client(mut stream: TcpStream, resolver: Arc<Resolver>, mode: QueryMode) -> io::Result<()> {
+fn tcp_client(mut stream: TcpStream, resolver: &Resolver, mode: QueryMode) -> io::Result<()> {
     stream.set_read_timeout(Some(resolver.config().query_timeout))?;
     stream.set_write_timeout(Some(resolver.config().query_timeout))?;
     for _ in 0..128 {
