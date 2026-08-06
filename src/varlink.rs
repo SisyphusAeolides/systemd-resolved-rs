@@ -48,7 +48,7 @@ impl VarlinkServer {
                     let _ = thread::Builder::new()
                         .name("resolved-varlink-client".to_owned())
                         .spawn(move || {
-                            if let Err(error) = serve_connection(stream, resolver) {
+                            if let Err(error) = serve_connection(stream, &resolver) {
                                 eprintln!("systemd-resolved: Varlink connection failed: {error}");
                             }
                         });
@@ -80,7 +80,7 @@ fn prepare_socket_path(path: &Path) -> io::Result<()> {
     }
 }
 
-fn serve_connection(mut stream: UnixStream, resolver: Arc<Resolver>) -> io::Result<()> {
+fn serve_connection(mut stream: UnixStream, resolver: &Resolver) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     let can_control = native::peer_credentials(stream.as_raw_fd())
         .map(|credentials| credentials.uid == 0)
@@ -118,9 +118,8 @@ pub fn dispatch(input: &str, resolver: &Resolver) -> Value {
 }
 
 fn dispatch_with_access(input: &str, resolver: &Resolver, can_control: bool) -> Value {
-    let request = match json::parse(input) {
-        Ok(value) => value,
-        Err(_) => return invalid_parameter("message"),
+    let Ok(request) = json::parse(input) else {
+        return invalid_parameter("message");
     };
     let Some(method) = request.get("method").and_then(Value::as_str) else {
         return invalid_parameter("method");
@@ -217,7 +216,7 @@ fn resolve_hostname(parameters: &Value, resolver: &Resolver) -> Value {
                 ("flags", Value::Number(i128::from(result.flags))),
             ]))
         }
-        Err(error) => resolver_error(error),
+        Err(error) => resolver_error(&error),
     }
 }
 
@@ -269,11 +268,11 @@ fn resolve_address(parameters: &Value, resolver: &Resolver) -> Value {
             ),
             ("flags", Value::Number(i128::from(result.flags))),
         ])),
-        Err(error) => resolver_error(error),
+        Err(error) => resolver_error(&error),
     }
 }
 
-fn resolve_record(parameters: &Value, resolver: &Resolver) -> Value {
+fn_resolve_record(parameters: &Value, resolver: &Resolver) -> Value {
     let Some(name) = parameters.get("name").and_then(Value::as_str) else {
         return invalid_parameter("name");
     };
@@ -301,7 +300,7 @@ fn resolve_record(parameters: &Value, resolver: &Resolver) -> Value {
 
     let response = match resolver.resolve_record_with_class(name, class, rr_type) {
         Ok(response) => response,
-        Err(error) => return resolver_error(error),
+        Err(error) => return resolver_error(&error),
     };
     let records = match extract_answer_records(&response) {
         Ok(records) if !records.is_empty() => records,
@@ -433,7 +432,7 @@ fn optional_i32(parameters: &Value, key: &str, default: i32) -> Result<i32, Valu
     }
 }
 
-fn resolver_error(error_value: ResolveError) -> Value {
+fn resolver_error(error_value: &ResolveError) -> Value {
     error(error_value.varlink_id())
 }
 
