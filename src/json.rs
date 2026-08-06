@@ -19,7 +19,12 @@ impl Value {
         K: Into<String>,
         I: IntoIterator<Item = (K, Self)>,
     {
-        Self::Object(entries.into_iter().map(|(key, value)| (key.into(), value)).collect())
+        Self::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.into(), value))
+                .collect(),
+        )
     }
 
     pub fn get(&self, key: &str) -> Option<&Self> {
@@ -411,7 +416,10 @@ mod tests {
 
     #[test]
     fn decodes_surrogate_pair() {
-        assert_eq!(parse(r#""\ud83d\ude80""#), Ok(Value::String("🚀".to_owned())));
+        assert_eq!(
+            parse(r#""\ud83d\ude80""#),
+            Ok(Value::String("🚀".to_owned()))
+        );
     }
 
     #[test]

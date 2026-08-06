@@ -9,12 +9,7 @@ extern "C" {
     fn resolved_install_signal_handlers() -> c_int;
     fn resolved_take_reload() -> c_int;
     fn resolved_should_stop() -> c_int;
-    fn resolved_peer_credentials(
-        fd: c_int,
-        pid: *mut u32,
-        uid: *mut u32,
-        gid: *mut u32,
-    ) -> c_int;
+    fn resolved_peer_credentials(fd: c_int, pid: *mut u32, uid: *mut u32, gid: *mut u32) -> c_int;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

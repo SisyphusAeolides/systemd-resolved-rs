@@ -385,10 +385,7 @@ fn apply_server_assignment(
     Ok(())
 }
 
-fn apply_domain_assignment(
-    destination: &mut Vec<Domain>,
-    value: &str,
-) -> Result<(), ConfigError> {
+fn apply_domain_assignment(destination: &mut Vec<Domain>, value: &str) -> Result<(), ConfigError> {
     if value.is_empty() {
         destination.clear();
         return Ok(());
@@ -496,8 +493,7 @@ pub fn discover_resolv_conf(path: &Path) -> Result<Vec<SocketAddr>, ConfigError>
 fn is_local_stub(server: SocketAddr) -> bool {
     match server.ip() {
         IpAddr::V4(address) => {
-            address == Ipv4Addr::new(127, 0, 0, 53)
-                || address == Ipv4Addr::new(127, 0, 0, 54)
+            address == Ipv4Addr::new(127, 0, 0, 53) || address == Ipv4Addr::new(127, 0, 0, 54)
         }
         IpAddr::V6(address) => address.is_loopback(),
     }

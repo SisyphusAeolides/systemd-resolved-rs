@@ -136,9 +136,7 @@ fn dispatch_with_access(input: &str, resolver: &Resolver, can_control: bool) -> 
             ("version", Value::String(crate::VERSION.to_owned())),
             (
                 "url",
-                Value::String(
-                    "https://github.com/SisyphusAeolides/systemd-resolved-rs".to_owned(),
-                ),
+                Value::String("https://github.com/SisyphusAeolides/systemd-resolved-rs".to_owned()),
             ),
             (
                 "interfaces",
@@ -149,9 +147,7 @@ fn dispatch_with_access(input: &str, resolver: &Resolver, can_control: bool) -> 
             ),
         ])),
         "org.varlink.service.GetInterfaceDescription" => {
-            if parameters.get("interface").and_then(Value::as_str)
-                == Some("io.systemd.Resolve")
-            {
+            if parameters.get("interface").and_then(Value::as_str) == Some("io.systemd.Resolve") {
                 success(Value::object([(
                     "description",
                     Value::String(INTERFACE_DESCRIPTION.to_owned()),
@@ -162,12 +158,8 @@ fn dispatch_with_access(input: &str, resolver: &Resolver, can_control: bool) -> 
         }
         "io.systemd.Resolve.ResolveHostname" => resolve_hostname(&parameters, resolver),
         "io.systemd.Resolve.ResolveAddress" => resolve_address(&parameters, resolver),
-        "io.systemd.Resolve.ResolveRecord" => {
-            error("org.varlink.service.MethodNotImplemented")
-        }
-        "io.systemd.Resolve.ResolveService" => {
-            error("org.varlink.service.MethodNotImplemented")
-        }
+        "io.systemd.Resolve.ResolveRecord" => error("org.varlink.service.MethodNotImplemented"),
+        "io.systemd.Resolve.ResolveService" => error("org.varlink.service.MethodNotImplemented"),
         "io.systemd.Resolve.FlushCaches" => control(can_control, || resolver.flush_cache()),
         "io.systemd.Resolve.ResetServerFeatures" => {
             control(can_control, || resolver.reset_server_features())
@@ -280,7 +272,6 @@ fn resolve_address(parameters: &Value, resolver: &Resolver) -> Value {
     }
 }
 
-
 fn control(can_control: bool, operation: impl FnOnce()) -> Value {
     if !can_control {
         return error("org.varlink.service.PermissionDenied");
@@ -296,7 +287,10 @@ fn statistics(resolver: &Resolver) -> Value {
             "transactions",
             Value::Number(i128::from(statistics.transactions)),
         ),
-        ("cacheHits", Value::Number(i128::from(statistics.cache_hits))),
+        (
+            "cacheHits",
+            Value::Number(i128::from(statistics.cache_hits)),
+        ),
         (
             "cacheMisses",
             Value::Number(i128::from(statistics.cache_misses)),

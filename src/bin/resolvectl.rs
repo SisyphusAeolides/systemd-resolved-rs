@@ -61,7 +61,9 @@ fn parse_options() -> Result<Option<Options>, Box<dyn Error>> {
         }
         let (name, inline_value) = argument
             .split_once('=')
-            .map_or((argument.as_str(), None), |(name, value)| (name, Some(value)));
+            .map_or((argument.as_str(), None), |(name, value)| {
+                (name, Some(value))
+            });
         match name {
             "--socket" => {
                 socket = option_value(inline_value, &mut arguments, name)?.into();

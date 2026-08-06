@@ -216,11 +216,7 @@ fn tcp_listener(endpoint: TcpEndpoint, resolver: Arc<Resolver>) {
     }
 }
 
-fn tcp_client(
-    mut stream: TcpStream,
-    resolver: Arc<Resolver>,
-    mode: QueryMode,
-) -> io::Result<()> {
+fn tcp_client(mut stream: TcpStream, resolver: Arc<Resolver>, mode: QueryMode) -> io::Result<()> {
     stream.set_read_timeout(Some(resolver.config().query_timeout))?;
     stream.set_write_timeout(Some(resolver.config().query_timeout))?;
     for _ in 0..128 {
@@ -251,9 +247,8 @@ fn tcp_client(
         let response = resolver
             .query_or_servfail(&query, mode)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let response_length = u16::try_from(response.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "DNS response is too large")
-        })?;
+        let response_length = u16::try_from(response.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DNS response is too large"))?;
         stream.write_all(&response_length.to_be_bytes())?;
         stream.write_all(&response)?;
     }

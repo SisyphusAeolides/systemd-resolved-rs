@@ -183,11 +183,7 @@ impl Resolver {
         Err(last_error.unwrap_or(ResolveError::NoNameServers))
     }
 
-    pub fn query_or_servfail(
-        &self,
-        query: &[u8],
-        mode: QueryMode,
-    ) -> Result<Vec<u8>, WireError> {
+    pub fn query_or_servfail(&self, query: &[u8], mode: QueryMode) -> Result<Vec<u8>, WireError> {
         match self.query(query, mode) {
             Ok(response) => Ok(response),
             Err(_) => servfail_for(query),
@@ -267,11 +263,7 @@ impl Resolver {
         }
     }
 
-    fn exchange_tcp(
-        &self,
-        server: SocketAddr,
-        query: &[u8],
-    ) -> Result<Vec<u8>, ResolveError> {
+    fn exchange_tcp(&self, server: SocketAddr, query: &[u8]) -> Result<Vec<u8>, ResolveError> {
         let length = u16::try_from(query.len())
             .map_err(|_| ResolveError::Protocol("DNS query exceeds the TCP frame limit"))?;
         let mut stream = TcpStream::connect_timeout(&server, self.config.query_timeout)?;
@@ -305,10 +297,9 @@ impl Resolver {
             let query = make_query(name, rr_type, self.transaction_id())?;
             match self.query(&query, QueryMode::Full) {
                 Ok(response) => {
-                    for address in extract_addresses(
-                        &response,
-                        Some(family).filter(|value| *value != 0),
-                    )? {
+                    for address in
+                        extract_addresses(&response, Some(family).filter(|value| *value != 0))?
+                    {
                         if !addresses.contains(&address) {
                             addresses.push(address);
                         }
@@ -337,11 +328,7 @@ impl Resolver {
         }
     }
 
-    pub fn resolve_record(
-        &self,
-        name: &str,
-        rr_type: u16,
-    ) -> Result<Vec<u8>, ResolveError> {
+    pub fn resolve_record(&self, name: &str, rr_type: u16) -> Result<Vec<u8>, ResolveError> {
         let query = make_query(name, rr_type, self.transaction_id())?;
         self.query(&query, QueryMode::Full)
     }
@@ -439,9 +426,7 @@ impl fmt::Display for ResolveError {
             Self::Io(error) => write!(formatter, "{error}"),
             Self::Wire(error) => write!(formatter, "{error}"),
             Self::NoNameServers => formatter.write_str("no DNS name servers are configured"),
-            Self::NoSuchResourceRecord => {
-                formatter.write_str("no such DNS resource record")
-            }
+            Self::NoSuchResourceRecord => formatter.write_str("no such DNS resource record"),
             Self::UnsupportedFamily(family) => {
                 write!(formatter, "unsupported address family {family}")
             }

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-use crate::wire::{parse_reverse_name, LocalRecord, Question, CLASS_ANY, CLASS_IN, TYPE_A, TYPE_AAAA, TYPE_PTR};
+use crate::wire::{
+    parse_reverse_name, LocalRecord, Question, CLASS_ANY, CLASS_IN, TYPE_A, TYPE_AAAA, TYPE_PTR,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -118,7 +120,10 @@ fn canonical_name(name: &str) -> String {
 fn synthetic_addresses(name: &str) -> Vec<IpAddr> {
     match name {
         "localhost" | "localhost.localdomain" => {
-            vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)]
+            vec![
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ]
         }
         "localhost4" | "localhost4.localdomain4" => vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
         "localhost6" | "localhost6.localdomain6" => vec![IpAddr::V6(Ipv6Addr::LOCALHOST)],

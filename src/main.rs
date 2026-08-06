@@ -140,9 +140,7 @@ fn execute() -> Result<(), Box<dyn Error>> {
 fn parse_servers(values: &[String]) -> Result<Vec<SocketAddr>, Box<dyn Error>> {
     values
         .iter()
-        .map(|value| {
-            parse_server(value).map_err(|error| -> Box<dyn Error> { Box::new(error) })
-        })
+        .map(|value| parse_server(value).map_err(|error| -> Box<dyn Error> { Box::new(error) }))
         .collect()
 }
 
@@ -171,7 +169,9 @@ fn parse_options() -> Result<Option<Options>, Box<dyn Error>> {
     while let Some(argument) = arguments.next() {
         let (name, inline_value) = argument
             .split_once('=')
-            .map_or((argument.as_str(), None), |(name, value)| (name, Some(value)));
+            .map_or((argument.as_str(), None), |(name, value)| {
+                (name, Some(value))
+            });
         match name {
             "--config" => {
                 options.config = option_value(inline_value, &mut arguments, name)?.into();
@@ -199,15 +199,12 @@ fn parse_options() -> Result<Option<Options>, Box<dyn Error>> {
                     Some(option_value(inline_value, &mut arguments, name)?.into());
             }
             "--workers" => {
-                options.workers = Some(
-                    option_value(inline_value, &mut arguments, name)?
-                        .parse::<usize>()?,
-                );
+                options.workers =
+                    Some(option_value(inline_value, &mut arguments, name)?.parse::<usize>()?);
             }
             "--port" => {
-                options.port = Some(
-                    option_value(inline_value, &mut arguments, name)?.parse::<u16>()?,
-                );
+                options.port =
+                    Some(option_value(inline_value, &mut arguments, name)?.parse::<u16>()?);
             }
             "--check-config" => options.check_config = true,
             "--no-stub" => options.no_stub = true,

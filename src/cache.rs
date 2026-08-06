@@ -49,7 +49,9 @@ impl Cache {
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn get(&self, key: &CacheKey, id: u16, allow_stale: bool) -> Option<Vec<u8>> {
@@ -87,9 +89,7 @@ impl Cache {
 
         let now = Instant::now();
         let expires = now.checked_add(ttl).unwrap_or(now);
-        let stale_until = expires
-            .checked_add(self.stale_retention)
-            .unwrap_or(expires);
+        let stale_until = expires.checked_add(self.stale_retention).unwrap_or(expires);
         let mut packet = response.to_vec();
         rewrite_id(&mut packet, 0)?;
 
@@ -153,12 +153,8 @@ mod tests {
     fn rewrites_transaction_identity() {
         let cache = Cache::new(16, Duration::from_secs(60), Duration::ZERO);
         let query = make_query("example", TYPE_A, 7).expect("query");
-        let response = local_response(
-            &query,
-            &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))],
-            30,
-        )
-        .expect("response");
+        let response = local_response(&query, &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))], 30)
+            .expect("response");
         assert!(cache.insert(key(), &response).expect("cache insert"));
         let hit = cache.get(&key(), 99, false).expect("cache hit");
         assert_eq!(&hit[..2], &99u16.to_be_bytes());
@@ -168,12 +164,8 @@ mod tests {
     fn capacity_is_enforced() {
         let cache = Cache::new(1, Duration::from_secs(60), Duration::ZERO);
         let query = make_query("example", TYPE_A, 7).expect("query");
-        let response = local_response(
-            &query,
-            &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))],
-            30,
-        )
-        .expect("response");
+        let response = local_response(&query, &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))], 30)
+            .expect("response");
         assert!(cache.insert(key(), &response).expect("first insert"));
         let mut second = key();
         second.name = vec![6, b's', b'e', b'c', b'o', b'n', b'd', 0];
