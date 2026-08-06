@@ -89,6 +89,7 @@ impl Config {
             "DNSSEC" => self.dnssec = ValidationMode::parse(value)?,
             "DNSOverTLS" => self.dns_over_tls = TlsMode::parse(value)?,
             "ReadEtcHosts" => self.read_etc_hosts = parse_bool(value)?,
+            "ReadStaticRecords" => self.read_static_records = parse_bool(value)?,
             "ResolveUnicastSingleLabel" => {
                 self.resolve_unicast_single_label = parse_bool(value)?;
             }

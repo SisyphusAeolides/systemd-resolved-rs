@@ -13,7 +13,8 @@ mod tests {
                  Domains=example.test ~corp.test\n\
                  Cache=no\n\
                  DNSCacheSize=128\n\
-                 ReadEtcHosts=no\n",
+                 ReadEtcHosts=no\n\
+                 ReadStaticRecords=no\n",
             )
             .expect("configuration");
         assert_eq!(config.upstreams.len(), 2);
@@ -21,6 +22,7 @@ mod tests {
         assert!(!config.cache);
         assert_eq!(config.cache_size, 128);
         assert!(!config.read_etc_hosts);
+        assert!(!config.read_static_records);
     }
 
     #[test]
