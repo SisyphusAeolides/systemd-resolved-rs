@@ -366,11 +366,14 @@ fn parse_options(rdata: &[u8]) -> Result<Vec<EdnsOption>, WireError> {
         let end = header_end
             .checked_add(length)
             .ok_or(WireError::InvalidRecord)?;
-        let data = rdata
+        let option_data = rdata
             .get(header_end..end)
             .ok_or(WireError::InvalidRecord)?
             .to_vec();
-        options.push(EdnsOption { code, data });
+        options.push(EdnsOption {
+            code,
+            data: option_data,
+        });
         offset = end;
     }
     Ok(options)
