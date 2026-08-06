@@ -1,51 +1,64 @@
 # Architecture
 
 This project is one resolver assembled from five implementation languages.
-Language boundaries are deliberately narrow and testable.
+Language boundaries are narrow, explicit, and versioned through stable files or
+the C ABI. A language component is not considered part of runtime policy until
+the Rust orchestration layer calls it and a differential test covers the call.
 
 ## Rust
 
-Rust owns the daemon lifecycle, DNS wire parser, cache, hosts database,
-upstream transports, local stub listeners, generated resolver files, and
-command-line programs. The core uses the standard library so the initial
-trusted dependency set remains small.
+Rust owns the daemon lifecycle, DNS wire parser, cache, hosts database, upstream
+transports, local stub listeners, generated resolver files, Varlink server, and
+command-line programs. The current runtime uses only the standard library.
 
 ## C
 
-C owns Linux ABI details that are awkward to express without a libc crate:
-signal installation, systemd notification datagrams, inherited descriptor
-metadata, Unix peer credentials, and future netlink/capability operations.
-All calls use the stable C ABI declared in `ffi/native.h`.
+C owns Linux ABI details that are awkward to express without an external libc
+crate: signal installation, systemd notification datagrams, inherited descriptor
+metadata, Unix peer credentials, and future netlink and capability operations.
+All calls use the stable declarations in `ffi/native.h`; unsafe Rust is confined
+to `src/native.rs`.
 
 ## Fortran
 
-Fortran owns deterministic route scoring. The implementation performs
-case-insensitive DNS suffix matching and returns a stable score used when
-selecting the longest matching routing domain. It is compiled into the daemon,
-not stored as an example.
+Fortran provides a deterministic DNS routing-domain scoring function with a C
+ABI. It performs case-insensitive suffix matching and stable tie breaking. The
+object is built with the default Cargo feature. Full runtime use remains blocked
+on the per-link scope model, because selecting a domain without associating it
+with a link and server set would not implement split DNS correctly.
 
 ## Idris
 
-Idris defines the total resolver-policy model: legal query classes and types,
-single-label routing, `.local` routing, and TTL aging witnesses. The model is
-the source for future generated policy tables once runtime policy parity is
-complete.
+Idris defines a total resolver-policy model for legal query classes and types,
+single-label routing, `.local` routing, and TTL aging witnesses. It is a checked
+specification source; generated runtime policy tables are a later parity gate.
 
 ## Agda
 
-Agda carries proof-oriented wire invariants. The first module proves that a
-compression pointer cannot point to itself when every pointer step decreases,
-and makes the DNS label-count bound explicit. Later modules will cover packet
-cursor bounds, cache monotonicity, and routing maximality.
+Agda carries proof-oriented wire invariants. The current module expresses DNS
+label-count bounds, decreasing compression-pointer steps, and non-increasing TTL
+results. Packet-cursor, cache, routing-maximality, and extraction proofs remain
+planned.
 
-## Runtime flow
+## Current runtime flow
 
-1. Parse `resolved.conf` and drop-ins.
-2. Load `/etc/hosts` and build routing state.
-3. Bind full and proxy UDP/TCP stubs.
-4. Parse and validate each request before local processing.
-5. Answer synthetic and hosts records on the full stub.
-6. Consult the generation-isolated TTL-aware cache.
-7. Select upstreams by the longest matching routing domain.
-8. Forward over UDP and retry over TCP when the response is truncated.
-9. Validate response identity and question before returning or caching it.
+1. Parse `resolved.conf` and selected drop-ins.
+2. Discover non-stub uplinks from `/etc/resolv.conf` when needed.
+3. Load `/etc/hosts` and synthetic local records.
+4. Bind full and proxy UDP/TCP stubs.
+5. Parse and validate each request before local processing.
+6. Answer full-stub synthetic and hosts records.
+7. Consult the bounded, TTL-aware global cache.
+8. Select a global upstream using failure cooldown and smoothed latency.
+9. Forward over UDP and retry over TCP after truncation.
+10. Validate response identity and question before returning or caching it.
+11. Serve the implemented Varlink methods from a bounded local socket.
+
+## Target runtime flow
+
+Drop-in parity additionally requires live netlink link state, per-link DNS
+servers and routing domains, maximal-suffix scope selection, parallel equivalent
+scopes, LLMNR and mDNS scopes, DNSSEC validation, DNS-over-TLS transport state,
+DNS-SD, D-Bus objects, monitor streams, and upstream-compatible authorization.
+Those components must share one transaction graph rather than operate as
+independent forwarding paths.

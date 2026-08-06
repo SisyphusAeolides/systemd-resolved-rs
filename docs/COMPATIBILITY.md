@@ -1,41 +1,51 @@
 # Compatibility ledger
 
-A check mark means the behavior is implemented and covered by a local test.
-An open box is a required parity gate. The project must not be described as a
-drop-in replacement until every required gate is closed against the pinned
-upstream integration suite.
+A checked item means a concrete implementation exists in the current tree. It
+does not, by itself, establish complete upstream parity or sufficient test coverage. The project must not be
+described or installed as a drop-in replacement until every release-validation
+gate at the end of this document passes against the pinned upstream baseline.
+
+## Build integrity
+
+- [x] Rust package paths have concrete library and binary sources
+- [x] C and Fortran ABI declarations agree at the repository boundary
+- [ ] Rust formatting, Clippy, and all-target test suite pass in the release environment
+- [ ] Idris 2 and Agda modules pass with pinned compiler versions
+- [ ] Reproducible release build and package manifest are verified
 
 ## Local resolver interfaces
 
-The pinned D-Bus signature manifests live in `compat/`.
+The pinned D-Bus signatures live in `compat/`.
 
-- [x] UDP DNS listener on 127.0.0.53
-- [x] TCP DNS listener on 127.0.0.53
-- [x] Proxy-mode UDP/TCP listener on 127.0.0.54
-- [x] Generated stub and uplink `resolv.conf` files
+- [x] UDP DNS listener on `127.0.0.53`
+- [x] TCP DNS listener on `127.0.0.53`
+- [x] proxy-mode UDP/TCP listener on `127.0.0.54`
+- [x] generated stub and uplink `resolv.conf` files
 - [ ] `org.freedesktop.resolve1` D-Bus manager and link objects
-- [ ] `io.systemd.Resolve` Varlink interface
+- [ ] complete `io.systemd.Resolve` Varlink interface
 - [ ] `io.systemd.Resolve.Monitor` Varlink interface
-- [ ] Complete `resolvectl` command and output compatibility
+- [ ] complete `resolvectl` command and output compatibility
 - [ ] NSS integration parity with `nss-resolve`
 
 ## DNS engine
 
-- [x] Bounded DNS name decompression with loop rejection
+- [x] bounded DNS name decompression with loop and forward-pointer rejection
+- [x] request and response section-bound validation
 - [x] A, AAAA, and PTR local answers
 - [x] `/etc/hosts` forward and reverse answers
-- [x] localhost, `_localdnsstub`, and `_localdnsproxy` synthesis
-- [x] UDP forwarding with response identity validation
+- [x] localhost, numeric-address, `_localdnsstub`, and `_localdnsproxy` synthesis
+- [x] UDP forwarding with transaction and question validation
 - [x] TCP fallback after a truncated UDP response
-- [x] Positive and negative cache with TTL aging
+- [x] bounded positive and negative cache with TTL aging
+- [x] RFC 2308 negative lifetime from SOA TTL and MINIMUM
+- [x] optional stale-answer retention with zeroed TTLs
 - [x] TSIG-bearing response cache exclusion
-- [ ] EDNS feature negotiation and downgrade state
-- [ ] DNS cookies and feature-level server state
-- [ ] CNAME/DNAME synthesis and complete RR validation
-- [ ] RFC 2308 negative-cache TTL calculation from SOA MINIMUM
-- [ ] stale-answer retention
+- [ ] EDNS feature negotiation, downgrade state, and DNS cookies
+- [ ] complete CNAME and DNAME processing
+- [ ] complete resource-record validation and compression expansion
 - [ ] transaction coalescing
 - [ ] parallel queries across equivalent scopes
+- [ ] TCP and UDP connection pooling matching upstream behavior
 
 ## Secure and local-link protocols
 
@@ -43,20 +53,21 @@ The pinned D-Bus signature manifests live in `compat/`.
 - [ ] DNS-over-TLS opportunistic and strict modes
 - [ ] LLMNR resolver and responder
 - [ ] MulticastDNS resolver and responder
-- [ ] DNS-SD service registration and browsing
+- [ ] DNS-SD registration and browsing
 
 ## Routing and configuration
 
-- [x] `DNS=`, `FallbackDNS=`, `Domains=`, `Cache=`, `DNSCacheSize=`,
-      `DNSStubListener=`, `ReadEtcHosts=`, and
-      `ResolveUnicastSingleLabel=` parsing
-- [x] longest-suffix route selection
-- [x] route-only domain representation
+- [x] core `resolved.conf` list, boolean, mode, size, and duration parsing
+- [x] layered `resolved.conf.d` file selection
 - [x] global and fallback upstream selection
-- [x] SIGHUP configuration reload
+- [x] route-only and search-domain representation
+- [x] `/etc/resolv.conf` uplink discovery with local-stub exclusion
+- [x] SIGHUP hosts-database reload
+- [ ] live configuration reload parity
 - [ ] per-link DNS state from D-Bus and netlink
+- [ ] longest-suffix routing integrated with per-link scopes
 - [ ] default-route link inference
-- [ ] search-domain candidate expansion
+- [ ] search-domain candidate expansion parity
 - [ ] split-DNS parallel scope behavior
 - [ ] interface binding and scoped IPv6 upstreams
 - [ ] credential-based DNS and search-domain configuration
@@ -66,20 +77,23 @@ The pinned D-Bus signature manifests live in `compat/`.
 
 - [x] systemd readiness, reload, status, and stopping notifications
 - [x] hardened service unit and runtime directory
-- [x] privileged port operation through capabilities
-- [x] authenticated local control socket
+- [x] privileged port operation through service capabilities
+- [x] bounded Varlink framing and peer-credential checks for maintenance calls
 - [ ] upstream socket-activation contract
 - [ ] watchdog keepalive
 - [ ] privilege-drop parity when launched directly as root
 - [ ] complete `systemd-resolved` command-line compatibility
+- [ ] D-Bus policy and authorization parity
 
 ## Required release validation
 
 - [ ] upstream `TEST-75-RESOLVED` passes unmodified
-- [ ] D-Bus introspection is byte-for-byte signature compatible
+- [ ] upstream mDNS and resolver-adjacent unit suites pass unmodified
+- [ ] D-Bus introspection is signature compatible
 - [ ] Varlink schemas and error identifiers match
-- [ ] `resolvectl` behavioral corpus matches
-- [ ] packet parser passes upstream fuzz corpora
+- [ ] `resolvectl` behavioral and output corpus matches
+- [ ] packet parser passes upstream and independent fuzz corpora
 - [ ] sanitizer, Miri, Valgrind, and race-test runs are clean
-- [ ] failover, suspend/resume, network churn, VPN split-DNS, and captive portal
-      scenarios pass
+- [ ] failover, suspend/resume, network churn, VPN split-DNS, and captive-portal scenarios pass
+- [ ] clean install, upgrade, rollback, and recovery procedures pass
+- [ ] no unresolved high- or critical-severity security findings remain
