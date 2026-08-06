@@ -51,15 +51,15 @@ impl Cache {
     fn state(&self) -> MutexGuard<'_, State> {
         self.state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn get(&self, key: &CacheKey, id: u16, allow_stale: bool) -> Option<Vec<u8>> {
         let now = Instant::now();
         let mut state = self.state();
         let entry = state.entries.get(key)?;
-        let stale = now >= entry.expires;
-        if stale && (!allow_stale || now >= entry.stale_until) {
+        let is_stale = now >= entry.expires;
+        if is_stale && (!allow_stale || now >= entry.stale_until) {
             state.entries.remove(key);
             return None;
         }
@@ -67,7 +67,7 @@ impl Cache {
         let elapsed = now.saturating_duration_since(entry.inserted).as_secs();
         let elapsed = u32::try_from(elapsed).unwrap_or(u32::MAX);
         let mut packet = entry.packet.clone();
-        if rewrite_id(&mut packet, id).is_err() || age_ttls(&mut packet, elapsed, stale).is_err() {
+        if rewrite_id(&mut packet, id).is_err() || age_ttls(&mut packet, elapsed, is_stale).is_err() {
             state.entries.remove(key);
             return None;
         }
