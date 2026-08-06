@@ -9,7 +9,7 @@ gate at the end of this document passes against the pinned upstream baseline.
 
 - [x] Rust package paths have concrete library and binary sources
 - [x] C and Fortran ABI declarations agree at the repository boundary
-- [x] Rust formatting, Clippy, tests, and release builds pass on Rust 1.74 and stable
+- [ ] current `main` passes Rust 1.74 and stable formatting, Clippy, tests, and release builds
 - [ ] Idris 2 and Agda modules pass with pinned compiler versions
 - [ ] Reproducible release build and package manifest are verified
 
