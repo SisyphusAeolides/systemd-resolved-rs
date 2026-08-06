@@ -68,6 +68,7 @@ impl Resolver {
             state.cooldown_until = None;
             state.features.reset();
             state.transport.reset();
+            state.missing_root_rrsig = false;
         }
     }
 

@@ -38,6 +38,7 @@ struct ServerState {
     cooldown_until: Option<Instant>,
     features: ServerFeatureState,
     transport: ServerTransportState,
+    missing_root_rrsig: bool,
 }
 
 #[derive(Debug, Default)]

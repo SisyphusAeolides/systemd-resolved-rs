@@ -123,6 +123,14 @@ jobs:
             cargo test --locked test_13_transport_fallback
           done
 
+      - name: Repeat root RRSIG regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            cargo test --locked test_14_root_rrsig_detection
+          done
+
       - name: Build release binaries
         run: cargo build --release --all-features --locked
 

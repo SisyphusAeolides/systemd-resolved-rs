@@ -16,6 +16,7 @@ pub const TYPE_AAAA: u16 = 28;
 pub const TYPE_SRV: u16 = 33;
 pub const TYPE_DNAME: u16 = 39;
 pub const TYPE_OPT: u16 = 41;
+pub const TYPE_RRSIG: u16 = 46;
 pub const TYPE_TSIG: u16 = 250;
 pub const TYPE_ANY: u16 = 255;
 
@@ -206,5 +207,6 @@ impl Error for WireError {}
 include!("wire/codec.rs");
 include!("wire/packet.rs");
 include!("wire/records.rs");
+include!("wire/dnssec.rs");
 include!("wire/redirects.rs");
 include!("wire/tests.rs");

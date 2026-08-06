@@ -21,7 +21,7 @@ impl Resolver {
         server: SocketAddr,
         query: &[u8],
     ) -> Result<Vec<u8>, ResolveError> {
-        let best_level = self.preferred_feature_level();
+        let configured_best_level = self.preferred_feature_level();
         let mut forced_level = None;
         let mut rcode_probe = false;
         let mut feature_retries = 0usize;
@@ -31,6 +31,13 @@ impl Resolver {
             let (level, transport) = {
                 let mut states = self.states();
                 let state = states.entry(server).or_default();
+                let best_level = if state.missing_root_rrsig
+                    && self.config.dnssec != ValidationMode::Yes
+                {
+                    FeatureLevel::Edns0
+                } else {
+                    configured_best_level
+                };
                 let level = forced_level.unwrap_or_else(|| {
                     state
                         .features
@@ -181,6 +188,27 @@ impl Resolver {
                 }
             }
 
+            if outbound.managed_opt
+                && level.dnssec_ok()
+                && wire::root_rrsig_missing(&response)?
+            {
+                let allow_downgrade = self.config.dnssec != ValidationMode::Yes;
+                let lower = self.record_missing_root_rrsig(server, allow_downgrade);
+                if !allow_downgrade {
+                    return Err(ResolveError::Protocol(
+                        "DNS server omitted required root RRSIG records",
+                    ));
+                }
+                if feature_retries < MAX_FEATURE_RETRIES {
+                    feature_retries += 1;
+                    forced_level = Some(lower);
+                    continue;
+                }
+                return Err(ResolveError::Protocol(
+                    "DNS server repeatedly omitted required root RRSIG records",
+                ));
+            }
+
             if rcode_requests_feature_downgrade(rcode)
                 && level > FeatureLevel::Udp
                 && self.config.dnssec != ValidationMode::Yes
@@ -224,6 +252,23 @@ impl Resolver {
         let lower = state.features.record_do_off(level, Instant::now());
         state.transport.clear_failures();
         lower
+    }
+
+    fn record_missing_root_rrsig(
+        &self,
+        server: SocketAddr,
+        allow_downgrade: bool,
+    ) -> FeatureLevel {
+        let mut states = self.states();
+        let state = states.entry(server).or_default();
+        state.missing_root_rrsig = true;
+        if allow_downgrade {
+            state
+                .features
+                .downgrade_to(FeatureLevel::Edns0, Instant::now());
+            state.transport.clear_failures();
+        }
+        FeatureLevel::Edns0
     }
 
     fn downgrade_feature(&self, server: SocketAddr, level: FeatureLevel) {
