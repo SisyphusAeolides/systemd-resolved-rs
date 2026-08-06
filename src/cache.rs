@@ -10,6 +10,7 @@ pub struct CacheKey {
     pub rr_type: u16,
     pub class: u16,
     pub checking_disabled: bool,
+    pub route: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -147,6 +148,7 @@ mod tests {
             rr_type: TYPE_A,
             class: 1,
             checking_disabled: false,
+            route: 0,
         }
     }
 

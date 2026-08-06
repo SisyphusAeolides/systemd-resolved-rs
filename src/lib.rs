@@ -16,6 +16,7 @@ pub mod json;
 pub mod native;
 pub mod policy;
 pub mod resolver;
+pub mod routing;
 pub mod varlink;
 pub mod wire;
 

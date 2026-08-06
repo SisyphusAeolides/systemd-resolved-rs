@@ -1,20 +1,23 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use crate::cache::{Cache, CacheKey};
-use crate::config::{Config, Domain};
+use crate::config::{Config, Domain, SupportMode, TlsMode, ValidationMode};
 use crate::hosts::Hosts;
 use crate::policy::{choose_server, update_rtt, ServerMetric};
+use crate::routing::{LinkError, LinkState, RouteScope, RoutingTable};
 use crate::wire::{
     self, extract_address_records, extract_ptr_names, first_question, local_response, make_query,
     make_query_with_class, response_matches, reverse_name, servfail_for, validate, Header,
     WireError, TYPE_A, TYPE_AAAA, TYPE_PTR,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,7 +26,7 @@ pub enum QueryMode {
     Proxy,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ServerState {
     metric: ServerMetric,
     cooldown_until: Option<Instant>,
@@ -51,8 +54,11 @@ pub struct ResolverStats {
 #[derive(Debug)]
 pub struct Resolver {
     config: Config,
-    servers: Vec<SocketAddr>,
-    states: Mutex<Vec<ServerState>>,
+    global_servers: Vec<SocketAddr>,
+    fallback_servers: Vec<SocketAddr>,
+    states: Mutex<HashMap<SocketAddr, ServerState>>,
+    routing: RwLock<RoutingTable>,
+    routing_generation: AtomicU64,
     cache: Cache,
     hosts: RwLock<Hosts>,
     next_id: AtomicU16,
@@ -61,14 +67,12 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new(config: Config) -> Self {
-        let servers = config.effective_upstreams();
-        let states = servers
-            .iter()
-            .map(|_| ServerState {
-                metric: ServerMetric::default(),
-                cooldown_until: None,
-            })
-            .collect();
+        let global_servers = config.configured_upstreams();
+        let fallback_servers = config.configured_fallback_upstreams();
+        let mut states = HashMap::new();
+        for server in global_servers.iter().chain(fallback_servers.iter()) {
+            states.entry(*server).or_default();
+        }
         let hosts = if config.read_etc_hosts {
             Hosts::load(&config.hosts_path).unwrap_or_default()
         } else {
@@ -81,8 +85,11 @@ impl Resolver {
                 config.stale_retention,
             ),
             config,
-            servers,
+            global_servers,
+            fallback_servers,
             states: Mutex::new(states),
+            routing: RwLock::new(RoutingTable::default()),
+            routing_generation: AtomicU64::new(1),
             hosts: RwLock::new(hosts),
             next_id: AtomicU16::new(1),
             counters: Counters::default(),
@@ -93,10 +100,109 @@ impl Resolver {
         &self.config
     }
 
-    fn states(&self) -> MutexGuard<'_, Vec<ServerState>> {
+    fn states(&self) -> MutexGuard<'_, HashMap<SocketAddr, ServerState>> {
         self.states
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn routing(&self) -> RwLockReadGuard<'_, RoutingTable> {
+        self.routing
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn routing_mut(&self) -> RwLockWriteGuard<'_, RoutingTable> {
+        self.routing
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub fn links(&self) -> Vec<LinkState> {
+        self.routing().links()
+    }
+
+    pub fn link(&self, ifindex: i32) -> Option<LinkState> {
+        self.routing().link(ifindex)
+    }
+
+    pub fn set_link_dns(&self, ifindex: i32, servers: Vec<SocketAddr>) -> Result<(), LinkError> {
+        let changed = self.routing_mut().set_dns(ifindex, servers)?;
+        self.finish_routing_change(changed);
+        Ok(())
+    }
+
+    pub fn set_link_domains(&self, ifindex: i32, domains: Vec<Domain>) -> Result<(), LinkError> {
+        let changed = self.routing_mut().set_domains(ifindex, domains)?;
+        self.finish_routing_change(changed);
+        Ok(())
+    }
+
+    pub fn set_link_default_route(
+        &self,
+        ifindex: i32,
+        default_route: Option<bool>,
+    ) -> Result<(), LinkError> {
+        let changed = self
+            .routing_mut()
+            .set_default_route(ifindex, default_route)?;
+        self.finish_routing_change(changed);
+        Ok(())
+    }
+
+    pub fn set_link_llmnr(&self, ifindex: i32, mode: SupportMode) -> Result<(), LinkError> {
+        let changed = self.routing_mut().set_llmnr(ifindex, mode)?;
+        self.finish_routing_change(changed);
+        Ok(())
+    }
+
+    pub fn set_link_multicast_dns(&self, ifindex: i32, mode: SupportMode) -> Result<(), LinkError> {
+        let changed = self.routing_mut().set_multicast_dns(ifindex, mode)?;
+        self.finish_routing_change(changed);
+        Ok(())
+    }
+
+    pub fn set_link_dns_over_tls(&self, ifindex: i32, mode: TlsMode) -> Result<(), LinkError> {
+        let changed = self.routing_mut().set_dns_over_tls(ifindex, mode)?;
+        self.finish_routing_change(changed);
+        Ok(())
+    }
+
+    pub fn set_link_dnssec(&self, ifindex: i32, mode: ValidationMode) -> Result<(), LinkError> {
+        let changed = self.routing_mut().set_dnssec(ifindex, mode)?;
+        self.finish_routing_change(changed);
+        Ok(())
+    }
+
+    pub fn set_link_dnssec_negative_trust_anchors(
+        &self,
+        ifindex: i32,
+        anchors: Vec<String>,
+    ) -> Result<(), LinkError> {
+        let changed = self
+            .routing_mut()
+            .set_dnssec_negative_trust_anchors(ifindex, anchors)?;
+        self.finish_routing_change(changed);
+        Ok(())
+    }
+
+    pub fn revert_link(&self, ifindex: i32) -> Result<(), LinkError> {
+        let changed = self.routing_mut().revert(ifindex)?;
+        self.finish_routing_change(changed);
+        Ok(())
+    }
+
+    fn finish_routing_change(&self, changed: bool) {
+        if changed {
+            self.routing_generation.fetch_add(1, Ordering::AcqRel);
+            self.cache.flush();
+        }
+    }
+
+    fn search_domains(&self, ifindex: Option<i32>) -> Result<Vec<Domain>, ResolveError> {
+        Ok(self
+            .routing()
+            .search_domains(&self.config.domains, ifindex)?)
     }
 
     fn hosts(&self) -> RwLockReadGuard<'_, Hosts> {
@@ -116,9 +222,21 @@ impl Resolver {
     }
 
     pub fn query(&self, query: &[u8], mode: QueryMode) -> Result<Vec<u8>, ResolveError> {
+        self.query_on_link(query, mode, None)
+    }
+
+    pub fn query_on_link(
+        &self,
+        query: &[u8],
+        mode: QueryMode,
+        ifindex: Option<i32>,
+    ) -> Result<Vec<u8>, ResolveError> {
         validate(query, false)?;
         let header = Header::parse(query)?;
         let question = first_question(query)?;
+        if let Some(ifindex) = ifindex.filter(|value| *value < 0) {
+            return Err(LinkError::InvalidIfindex(ifindex).into());
+        }
         self.counters.transactions.fetch_add(1, Ordering::Relaxed);
 
         if mode == QueryMode::Full {
@@ -128,11 +246,14 @@ impl Resolver {
             }
         }
 
+        let route_generation = self.routing_generation.load(Ordering::Acquire);
+        let route = route_cache_id(route_generation, ifindex);
         let key = CacheKey {
             name: question.name.canonical_wire().to_vec(),
             rr_type: question.rr_type,
             class: question.class,
             checking_disabled: header.checking_disabled(),
+            route,
         };
         if self.config.cache {
             if let Some(response) = self.cache.get(&key, header.id, false) {
@@ -142,45 +263,36 @@ impl Resolver {
             self.counters.cache_misses.fetch_add(1, Ordering::Relaxed);
         }
 
-        if self.servers.is_empty() {
+        let scopes = self.routing().select(
+            question.name.text(),
+            ifindex,
+            &self.global_servers,
+            &self.fallback_servers,
+            &self.config.domains,
+        )?;
+        if scopes.is_empty() {
             self.counters.failures.fetch_add(1, Ordering::Relaxed);
             return Err(ResolveError::NoNameServers);
         }
 
-        let mut attempted = HashSet::new();
-        let mut last_error = None;
-        for _ in 0..self.config.attempts {
-            if attempted.len() == self.servers.len() {
-                attempted.clear();
+        match self.query_scopes(&scopes, query) {
+            Ok(response) => {
+                if self.config.cache {
+                    let _ = self.cache.insert(key, &response);
+                }
+                Ok(response)
             }
-            let Some(index) = self.select_server(&attempted) else {
-                break;
-            };
-            attempted.insert(index);
-            let started = Instant::now();
-            match self.exchange(self.servers[index], query) {
-                Ok(response) => {
-                    self.record_success(index, started.elapsed());
-                    if self.config.cache {
-                        let _ = self.cache.insert(key.clone(), &response);
+            Err(error) => {
+                if self.config.cache {
+                    if let Some(response) = self.cache.get(&key, header.id, true) {
+                        self.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
+                        return Ok(response);
                     }
-                    return Ok(response);
                 }
-                Err(error) => {
-                    self.record_failure(index, started.elapsed());
-                    last_error = Some(error);
-                }
+                self.counters.failures.fetch_add(1, Ordering::Relaxed);
+                Err(error)
             }
         }
-
-        if self.config.cache {
-            if let Some(response) = self.cache.get(&key, header.id, true) {
-                self.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(response);
-            }
-        }
-        self.counters.failures.fetch_add(1, Ordering::Relaxed);
-        Err(last_error.unwrap_or(ResolveError::NoNameServers))
     }
 
     pub fn query_or_servfail(&self, query: &[u8], mode: QueryMode) -> Result<Vec<u8>, WireError> {
@@ -190,31 +302,101 @@ impl Resolver {
         }
     }
 
-    fn select_server(&self, attempted: &HashSet<usize>) -> Option<usize> {
+    fn query_scopes(&self, scopes: &[RouteScope], query: &[u8]) -> Result<Vec<u8>, ResolveError> {
+        if scopes.len() == 1 {
+            return self.query_servers(&scopes[0].servers, query);
+        }
+
+        thread::scope(|thread_scope| {
+            let (sender, receiver) = mpsc::channel();
+            for route_scope in scopes {
+                let sender = sender.clone();
+                thread_scope.spawn(move || {
+                    let _ = sender.send(self.query_servers(&route_scope.servers, query));
+                });
+            }
+            drop(sender);
+
+            let mut first_success = None;
+            let mut last_response = None;
+            let mut last_error = None;
+            for result in receiver {
+                match result {
+                    Ok(response) if response_is_success(&response) => {
+                        if first_success.is_none() {
+                            first_success = Some(response);
+                        }
+                    }
+                    Ok(response) => last_response = Some(response),
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            if let Some(response) = first_success.or(last_response) {
+                Ok(response)
+            } else {
+                Err(last_error.unwrap_or(ResolveError::NoNameServers))
+            }
+        })
+    }
+
+    fn query_servers(&self, servers: &[SocketAddr], query: &[u8]) -> Result<Vec<u8>, ResolveError> {
+        if servers.is_empty() {
+            return Err(ResolveError::NoNameServers);
+        }
+        let mut attempted = HashSet::new();
+        let mut last_error = None;
+        for _ in 0..self.config.attempts {
+            if attempted.len() == servers.len() {
+                attempted.clear();
+            }
+            let Some(server) = self.select_server(servers, &attempted) else {
+                break;
+            };
+            attempted.insert(server);
+            let started = Instant::now();
+            match self.exchange(server, query) {
+                Ok(response) => {
+                    self.record_success(server, started.elapsed());
+                    return Ok(response);
+                }
+                Err(error) => {
+                    self.record_failure(server, started.elapsed());
+                    last_error = Some(error);
+                }
+            }
+        }
+        Err(last_error.unwrap_or(ResolveError::NoNameServers))
+    }
+
+    fn select_server(
+        &self,
+        servers: &[SocketAddr],
+        attempted: &HashSet<SocketAddr>,
+    ) -> Option<SocketAddr> {
         let now = Instant::now();
-        let states = self.states();
-        let metrics: Vec<_> = states
+        let mut states = self.states();
+        let metrics: Vec<_> = servers
             .iter()
-            .enumerate()
-            .map(|(index, state)| {
+            .map(|server| {
+                let state = states.entry(*server).or_default();
                 let mut metric = state.metric;
                 metric.cooldown_ms = state
                     .cooldown_until
                     .and_then(|until| until.checked_duration_since(now))
                     .map_or(0, duration_milliseconds);
-                if attempted.contains(&index) {
+                if attempted.contains(server) {
                     metric.cooldown_ms = i32::MAX;
                     metric.failures = i32::MAX / 1000;
                 }
                 metric
             })
             .collect();
-        choose_server(&metrics)
+        choose_server(&metrics).map(|index| servers[index])
     }
 
-    fn record_success(&self, index: usize, duration: Duration) {
+    fn record_success(&self, server: SocketAddr, duration: Duration) {
         let mut states = self.states();
-        let state = &mut states[index];
+        let state = states.entry(server).or_default();
         state.metric.round_trip_ms = update_rtt(
             state.metric.round_trip_ms,
             duration.as_secs_f64() * 1000.0,
@@ -224,9 +406,9 @@ impl Resolver {
         state.cooldown_until = None;
     }
 
-    fn record_failure(&self, index: usize, duration: Duration) {
+    fn record_failure(&self, server: SocketAddr, duration: Duration) {
         let mut states = self.states();
-        let state = &mut states[index];
+        let state = states.entry(server).or_default();
         state.metric.round_trip_ms = update_rtt(
             state.metric.round_trip_ms,
             duration.as_secs_f64() * 1000.0,
@@ -284,6 +466,15 @@ impl Resolver {
     }
 
     pub fn lookup_name(&self, name: &str, family: i32) -> Result<NameLookup, ResolveError> {
+        self.lookup_name_on_link(name, family, None)
+    }
+
+    pub fn lookup_name_on_link(
+        &self,
+        name: &str,
+        family: i32,
+        ifindex: Option<i32>,
+    ) -> Result<NameLookup, ResolveError> {
         let types: &[u16] = match family {
             0 => &[TYPE_A, TYPE_AAAA],
             2 => &[TYPE_A],
@@ -291,17 +482,15 @@ impl Resolver {
             _ => return Err(ResolveError::UnsupportedFamily(family)),
         };
         if self.has_local_name(name, types)? {
-            return self.lookup_name_exact(name, types);
+            return self.lookup_name_exact(name, types, ifindex);
         }
 
-        let candidates = lookup_candidates(
-            name,
-            &self.config.domains,
-            self.config.resolve_unicast_single_label,
-        );
+        let domains = self.search_domains(ifindex)?;
+        let candidates =
+            lookup_candidates(name, &domains, self.config.resolve_unicast_single_label);
         let mut last_error = None;
         for candidate in candidates {
-            match self.lookup_name_exact(&candidate, types) {
+            match self.lookup_name_exact(&candidate, types, ifindex) {
                 Ok(result) => return Ok(result),
                 Err(error) => last_error = Some(error),
             }
@@ -321,13 +510,18 @@ impl Resolver {
         Ok(false)
     }
 
-    fn lookup_name_exact(&self, name: &str, types: &[u16]) -> Result<NameLookup, ResolveError> {
+    fn lookup_name_exact(
+        &self,
+        name: &str,
+        types: &[u16],
+        ifindex: Option<i32>,
+    ) -> Result<NameLookup, ResolveError> {
         let mut addresses = Vec::new();
         let mut canonical_name = None;
         let mut last_error = None;
         for &rr_type in types {
             let query = make_query(name, rr_type, self.transaction_id())?;
-            match self.query(&query, QueryMode::Full) {
+            match self.query_on_link(&query, QueryMode::Full, ifindex) {
                 Ok(response) => {
                     let response_family = match rr_type {
                         TYPE_A => Some(2),
@@ -358,8 +552,16 @@ impl Resolver {
     }
 
     pub fn lookup_address(&self, address: IpAddr) -> Result<AddressLookup, ResolveError> {
+        self.lookup_address_on_link(address, None)
+    }
+
+    pub fn lookup_address_on_link(
+        &self,
+        address: IpAddr,
+        ifindex: Option<i32>,
+    ) -> Result<AddressLookup, ResolveError> {
         let query = make_query(&reverse_name(address), TYPE_PTR, self.transaction_id())?;
-        let names = extract_ptr_names(&self.query(&query, QueryMode::Full)?)?;
+        let names = extract_ptr_names(&self.query_on_link(&query, QueryMode::Full, ifindex)?)?;
         if names.is_empty() {
             Err(ResolveError::NoSuchResourceRecord)
         } else {
@@ -377,8 +579,18 @@ impl Resolver {
         class: u16,
         rr_type: u16,
     ) -> Result<Vec<u8>, ResolveError> {
+        self.resolve_record_on_link(name, class, rr_type, None)
+    }
+
+    pub fn resolve_record_on_link(
+        &self,
+        name: &str,
+        class: u16,
+        rr_type: u16,
+        ifindex: Option<i32>,
+    ) -> Result<Vec<u8>, ResolveError> {
         let query = make_query_with_class(name, rr_type, class, self.transaction_id())?;
-        self.query(&query, QueryMode::Full)
+        self.query_on_link(&query, QueryMode::Full, ifindex)
     }
 
     pub fn reload_hosts(&self) -> io::Result<()> {
@@ -396,7 +608,7 @@ impl Resolver {
     }
 
     pub fn reset_server_features(&self) {
-        for state in self.states().iter_mut() {
+        for state in self.states().values_mut() {
             state.metric = ServerMetric::default();
             state.cooldown_until = None;
         }
@@ -455,6 +667,17 @@ fn lookup_candidates(
     candidates
 }
 
+fn response_is_success(response: &[u8]) -> bool {
+    matches!(Header::parse(response), Ok(header) if header.response_code() == 0)
+}
+
+fn route_cache_id(generation: u64, ifindex: Option<i32>) -> u64 {
+    let ifindex = ifindex
+        .and_then(|value| u32::try_from(value).ok())
+        .map_or(0, u64::from);
+    generation.rotate_left(32) ^ ifindex
+}
+
 fn duration_milliseconds(duration: Duration) -> i32 {
     i32::try_from(duration.as_millis()).unwrap_or(i32::MAX)
 }
@@ -476,6 +699,7 @@ pub struct AddressLookup {
 pub enum ResolveError {
     Io(io::Error),
     Wire(WireError),
+    Link(LinkError),
     NoNameServers,
     NoSuchResourceRecord,
     UnsupportedFamily(i32),
@@ -488,6 +712,8 @@ impl ResolveError {
             Self::NoNameServers => "io.systemd.Resolve.NoNameServers",
             Self::NoSuchResourceRecord => "io.systemd.Resolve.NoSuchResourceRecord",
             Self::UnsupportedFamily(_) => "io.systemd.Resolve.BadAddressSize",
+            Self::Link(LinkError::NoSuchLink(_)) => "io.systemd.Resolve.NoSuchLink",
+            Self::Link(_) => "io.systemd.Resolve.InvalidParameter",
             Self::Io(error)
                 if matches!(
                     error.kind(),
@@ -506,6 +732,7 @@ impl fmt::Display for ResolveError {
         match self {
             Self::Io(error) => write!(formatter, "{error}"),
             Self::Wire(error) => write!(formatter, "{error}"),
+            Self::Link(error) => write!(formatter, "{error}"),
             Self::NoNameServers => formatter.write_str("no DNS name servers are configured"),
             Self::NoSuchResourceRecord => formatter.write_str("no such DNS resource record"),
             Self::UnsupportedFamily(family) => {
@@ -521,6 +748,7 @@ impl Error for ResolveError {
         match self {
             Self::Io(error) => Some(error),
             Self::Wire(error) => Some(error),
+            Self::Link(error) => Some(error),
             _ => None,
         }
     }
@@ -535,6 +763,12 @@ impl From<io::Error> for ResolveError {
 impl From<WireError> for ResolveError {
     fn from(error: WireError) -> Self {
         Self::Wire(error)
+    }
+}
+
+impl From<LinkError> for ResolveError {
+    fn from(error: LinkError) -> Self {
+        Self::Link(error)
     }
 }
 
@@ -743,6 +977,171 @@ mod tests {
             vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 77))]
         );
         assert_eq!(lookup.canonical_name, "host.lab.test");
+    }
+
+    #[test]
+    fn longest_suffix_routes_to_the_matching_link() {
+        use crate::wire::question_end;
+        use std::thread;
+
+        let global = UdpSocket::bind("127.0.0.1:0").expect("bind global DNS server");
+        global
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("set global timeout");
+        let link = UdpSocket::bind("127.0.0.1:0").expect("bind link DNS server");
+        link.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set link timeout");
+        let link_address = link.local_addr().expect("link DNS address");
+        let worker = thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            let (length, peer) = link.recv_from(&mut buffer).expect("receive link query");
+            let query = &buffer[..length];
+            let end = question_end(query).expect("question end");
+            let mut response = query[..end].to_vec();
+            response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+            response[6..8].copy_from_slice(&1u16.to_be_bytes());
+            response[8..12].fill(0);
+            append_test_answer(&mut response, &[0xc0, 0x0c], TYPE_A, &[192, 0, 2, 88]);
+            link.send_to(&response, peer).expect("send link response");
+        });
+
+        let config = Config {
+            upstreams: vec![global.local_addr().expect("global DNS address")],
+            fallback_upstreams: Vec::new(),
+            query_timeout: Duration::from_secs(1),
+            attempts: 1,
+            cache: false,
+            read_etc_hosts: false,
+            ..Config::default()
+        };
+        let resolver = Resolver::new(config);
+        resolver
+            .set_link_dns(7, vec![link_address])
+            .expect("set link DNS");
+        resolver
+            .set_link_domains(
+                7,
+                vec![Domain {
+                    name: "corp.example".to_owned(),
+                    route_only: true,
+                }],
+            )
+            .expect("set link domain");
+
+        let lookup = resolver
+            .lookup_name("host.corp.example", 2)
+            .expect("split DNS lookup");
+        worker.join().expect("link DNS worker");
+        assert_eq!(
+            lookup.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 88))]
+        );
+        let mut buffer = [0; 512];
+        assert!(global.recv_from(&mut buffer).is_err());
+    }
+
+    #[test]
+    fn equal_best_scopes_prefer_a_successful_response() {
+        use crate::wire::question_end;
+        use std::thread;
+
+        let negative = UdpSocket::bind("127.0.0.1:0").expect("bind negative DNS server");
+        let negative_address = negative.local_addr().expect("negative DNS address");
+        let positive = UdpSocket::bind("127.0.0.1:0").expect("bind positive DNS server");
+        let positive_address = positive.local_addr().expect("positive DNS address");
+
+        let negative_worker = thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            let (length, peer) = negative
+                .recv_from(&mut buffer)
+                .expect("receive negative query");
+            let query = &buffer[..length];
+            let end = question_end(query).expect("question end");
+            let mut response = query[..end].to_vec();
+            response[2..4].copy_from_slice(&0x8183u16.to_be_bytes());
+            response[6..12].fill(0);
+            negative
+                .send_to(&response, peer)
+                .expect("send negative response");
+        });
+        let positive_worker = thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            let (length, peer) = positive
+                .recv_from(&mut buffer)
+                .expect("receive positive query");
+            let query = &buffer[..length];
+            let end = question_end(query).expect("question end");
+            let mut response = query[..end].to_vec();
+            response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+            response[6..8].copy_from_slice(&1u16.to_be_bytes());
+            response[8..12].fill(0);
+            append_test_answer(&mut response, &[0xc0, 0x0c], TYPE_A, &[192, 0, 2, 99]);
+            positive
+                .send_to(&response, peer)
+                .expect("send positive response");
+        });
+
+        let config = Config {
+            upstreams: Vec::new(),
+            fallback_upstreams: Vec::new(),
+            query_timeout: Duration::from_secs(1),
+            attempts: 1,
+            cache: false,
+            read_etc_hosts: false,
+            ..Config::default()
+        };
+        let resolver = Resolver::new(config);
+        for (ifindex, server) in [(7, negative_address), (8, positive_address)] {
+            resolver
+                .set_link_dns(ifindex, vec![server])
+                .expect("set link DNS");
+            resolver
+                .set_link_domains(
+                    ifindex,
+                    vec![Domain {
+                        name: "corp.example".to_owned(),
+                        route_only: true,
+                    }],
+                )
+                .expect("set link domain");
+        }
+
+        let lookup = resolver
+            .lookup_name("host.corp.example", 2)
+            .expect("parallel split DNS lookup");
+        negative_worker.join().expect("negative DNS worker");
+        positive_worker.join().expect("positive DNS worker");
+        assert_eq!(
+            lookup.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))]
+        );
+    }
+
+    #[test]
+    fn per_link_search_domains_are_available_to_name_expansion() {
+        let resolver = Resolver::new(Config::default());
+        resolver
+            .set_link_domains(
+                9,
+                vec![
+                    Domain {
+                        name: "search.example".to_owned(),
+                        route_only: false,
+                    },
+                    Domain {
+                        name: "route.example".to_owned(),
+                        route_only: true,
+                    },
+                ],
+            )
+            .expect("set link domains");
+        assert_eq!(
+            resolver.search_domains(None).expect("search domains"),
+            vec![Domain {
+                name: "search.example".to_owned(),
+                route_only: false,
+            }]
+        );
     }
 
     #[test]

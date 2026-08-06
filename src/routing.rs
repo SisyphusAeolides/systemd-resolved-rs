@@ -1,0 +1,536 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+use crate::config::{Domain, SupportMode, TlsMode, ValidationMode};
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt;
+use std::net::{SocketAddr, SocketAddrV6};
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ScopeKind {
+    Global,
+    Link(i32),
+    Fallback,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouteScope {
+    pub kind: ScopeKind,
+    pub servers: Vec<SocketAddr>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkState {
+    pub ifindex: i32,
+    pub dns_servers: Vec<SocketAddr>,
+    pub domains: Vec<Domain>,
+    pub default_route: Option<bool>,
+    pub llmnr: SupportMode,
+    pub multicast_dns: SupportMode,
+    pub dns_over_tls: TlsMode,
+    pub dnssec: ValidationMode,
+    pub dnssec_negative_trust_anchors: Vec<String>,
+}
+
+impl LinkState {
+    fn new(ifindex: i32) -> Result<Self, LinkError> {
+        validate_ifindex(ifindex)?;
+        Ok(Self {
+            ifindex,
+            dns_servers: Vec::new(),
+            domains: Vec::new(),
+            default_route: None,
+            llmnr: SupportMode::Yes,
+            multicast_dns: SupportMode::Yes,
+            dns_over_tls: TlsMode::No,
+            dnssec: ValidationMode::AllowDowngrade,
+            dnssec_negative_trust_anchors: Vec::new(),
+        })
+    }
+
+    pub fn effective_default_route(&self) -> bool {
+        self.default_route.unwrap_or(
+            !self
+                .domains
+                .iter()
+                .any(|domain| domain.route_only && domain.name != "."),
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RoutingTable {
+    links: BTreeMap<i32, LinkState>,
+}
+
+impl RoutingTable {
+    pub fn links(&self) -> Vec<LinkState> {
+        self.links.values().cloned().collect()
+    }
+
+    pub fn link(&self, ifindex: i32) -> Option<LinkState> {
+        self.links.get(&ifindex).cloned()
+    }
+
+    pub fn set_dns(&mut self, ifindex: i32, servers: Vec<SocketAddr>) -> Result<bool, LinkError> {
+        let link = self.link_mut(ifindex)?;
+        let mut normalized = Vec::new();
+        for server in servers {
+            let server = normalize_server(ifindex, server);
+            if !normalized.contains(&server) {
+                normalized.push(server);
+            }
+        }
+        if link.dns_servers == normalized {
+            return Ok(false);
+        }
+        link.dns_servers = normalized;
+        Ok(true)
+    }
+
+    pub fn set_domains(&mut self, ifindex: i32, domains: Vec<Domain>) -> Result<bool, LinkError> {
+        let link = self.link_mut(ifindex)?;
+        let mut normalized = Vec::new();
+        for domain in domains {
+            let domain = normalize_domain(&domain)?;
+            if !normalized.contains(&domain) {
+                normalized.push(domain);
+            }
+        }
+        if link.domains == normalized {
+            return Ok(false);
+        }
+        link.domains = normalized;
+        Ok(true)
+    }
+
+    pub fn set_default_route(
+        &mut self,
+        ifindex: i32,
+        default_route: Option<bool>,
+    ) -> Result<bool, LinkError> {
+        let link = self.link_mut(ifindex)?;
+        if link.default_route == default_route {
+            return Ok(false);
+        }
+        link.default_route = default_route;
+        Ok(true)
+    }
+
+    pub fn set_llmnr(&mut self, ifindex: i32, mode: SupportMode) -> Result<bool, LinkError> {
+        let link = self.link_mut(ifindex)?;
+        if link.llmnr == mode {
+            return Ok(false);
+        }
+        link.llmnr = mode;
+        Ok(true)
+    }
+
+    pub fn set_multicast_dns(
+        &mut self,
+        ifindex: i32,
+        mode: SupportMode,
+    ) -> Result<bool, LinkError> {
+        let link = self.link_mut(ifindex)?;
+        if link.multicast_dns == mode {
+            return Ok(false);
+        }
+        link.multicast_dns = mode;
+        Ok(true)
+    }
+
+    pub fn set_dns_over_tls(&mut self, ifindex: i32, mode: TlsMode) -> Result<bool, LinkError> {
+        let link = self.link_mut(ifindex)?;
+        if link.dns_over_tls == mode {
+            return Ok(false);
+        }
+        link.dns_over_tls = mode;
+        Ok(true)
+    }
+
+    pub fn set_dnssec(&mut self, ifindex: i32, mode: ValidationMode) -> Result<bool, LinkError> {
+        let link = self.link_mut(ifindex)?;
+        if link.dnssec == mode {
+            return Ok(false);
+        }
+        link.dnssec = mode;
+        Ok(true)
+    }
+
+    pub fn set_dnssec_negative_trust_anchors(
+        &mut self,
+        ifindex: i32,
+        anchors: Vec<String>,
+    ) -> Result<bool, LinkError> {
+        let link = self.link_mut(ifindex)?;
+        let mut normalized = Vec::new();
+        for anchor in anchors {
+            let anchor = normalize_name(&anchor)?;
+            if !normalized.contains(&anchor) {
+                normalized.push(anchor);
+            }
+        }
+        if link.dnssec_negative_trust_anchors == normalized {
+            return Ok(false);
+        }
+        link.dnssec_negative_trust_anchors = normalized;
+        Ok(true)
+    }
+
+    pub fn revert(&mut self, ifindex: i32) -> Result<bool, LinkError> {
+        validate_ifindex(ifindex)?;
+        Ok(self.links.remove(&ifindex).is_some())
+    }
+
+    pub fn search_domains(
+        &self,
+        global_domains: &[Domain],
+        ifindex: Option<i32>,
+    ) -> Result<Vec<Domain>, LinkError> {
+        let mut domains = Vec::new();
+        if let Some(ifindex) = ifindex.filter(|ifindex| *ifindex != 0) {
+            validate_ifindex(ifindex)?;
+            let link = self
+                .links
+                .get(&ifindex)
+                .ok_or(LinkError::NoSuchLink(ifindex))?;
+            append_search_domains(&mut domains, &link.domains);
+        } else {
+            append_search_domains(&mut domains, global_domains);
+            for link in self.links.values() {
+                append_search_domains(&mut domains, &link.domains);
+            }
+        }
+        Ok(domains)
+    }
+
+    pub fn select(
+        &self,
+        name: &str,
+        ifindex: Option<i32>,
+        global_servers: &[SocketAddr],
+        fallback_servers: &[SocketAddr],
+        global_domains: &[Domain],
+    ) -> Result<Vec<RouteScope>, LinkError> {
+        if let Some(ifindex) = ifindex.filter(|ifindex| *ifindex != 0) {
+            validate_ifindex(ifindex)?;
+            let link = self
+                .links
+                .get(&ifindex)
+                .ok_or(LinkError::NoSuchLink(ifindex))?;
+            if link.dns_servers.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![RouteScope {
+                kind: ScopeKind::Link(ifindex),
+                servers: link.dns_servers.clone(),
+            }]);
+        }
+
+        let name = normalize_name(name)?;
+        let mut matches = Vec::new();
+        if !global_servers.is_empty() {
+            if let Some(labels) = best_domain_match(&name, global_domains) {
+                matches.push((
+                    labels,
+                    RouteScope {
+                        kind: ScopeKind::Global,
+                        servers: global_servers.to_vec(),
+                    },
+                ));
+            }
+        }
+        for link in self.links.values() {
+            if link.dns_servers.is_empty() {
+                continue;
+            }
+            if let Some(labels) = best_domain_match(&name, &link.domains) {
+                matches.push((
+                    labels,
+                    RouteScope {
+                        kind: ScopeKind::Link(link.ifindex),
+                        servers: link.dns_servers.clone(),
+                    },
+                ));
+            }
+        }
+
+        if let Some(best) = matches.iter().map(|(labels, _)| *labels).max() {
+            return Ok(matches
+                .into_iter()
+                .filter_map(|(labels, scope)| (labels == best).then_some(scope))
+                .collect());
+        }
+
+        let mut scopes = Vec::new();
+        if !global_servers.is_empty() {
+            scopes.push(RouteScope {
+                kind: ScopeKind::Global,
+                servers: global_servers.to_vec(),
+            });
+        }
+        for link in self.links.values() {
+            if link.effective_default_route() && !link.dns_servers.is_empty() {
+                scopes.push(RouteScope {
+                    kind: ScopeKind::Link(link.ifindex),
+                    servers: link.dns_servers.clone(),
+                });
+            }
+        }
+        if scopes.is_empty() && !fallback_servers.is_empty() {
+            scopes.push(RouteScope {
+                kind: ScopeKind::Fallback,
+                servers: fallback_servers.to_vec(),
+            });
+        }
+        Ok(scopes)
+    }
+
+    fn link_mut(&mut self, ifindex: i32) -> Result<&mut LinkState, LinkError> {
+        validate_ifindex(ifindex)?;
+        match self.links.entry(ifindex) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => Ok(entry.insert(LinkState::new(ifindex)?)),
+        }
+    }
+}
+
+fn append_search_domains(output: &mut Vec<Domain>, source: &[Domain]) {
+    for domain in source {
+        if domain.route_only || domain.name == "." || output.contains(domain) {
+            continue;
+        }
+        output.push(domain.clone());
+    }
+}
+
+fn validate_ifindex(ifindex: i32) -> Result<(), LinkError> {
+    if ifindex <= 0 {
+        Err(LinkError::InvalidIfindex(ifindex))
+    } else {
+        Ok(())
+    }
+}
+
+fn normalize_server(ifindex: i32, server: SocketAddr) -> SocketAddr {
+    let SocketAddr::V6(server) = server else {
+        return server;
+    };
+    if server.scope_id() != 0 || server.ip().segments()[0] & 0xffc0 != 0xfe80 {
+        return SocketAddr::V6(server);
+    }
+    let Ok(scope_id) = u32::try_from(ifindex) else {
+        return SocketAddr::V6(server);
+    };
+    SocketAddr::V6(SocketAddrV6::new(
+        *server.ip(),
+        server.port(),
+        server.flowinfo(),
+        scope_id,
+    ))
+}
+
+fn normalize_domain(domain: &Domain) -> Result<Domain, LinkError> {
+    Ok(Domain {
+        name: normalize_name(&domain.name)?,
+        route_only: domain.route_only,
+    })
+}
+
+fn normalize_name(name: &str) -> Result<String, LinkError> {
+    let name = name.trim().trim_end_matches('.');
+    if name.is_empty() || name == "~" {
+        return Ok(".".to_owned());
+    }
+    let name = name.strip_prefix('~').unwrap_or(name);
+    if name.is_empty()
+        || !name.is_ascii()
+        || name.len() > 253
+        || name
+            .split('.')
+            .any(|label| label.is_empty() || label.len() > 63)
+    {
+        return Err(LinkError::InvalidDomain(name.to_owned()));
+    }
+    Ok(name.to_ascii_lowercase())
+}
+
+fn best_domain_match(name: &str, domains: &[Domain]) -> Option<usize> {
+    domains
+        .iter()
+        .filter_map(|domain| domain_match_labels(name, &domain.name))
+        .max()
+}
+
+fn domain_match_labels(name: &str, domain: &str) -> Option<usize> {
+    if domain == "." {
+        return Some(0);
+    }
+    if name.eq_ignore_ascii_case(domain)
+        || name
+            .strip_suffix(domain)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+    {
+        Some(domain.split('.').count())
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LinkError {
+    InvalidIfindex(i32),
+    InvalidDomain(String),
+    NoSuchLink(i32),
+}
+
+impl fmt::Display for LinkError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidIfindex(ifindex) => write!(formatter, "invalid interface index {ifindex}"),
+            Self::InvalidDomain(domain) => write!(formatter, "invalid routing domain {domain}"),
+            Self::NoSuchLink(ifindex) => {
+                write!(formatter, "no state exists for interface {ifindex}")
+            }
+        }
+    }
+}
+
+impl Error for LinkError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn server(octet: u8) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet)), 53)
+    }
+
+    fn domain(name: &str, route_only: bool) -> Domain {
+        Domain {
+            name: name.to_owned(),
+            route_only,
+        }
+    }
+
+    #[test]
+    fn longest_suffix_selects_the_vpn_link() {
+        let mut table = RoutingTable::default();
+        table.set_dns(2, vec![server(2)]).expect("link DNS");
+        table
+            .set_domains(2, vec![domain("corp.example", true)])
+            .expect("link domain");
+        table.set_dns(3, vec![server(3)]).expect("link DNS");
+        table
+            .set_domains(3, vec![domain("example", true)])
+            .expect("link domain");
+
+        assert_eq!(
+            table
+                .select("host.corp.example", None, &[server(1)], &[server(9)], &[])
+                .expect("route"),
+            vec![RouteScope {
+                kind: ScopeKind::Link(2),
+                servers: vec![server(2)],
+            }]
+        );
+    }
+
+    #[test]
+    fn equal_best_matches_are_returned_together() {
+        let mut table = RoutingTable::default();
+        for ifindex in [2, 3] {
+            table
+                .set_dns(
+                    ifindex,
+                    vec![server(u8::try_from(ifindex).expect("small index"))],
+                )
+                .expect("link DNS");
+            table
+                .set_domains(ifindex, vec![domain("corp.example", true)])
+                .expect("link domain");
+        }
+        assert_eq!(
+            table
+                .select("host.corp.example", None, &[], &[], &[])
+                .expect("route")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn route_only_domain_disables_implicit_default_route() {
+        let mut table = RoutingTable::default();
+        table.set_dns(2, vec![server(2)]).expect("link DNS");
+        table
+            .set_domains(2, vec![domain("corp.example", true)])
+            .expect("link domain");
+        table.set_dns(3, vec![server(3)]).expect("link DNS");
+
+        assert_eq!(
+            table
+                .select("public.example", None, &[], &[server(9)], &[])
+                .expect("route"),
+            vec![RouteScope {
+                kind: ScopeKind::Link(3),
+                servers: vec![server(3)],
+            }]
+        );
+    }
+
+    #[test]
+    fn root_route_domain_beats_default_route_scopes() {
+        let mut table = RoutingTable::default();
+        table.set_dns(2, vec![server(2)]).expect("link DNS");
+        table
+            .set_domains(2, vec![domain(".", true)])
+            .expect("link domain");
+        table.set_dns(3, vec![server(3)]).expect("link DNS");
+
+        assert_eq!(
+            table
+                .select("public.example", None, &[server(1)], &[server(9)], &[])
+                .expect("route"),
+            vec![RouteScope {
+                kind: ScopeKind::Link(2),
+                servers: vec![server(2)],
+            }]
+        );
+    }
+
+    #[test]
+    fn explicit_interface_restricts_the_route() {
+        let mut table = RoutingTable::default();
+        table.set_dns(7, vec![server(7)]).expect("link DNS");
+        assert_eq!(
+            table
+                .select("example", Some(7), &[server(1)], &[server(9)], &[])
+                .expect("route"),
+            vec![RouteScope {
+                kind: ScopeKind::Link(7),
+                servers: vec![server(7)],
+            }]
+        );
+        assert_eq!(
+            table.select("example", Some(8), &[], &[], &[]),
+            Err(LinkError::NoSuchLink(8))
+        );
+    }
+
+    #[test]
+    fn link_local_ipv6_server_receives_the_interface_scope() {
+        let mut table = RoutingTable::default();
+        let address = SocketAddr::new(
+            IpAddr::V6("fe80::53".parse::<Ipv6Addr>().expect("IPv6 address")),
+            53,
+        );
+        table.set_dns(7, vec![address]).expect("link DNS");
+        let link = table.link(7).expect("link");
+        let SocketAddr::V6(address) = link.dns_servers[0] else {
+            panic!("expected IPv6 server");
+        };
+        assert_eq!(address.scope_id(), 7);
+    }
+}

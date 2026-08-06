@@ -232,11 +232,12 @@ fn resolve_hostname(parameters: &Value, resolver: &Resolver) -> Value {
         Err(error) => return error,
     };
     let ifindex = match optional_i32(parameters, "ifindex", 0) {
-        Ok(value) => value,
+        Ok(value) if value >= 0 => value,
+        Ok(_) => return invalid_parameter("ifindex"),
         Err(error) => return error,
     };
 
-    match resolver.lookup_name(name, family) {
+    match resolver.lookup_name_on_link(name, family, (ifindex > 0).then_some(ifindex)) {
         Ok(result) => {
             let addresses = result
                 .addresses
@@ -280,7 +281,8 @@ fn resolve_address(parameters: &Value, resolver: &Resolver) -> Value {
         Err(error) => return error,
     };
     let ifindex = match optional_i32(parameters, "ifindex", 0) {
-        Ok(value) => value,
+        Ok(value) if value >= 0 => value,
+        Ok(_) => return invalid_parameter("ifindex"),
         Err(error) => return error,
     };
     let Some(octets) = values
@@ -300,7 +302,7 @@ fn resolve_address(parameters: &Value, resolver: &Resolver) -> Value {
         _ => return error("io.systemd.Resolve.BadAddressSize"),
     };
 
-    match resolver.lookup_address(address) {
+    match resolver.lookup_address_on_link(address, (ifindex > 0).then_some(ifindex)) {
         Ok(result) => success(Value::object([
             (
                 "names",
@@ -351,7 +353,12 @@ fn resolve_service(parameters: &Value, resolver: &Resolver) -> Value {
         Ok(request) => request,
         Err(error) => return error,
     };
-    let srv_response = match resolver.resolve_record(&request.question.owner, TYPE_SRV) {
+    let srv_response = match resolver.resolve_record_on_link(
+        &request.question.owner,
+        CLASS_IN,
+        TYPE_SRV,
+        (request.ifindex > 0).then_some(request.ifindex),
+    ) {
         Ok(response) => response,
         Err(error) => return resolver_error(&error),
     };
@@ -446,7 +453,11 @@ fn resolve_service_entries(
             ),
         ]);
         if request.flags & SD_RESOLVED_NO_ADDRESS == 0 {
-            let lookup = match resolver.lookup_name(record.target.text(), request.family) {
+            let lookup = match resolver.lookup_name_on_link(
+                record.target.text(),
+                request.family,
+                (request.ifindex > 0).then_some(request.ifindex),
+            ) {
                 Ok(lookup) => lookup,
                 Err(error) => {
                     last_address_error = Some(error);
@@ -509,7 +520,12 @@ fn add_service_txt(
     if request.flags & SD_RESOLVED_NO_TXT != 0 {
         return Ok(());
     }
-    let response = match resolver.resolve_record(&request.question.owner, TYPE_TXT) {
+    let response = match resolver.resolve_record_on_link(
+        &request.question.owner,
+        CLASS_IN,
+        TYPE_TXT,
+        (request.ifindex > 0).then_some(request.ifindex),
+    ) {
         Ok(response) => response,
         Err(ResolveError::NoSuchResourceRecord) => return Ok(()),
         Err(error) => return Err(resolver_error(&error)),
@@ -710,7 +726,12 @@ fn resolve_record(parameters: &Value, resolver: &Resolver) -> Value {
         Err(error) => return error,
     };
 
-    let response = match resolver.resolve_record_with_class(name, class, rr_type) {
+    let response = match resolver.resolve_record_on_link(
+        name,
+        class,
+        rr_type,
+        (ifindex > 0).then_some(ifindex),
+    ) {
         Ok(response) => response,
         Err(error) => return resolver_error(&error),
     };

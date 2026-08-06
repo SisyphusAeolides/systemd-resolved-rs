@@ -220,19 +220,21 @@ impl Config {
         Ok(())
     }
 
+    pub fn configured_upstreams(&self) -> Vec<SocketAddr> {
+        filtered_servers(&self.upstreams)
+    }
+
+    pub fn configured_fallback_upstreams(&self) -> Vec<SocketAddr> {
+        filtered_servers(&self.fallback_upstreams)
+    }
+
     pub fn effective_upstreams(&self) -> Vec<SocketAddr> {
-        let source = if self.upstreams.is_empty() {
-            &self.fallback_upstreams
+        let upstreams = self.configured_upstreams();
+        if upstreams.is_empty() {
+            self.configured_fallback_upstreams()
         } else {
-            &self.upstreams
-        };
-        let mut output = Vec::new();
-        for server in source {
-            if !is_local_stub(*server) && !output.contains(server) {
-                output.push(*server);
-            }
+            upstreams
         }
-        output
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -488,6 +490,16 @@ pub fn discover_resolv_conf(path: &Path) -> Result<Vec<SocketAddr>, ConfigError>
         }
     }
     Ok(output)
+}
+
+fn filtered_servers(servers: &[SocketAddr]) -> Vec<SocketAddr> {
+    let mut output = Vec::new();
+    for server in servers {
+        if !is_local_stub(*server) && !output.contains(server) {
+            output.push(*server);
+        }
+    }
+    output
 }
 
 fn is_local_stub(server: SocketAddr) -> bool {
