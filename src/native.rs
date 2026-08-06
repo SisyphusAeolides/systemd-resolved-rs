@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use std::ffi::CString;
 use std::io;
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_void};
 
 extern "C" {
     fn resolved_notify(state: *const c_char) -> c_int;
@@ -10,6 +10,21 @@ extern "C" {
     fn resolved_take_reload() -> c_int;
     fn resolved_should_stop() -> c_int;
     fn resolved_peer_credentials(fd: c_int, pid: *mut u32, uid: *mut u32, gid: *mut u32) -> c_int;
+    fn resolved_udp_path_mtu(fd: c_int, ipv6: c_int) -> c_int;
+    fn resolved_udp_enable_recvfragsize(fd: c_int, ipv6: c_int) -> c_int;
+    fn resolved_udp_recv(
+        fd: c_int,
+        buffer: *mut c_void,
+        capacity: usize,
+        fragment_size: *mut u32,
+    ) -> i64;
+    fn resolved_dns_udp_payload_size(
+        path_mtu: u32,
+        ipv6: c_int,
+        loopback: c_int,
+        fragmented: c_int,
+        received_udp_fragment_max: u32,
+    ) -> u16;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +60,61 @@ pub fn notify(state: &str) -> io::Result<bool> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "notification contains NUL"))?;
     // SAFETY: CString guarantees a non-null, NUL-terminated pointer for this call.
     result(unsafe { resolved_notify(state.as_ptr()) }).map(|value| value != 0)
+}
+
+pub fn udp_path_mtu(fd: c_int, ipv6: bool) -> io::Result<u32> {
+    // SAFETY: the descriptor is borrowed for the duration of the getsockopt call.
+    let mtu = result(unsafe { resolved_udp_path_mtu(fd, c_int::from(ipv6)) })?;
+    u32::try_from(mtu).map_err(|_| io::Error::from_raw_os_error(libc_einval()))
+}
+
+pub fn enable_udp_fragment_size(fd: c_int, ipv6: bool) -> io::Result<bool> {
+    // SAFETY: the descriptor is borrowed and the function only changes a socket option.
+    result(unsafe { resolved_udp_enable_recvfragsize(fd, c_int::from(ipv6)) })
+        .map(|value| value != 0)
+}
+
+pub fn udp_recv(fd: c_int, buffer: &mut [u8]) -> io::Result<(usize, u32)> {
+    let mut fragment_size = 0;
+    // SAFETY: the buffer is valid and writable for exactly `buffer.len()` bytes.
+    let length = unsafe {
+        resolved_udp_recv(
+            fd,
+            buffer.as_mut_ptr().cast::<c_void>(),
+            buffer.len(),
+            &mut fragment_size,
+        )
+    };
+    if length < 0 {
+        let errno = i32::try_from(-length).unwrap_or(libc_einval());
+        return Err(io::Error::from_raw_os_error(errno));
+    }
+    let length = usize::try_from(length)
+        .map_err(|_| io::Error::from_raw_os_error(libc_einval()))?;
+    if length > buffer.len() {
+        return Err(io::Error::from_raw_os_error(libc_einval()));
+    }
+    Ok((length, fragment_size))
+}
+
+#[must_use]
+pub fn dns_udp_payload_size(
+    path_mtu: Option<u32>,
+    ipv6: bool,
+    loopback: bool,
+    fragmented: bool,
+    received_udp_fragment_max: u32,
+) -> u16 {
+    // SAFETY: all arguments are plain values and the function has no side effects.
+    unsafe {
+        resolved_dns_udp_payload_size(
+            path_mtu.unwrap_or(0),
+            c_int::from(ipv6),
+            c_int::from(loopback),
+            c_int::from(fragmented),
+            received_udp_fragment_max,
+        )
+    }
 }
 
 pub fn peer_credentials(fd: c_int) -> io::Result<PeerCredentials> {
