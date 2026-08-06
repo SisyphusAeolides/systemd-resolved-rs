@@ -3,6 +3,7 @@ use crate::daemon::stop_requested;
 use crate::json::{self, Value};
 use crate::native;
 use crate::resolver::{ResolveError, Resolver};
+use crate::wire::{extract_answer_records, Header, CLASS_ANY, CLASS_IN};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -158,7 +159,7 @@ fn dispatch_with_access(input: &str, resolver: &Resolver, can_control: bool) -> 
         }
         "io.systemd.Resolve.ResolveHostname" => resolve_hostname(&parameters, resolver),
         "io.systemd.Resolve.ResolveAddress" => resolve_address(&parameters, resolver),
-        "io.systemd.Resolve.ResolveRecord" => error("org.varlink.service.MethodNotImplemented"),
+        "io.systemd.Resolve.ResolveRecord" => resolve_record(&parameters, resolver),
         "io.systemd.Resolve.ResolveService" => error("org.varlink.service.MethodNotImplemented"),
         "io.systemd.Resolve.FlushCaches" => control(can_control, || resolver.flush_cache()),
         "io.systemd.Resolve.ResetServerFeatures" => {
@@ -272,6 +273,96 @@ fn resolve_address(parameters: &Value, resolver: &Resolver) -> Value {
     }
 }
 
+fn resolve_record(parameters: &Value, resolver: &Resolver) -> Value {
+    let Some(name) = parameters.get("name").and_then(Value::as_str) else {
+        return invalid_parameter("name");
+    };
+    if name.is_empty() {
+        return invalid_parameter("name");
+    }
+    let class = match optional_u16(parameters, "class", CLASS_IN) {
+        Ok(value) if value == CLASS_IN || value == CLASS_ANY => value,
+        Ok(_) => return invalid_parameter("class"),
+        Err(error) => return error,
+    };
+    let rr_type = match required_u16(parameters, "type") {
+        Ok(0 | 41 | 249 | 250) => {
+            return error("io.systemd.Resolve.ResourceRecordTypeInvalidForQuery")
+        }
+        Ok(251 | 252) => return error("io.systemd.Resolve.ZoneTransfersNotPermitted"),
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let ifindex = match optional_i32(parameters, "ifindex", 0) {
+        Ok(value) if value >= 0 => value,
+        Ok(_) => return invalid_parameter("ifindex"),
+        Err(error) => return error,
+    };
+
+    let response = match resolver.resolve_record_with_class(name, class, rr_type) {
+        Ok(response) => response,
+        Err(error) => return resolver_error(error),
+    };
+    let records = match extract_answer_records(&response) {
+        Ok(records) if !records.is_empty() => records,
+        Ok(_) => return error("io.systemd.Resolve.NoSuchResourceRecord"),
+        Err(_) => return error("io.systemd.Resolve.InvalidReply"),
+    };
+    let flags = Header::parse(&response)
+        .map(|header| {
+            let mut flags = 1u64 << 10;
+            if header.flags & 0x0020 != 0 {
+                flags |= 1u64 << 9;
+            }
+            flags
+        })
+        .unwrap_or(0);
+    let rrs = records
+        .into_iter()
+        .map(|record| {
+            let mut fields = BTreeMap::new();
+            if ifindex > 0 {
+                fields.insert("ifindex".to_owned(), Value::Number(i128::from(ifindex)));
+            }
+            fields.insert("raw".to_owned(), Value::String(base64(&record.raw)));
+            Value::Object(fields)
+        })
+        .collect();
+
+    success(Value::object([
+        ("rrs", Value::Array(rrs)),
+        ("flags", Value::Number(i128::from(flags))),
+    ]))
+}
+
+fn base64(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        output.push(char::from(ALPHABET[usize::from(first >> 2)]));
+        output.push(char::from(
+            ALPHABET[usize::from(((first & 0x03) << 4) | (second >> 4))],
+        ));
+        if chunk.len() > 1 {
+            output.push(char::from(
+                ALPHABET[usize::from(((second & 0x0f) << 2) | (third >> 6))],
+            ));
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(char::from(ALPHABET[usize::from(third & 0x3f)]));
+        } else {
+            output.push('=');
+        }
+    }
+    output
+}
+
 fn control(can_control: bool, operation: impl FnOnce()) -> Value {
     if !can_control {
         return error("org.varlink.service.PermissionDenied");
@@ -305,6 +396,24 @@ fn statistics(resolver: &Resolver) -> Value {
             Value::Number(i128::try_from(statistics.cache_entries).unwrap_or(i128::MAX)),
         ),
     ]))
+}
+
+fn required_u16(parameters: &Value, key: &str) -> Result<u16, Value> {
+    parameters
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| invalid_parameter(key))
+}
+
+fn optional_u16(parameters: &Value, key: &str, default: u16) -> Result<u16, Value> {
+    match parameters.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(value) => value
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .ok_or_else(|| invalid_parameter(key)),
+    }
 }
 
 fn required_i32(parameters: &Value, key: &str) -> Result<i32, Value> {
@@ -369,6 +478,33 @@ mod tests {
             reply.get("error").and_then(Value::as_str),
             Some("org.varlink.service.PermissionDenied")
         );
+    }
+
+    #[test]
+    fn base64_uses_standard_padding() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+    }
+
+    #[test]
+    fn resolve_record_returns_raw_record_data() {
+        let resolver = Resolver::new(Config::default());
+        let reply = dispatch(
+            r#"{"method":"io.systemd.Resolve.ResolveRecord","parameters":{"name":"localhost","class":1,"type":1}}"#,
+            &resolver,
+        );
+        let rrs = reply
+            .get("parameters")
+            .and_then(|parameters| parameters.get("rrs"))
+            .and_then(Value::as_array)
+            .expect("resource records");
+        assert!(!rrs.is_empty());
+        assert!(rrs[0]
+            .get("raw")
+            .and_then(Value::as_str)
+            .is_some_and(|raw| !raw.is_empty()));
     }
 
     #[test]
