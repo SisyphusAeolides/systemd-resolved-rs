@@ -21,7 +21,8 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] TCP DNS listener on `127.0.0.53`
 - [x] proxy-mode UDP/TCP listener on `127.0.0.54`
 - [x] generated stub and uplink `resolv.conf` files
-- [ ] `org.freedesktop.resolve1` D-Bus manager and link objects
+- [x] live `org.freedesktop.resolve1` Manager and Link objects match the pinned introspection manifests
+- [ ] DNS-SD registration, delegate behavior, and complete D-Bus authorization parity
 - [x] core `ResolveHostname`, `ResolveAddress`, `ResolveRecord`, and `ResolveService` Varlink methods
 - [ ] complete `io.systemd.Resolve` Varlink flags, errors, and service semantics
 - [ ] `io.systemd.Resolve.Monitor` Varlink interface
@@ -67,9 +68,10 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] SIGHUP hosts-database reload
 - [x] ordered search-domain candidate expansion with route-only exclusion
 - [ ] live configuration reload parity
-- [ ] per-link DNS state from D-Bus and netlink
-- [ ] longest-suffix routing integrated with per-link scopes
-- [ ] default-route link inference
+- [x] per-link DNS state from D-Bus
+- [ ] netlink synchronization of per-link state
+- [x] longest-suffix routing integrated with per-link scopes
+- [x] default-route link inference
 - [ ] split-DNS parallel scope behavior
 - [ ] interface binding and scoped IPv6 upstreams
 - [ ] credential-based DNS and search-domain configuration
@@ -83,7 +85,7 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] bounded Varlink framing and peer-credential checks for maintenance calls
 - [x] named `io.systemd.Resolve` Varlink socket activation
 - [ ] monitor socket and complete upstream socket-activation contract
-- [ ] watchdog keepalive
+- [x] watchdog keepalive
 - [ ] privilege-drop parity when launched directly as root
 - [ ] complete `systemd-resolved` command-line compatibility
 - [ ] D-Bus policy and authorization parity
@@ -92,7 +94,7 @@ The pinned D-Bus signatures live in `compat/`.
 
 - [ ] upstream `TEST-75-RESOLVED` passes unmodified
 - [ ] upstream mDNS and resolver-adjacent unit suites pass unmodified
-- [ ] D-Bus introspection is signature compatible
+- [x] live Manager and Link D-Bus introspection matches the pinned upstream manifests
 - [ ] Varlink schemas and error identifiers match
 - [ ] `resolvectl` behavioral and output corpus matches
 - [ ] packet parser passes upstream and independent fuzz corpora

@@ -46,14 +46,12 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Install native compiler
+      - name: Install native and D-Bus tools
         shell: bash
         run: |
           set -euo pipefail
-          if ! command -v gfortran >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install --yes --no-install-recommends gfortran
-          fi
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends dbus gfortran systemd
 
       - name: Install Rust toolchain
         shell: bash
@@ -95,6 +93,11 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --release --all-features --locked
+
+      - name: Check live D-Bus contracts
+        if: false
+        shell: bash
+        run: bash tests/dbus-introspection.sh target/release/systemd-resolved
 
       - name: Publish final status
         if: ${{ always() }}

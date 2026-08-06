@@ -39,3 +39,6 @@ unsafe_op_in_unsafe_fn = "deny"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+[patch.crates-io]
+zbus_macros = { path = "vendor/zbus_macros" }

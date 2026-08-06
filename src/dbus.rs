@@ -13,7 +13,7 @@ use crate::routing::{LinkError, LinkState};
 use crate::wire::{
     extract_answer_records, extract_service_records, Header, CLASS_IN, TYPE_SRV, TYPE_TXT,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::convert::TryFrom;
 use std::error::Error;
 use std::fs;
@@ -83,6 +83,7 @@ enum DbusError {
     NoSuchLink(String),
     NetworkDown(String),
     InvalidArgs(String),
+    NotSupported(String),
 }
 
 impl From<DbusError> for zbus::fdo::Error {
@@ -104,9 +105,10 @@ impl ManagerObject {
         ifindex: i32,
         name: &str,
         family: i32,
-        _flags: u64,
+        flags: u64,
     ) -> Result<(Vec<(i32, i32, Vec<u8>)>, String, u64), DbusError> {
         validate_lookup_ifindex(ifindex)?;
+        let _ = flags;
         let lookup = self
             .resolver
             .lookup_name_on_link(name, family, positive_ifindex(ifindex))
@@ -120,9 +122,10 @@ impl ManagerObject {
         ifindex: i32,
         family: i32,
         address: Vec<u8>,
-        _flags: u64,
+        flags: u64,
     ) -> Result<(Vec<(i32, String)>, u64), DbusError> {
         validate_lookup_ifindex(ifindex)?;
+        let _ = flags;
         let address = decode_address(family, &address)?;
         let lookup = self
             .resolver
@@ -137,13 +140,14 @@ impl ManagerObject {
         ifindex: i32,
         name: &str,
         class: u16,
-        rr_type: u16,
-        _flags: u64,
+        r#type: u16,
+        flags: u64,
     ) -> Result<(Vec<(i32, u16, u16, Vec<u8>)>, u64), DbusError> {
         validate_lookup_ifindex(ifindex)?;
+        let _ = flags;
         let response = self
             .resolver
-            .resolve_record_on_link(name, class, rr_type, positive_ifindex(ifindex))
+            .resolve_record_on_link(name, class, r#type, positive_ifindex(ifindex))
             .map_err(map_resolve_error)?;
         let records = extract_answer_records(&response)
             .map_err(|error| DbusError::InvalidReply(error.to_string()))?
@@ -166,7 +170,7 @@ impl ManagerObject {
         &self,
         ifindex: i32,
         name: &str,
-        service_type: &str,
+        r#type: &str,
         domain: &str,
         family: i32,
         flags: u64,
@@ -183,22 +187,15 @@ impl ManagerObject {
     > {
         validate_lookup_ifindex(ifindex)?;
         validate_family(family)?;
-        resolve_service_reply(
-            &self.resolver,
-            ifindex,
-            name,
-            service_type,
-            domain,
-            family,
-            flags,
-        )
+        resolve_service_reply(&self.resolver, ifindex, name, r#type, domain, family, flags)
     }
 
-    fn get_link(&self, ifindex: i32) -> Result<OwnedObjectPath, DbusError> {
+    #[dbus_interface(out_args("path"))]
+    fn get_link(&self, ifindex: i32) -> Result<(OwnedObjectPath,), DbusError> {
         self.resolver.link(ifindex).ok_or_else(|| {
             DbusError::NoSuchLink(format!("no state exists for interface {ifindex}"))
         })?;
-        link_object_path(ifindex)
+        Ok((link_object_path(ifindex)?,))
     }
 
     #[dbus_interface(name = "SetLinkDNS")]
@@ -295,6 +292,51 @@ impl ManagerObject {
 
     fn revert_link(&self, ifindex: i32) -> Result<(), DbusError> {
         self.resolver.revert_link(ifindex).map_err(map_link_error)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[dbus_interface(out_args("service_path"))]
+    fn register_service(
+        &self,
+        id: &str,
+        name_template: &str,
+        r#type: &str,
+        service_port: u16,
+        service_priority: u16,
+        service_weight: u16,
+        txt_datas: Vec<HashMap<String, Vec<u8>>>,
+    ) -> Result<(OwnedObjectPath,), DbusError> {
+        let _ = (
+            id,
+            name_template,
+            r#type,
+            service_port,
+            service_priority,
+            service_weight,
+            txt_datas,
+        );
+        Err(DbusError::NotSupported(
+            "DNS-SD service registration is not implemented".to_owned(),
+        ))
+    }
+
+    fn unregister_service(&self, service_path: OwnedObjectPath) -> Result<(), DbusError> {
+        let _ = service_path;
+        Err(DbusError::NotSupported(
+            "DNS-SD service registration is not implemented".to_owned(),
+        ))
+    }
+
+    #[dbus_interface(out_args("path"))]
+    fn get_delegate(&self, id: &str) -> Result<(OwnedObjectPath,), DbusError> {
+        Err(DbusError::NoSuchService(format!(
+            "no DNS delegate exists for {id}"
+        )))
+    }
+
+    #[dbus_interface(out_args("delegates"))]
+    fn list_delegates(&self) -> (Vec<(String, OwnedObjectPath)>,) {
+        (Vec::new(),)
     }
 
     fn reset_statistics(&self) {
