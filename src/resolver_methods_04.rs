@@ -37,6 +37,7 @@ impl Resolver {
         }
     }
 
+    #[allow(clippy::unused_self)]
     fn udp_path_mtu(&self, server: SocketAddr) -> Option<u32> {
         let bind_address = if server.is_ipv4() {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
