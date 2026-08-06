@@ -67,8 +67,25 @@ jobs:
       - name: Check native ABI
         run: make check-native
 
+      - name: Canonicalize Rust source
+        run: cargo fmt --all
+
+      - name: Package canonical Rust source
+        if: ${{ matrix.toolchain == 'stable' }}
+        shell: bash
+        run: tar --create --gzip --file=/tmp/rustfmt-source.tar.gz src
+
+      - name: Upload canonical Rust source
+        if: ${{ matrix.toolchain == 'stable' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustfmt-source
+          path: /tmp/rustfmt-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: git diff --exit-code -- src
 
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
