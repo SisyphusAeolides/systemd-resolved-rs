@@ -67,6 +67,7 @@ impl Resolver {
             state.metric = ServerMetric::default();
             state.cooldown_until = None;
             state.features.reset();
+            state.transport.reset();
         }
     }
 

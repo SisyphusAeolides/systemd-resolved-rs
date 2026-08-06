@@ -115,6 +115,14 @@ jobs:
             cargo test --locked test_12_edns_feature_downgrade
           done
 
+      - name: Repeat transport fallback regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            cargo test --locked test_13_transport_fallback
+          done
+
       - name: Build release binaries
         run: cargo build --release --all-features --locked
 

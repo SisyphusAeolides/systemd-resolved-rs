@@ -19,3 +19,4 @@ include!("resolver_test_09.rs");
 include!("resolver_test_10.rs");
 include!("resolver_test_11.rs");
 include!("resolver_test_12.rs");
+include!("resolver_test_13.rs");

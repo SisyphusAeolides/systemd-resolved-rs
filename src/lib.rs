@@ -20,6 +20,7 @@ pub mod policy;
 pub mod resolver;
 pub mod routing;
 pub mod static_records;
+pub mod transport;
 pub mod varlink;
 pub mod wire;
 

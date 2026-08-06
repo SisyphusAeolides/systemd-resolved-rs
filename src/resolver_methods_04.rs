@@ -1,5 +1,5 @@
 impl Resolver {
-    fn exchange(&self, server: SocketAddr, query: &[u8]) -> Result<Vec<u8>, ResolveError> {
+    fn exchange_udp(&self, server: SocketAddr, query: &[u8]) -> Result<Vec<u8>, ResolveError> {
         let bind_address = if server.is_ipv4() {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
         } else {
@@ -16,11 +16,7 @@ impl Resolver {
         let length = socket.recv(&mut response)?;
         response.truncate(length);
         response_matches(query, &response)?;
-        if Header::parse(&response)?.truncated() {
-            self.exchange_tcp(server, query)
-        } else {
-            Ok(response)
-        }
+        Ok(response)
     }
 
     fn exchange_tcp(&self, server: SocketAddr, query: &[u8]) -> Result<Vec<u8>, ResolveError> {
@@ -88,5 +84,4 @@ impl Resolver {
         }
         Ok(false)
     }
-
 }

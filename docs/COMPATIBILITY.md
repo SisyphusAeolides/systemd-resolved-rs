@@ -38,6 +38,7 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] localhost, numeric-address, `_localdnsstub`, and `_localdnsproxy` synthesis
 - [x] UDP forwarding with transaction and question validation
 - [x] TCP fallback after a truncated UDP response
+- [x] repeated UDP-loss fallback to TCP, TCP-loss recovery to UDP, and truncated-response transport telemetry
 - [x] bounded positive and negative cache with TTL aging
 - [x] RFC 2308 negative lifetime from SOA TTL and MINIMUM
 - [x] optional stale-answer retention with zeroed TTLs
@@ -46,7 +47,7 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] cross-transaction CNAME and DNAME follow-up for high-level lookups with loop detection and the upstream 16-redirect limit
 - [ ] accumulated redirect-chain record reporting and complete redirect flag/error parity
 - [x] EDNS0/DO feature negotiation with per-server retry downgrade, exponential recovery grace periods, 1232-byte UDP sizing, and RFC 6975 algorithm signaling
-- [ ] adaptive MTU/fragment telemetry, TCP/TLS feature levels, RRSIG-missing detection, and exact upstream retry timing
+- [ ] adaptive MTU/fragment-size advertisement, TLS feature levels, RRSIG-missing detection, and exact upstream retry timing
 - [ ] complete resource-record validation and compression expansion
 - [x] concurrent identical transaction coalescing with per-client ID restoration and one-upstream regression coverage
 - [ ] parallel queries across equivalent scopes

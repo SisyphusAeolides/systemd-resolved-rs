@@ -5,6 +5,9 @@ use crate::edns::{self, FeatureLevel, ServerFeatureState};
 use crate::hosts::Hosts;
 use crate::policy::{choose_server, update_rtt, ServerMetric};
 use crate::routing::{LinkError, LinkState, RouteScope, RoutingTable};
+use crate::transport::{
+    ServerTransportState, TransportMode, TRANSPORT_RETRY_ATTEMPTS,
+};
 use crate::wire::{
     self, extract_address_records, extract_ptr_names, first_question, local_response, make_query,
     make_query_with_class, response_matches, reverse_name, servfail_for, validate, Header,
@@ -34,6 +37,7 @@ struct ServerState {
     metric: ServerMetric,
     cooldown_until: Option<Instant>,
     features: ServerFeatureState,
+    transport: ServerTransportState,
 }
 
 #[derive(Debug, Default)]
