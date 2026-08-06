@@ -73,7 +73,9 @@ impl ServerFeatureState {
             self.possible = best;
         }
 
-        let retry_due = self.retry_after.is_some_and(|retry_after| retry_after <= now);
+        let retry_due = self
+            .retry_after
+            .is_some_and(|retry_after| retry_after <= now);
         if self.possible < best && retry_due {
             self.possible = best;
             self.failed_attempts = 0;
@@ -318,8 +320,7 @@ fn scan_packet(packet: &[u8]) -> Result<PacketLayout, WireError> {
         offset = wire::parse_question(packet, offset)?.next_offset;
     }
 
-    let additional_start =
-        usize::from(header.answer_count) + usize::from(header.authority_count);
+    let additional_start = usize::from(header.answer_count) + usize::from(header.authority_count);
     let mut layout = PacketLayout::default();
     for index in 0..header.total_records() {
         let start = offset;
@@ -485,9 +486,8 @@ mod tests {
     #[test]
     fn prepares_dnssec_ok_query_with_rfc6975_options() {
         let query = make_query("example.test", TYPE_A, 7).expect("query");
-        let prepared =
-            prepare_query(&query, FeatureLevel::DnssecOk, DEFAULT_UDP_PAYLOAD_SIZE)
-                .expect("prepared query");
+        let prepared = prepare_query(&query, FeatureLevel::DnssecOk, DEFAULT_UDP_PAYLOAD_SIZE)
+            .expect("prepared query");
         let opt = inspect_opt(&prepared.packet)
             .expect("OPT parsing")
             .expect("OPT record");
@@ -536,8 +536,7 @@ mod tests {
     #[test]
     fn duplicate_opt_records_are_rejected() {
         let query = make_query("example.test", TYPE_A, 7).expect("query");
-        let opt =
-            encode_opt(DEFAULT_UDP_PAYLOAD_SIZE, 0, 0, 0, &[]).expect("OPT encoding");
+        let opt = encode_opt(DEFAULT_UDP_PAYLOAD_SIZE, 0, 0, 0, &[]).expect("OPT encoding");
         let once = append_opt(&query, &opt).expect("first OPT");
         let twice = append_opt(&once, &opt).expect("second OPT");
         assert_eq!(inspect_opt(&twice), Err(WireError::InvalidRecord));
@@ -567,8 +566,7 @@ mod tests {
         let query = make_query("example.test", TYPE_A, 7).expect("query");
         let mut response = query;
         response[2..4].copy_from_slice(&0x8007_u16.to_be_bytes());
-        let response =
-            add_test_response_opt(&response, 1, false).expect("extended RCODE response");
+        let response = add_test_response_opt(&response, 1, false).expect("extended RCODE response");
         let opt = inspect_opt(&response)
             .expect("OPT parsing")
             .expect("OPT record");
@@ -583,19 +581,18 @@ mod tests {
         let response = add_test_response_opt(&response, 0, true).expect("response OPT");
         let restored = response_for_client(&query, &response).expect("client response");
         assert!(inspect_opt(&restored).expect("OPT parsing").is_none());
-        assert_eq!(Header::parse(&restored).expect("header").additional_count, 0);
+        assert_eq!(
+            Header::parse(&restored).expect("header").additional_count,
+            0
+        );
     }
 
     #[test]
     fn preserves_opt_for_an_edns_client() {
         let query = make_query("example.test", TYPE_A, 7).expect("query");
-        let query = prepare_query(
-            &query,
-            FeatureLevel::Edns0,
-            DEFAULT_UDP_PAYLOAD_SIZE,
-        )
-        .expect("EDNS query")
-        .packet;
+        let query = prepare_query(&query, FeatureLevel::Edns0, DEFAULT_UDP_PAYLOAD_SIZE)
+            .expect("EDNS query")
+            .packet;
         let mut response = query.clone();
         response[2..4].copy_from_slice(&0x8080_u16.to_be_bytes());
         let restored = response_for_client(&query, &response).expect("client response");
@@ -618,10 +615,7 @@ mod tests {
         );
         assert_eq!(state.verified_level(), FeatureLevel::Udp);
         assert_eq!(
-            state.possible_level(
-                FeatureLevel::DnssecOk,
-                now + FEATURE_GRACE_PERIOD_MIN
-            ),
+            state.possible_level(FeatureLevel::DnssecOk, now + FEATURE_GRACE_PERIOD_MIN),
             FeatureLevel::DnssecOk
         );
     }

@@ -48,7 +48,8 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] accumulated redirect-chain record reporting and complete redirect flag/error parity
 - [x] EDNS0/DO feature negotiation with per-server retry downgrade, exponential recovery grace periods, 1232-byte UDP sizing, and RFC 6975 algorithm signaling
 - [x] root-domain RRSIG omission detection with a persistent per-server DO clamp, allow-downgrade retry, and strict-mode failure
-- [ ] adaptive MTU/fragment-size advertisement, TLS feature levels, and exact upstream retry timing
+- [x] adaptive MTU/fragment-size advertisement
+- [ ] TLS feature levels and exact upstream retry timing
 - [ ] complete resource-record validation and compression expansion
 - [x] concurrent identical transaction coalescing with per-client ID restoration and one-upstream regression coverage
 - [ ] parallel queries across equivalent scopes

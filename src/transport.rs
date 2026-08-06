@@ -15,6 +15,7 @@ pub struct ServerTransportState {
     failed_udp: u8,
     failed_tcp: u8,
     packet_truncated: bool,
+    advertised_payload_size: Option<u16>,
 }
 
 impl ServerTransportState {
@@ -67,6 +68,14 @@ impl ServerTransportState {
         self.failed_tcp = 0;
     }
 
+    pub const fn advertised_payload_size(&self) -> Option<u16> {
+        self.advertised_payload_size
+    }
+
+    pub fn set_advertised_payload_size(&mut self, size: u16) {
+        self.advertised_payload_size = Some(size);
+    }
+
     pub fn reset(&mut self) {
         *self = Self::default();
     }
@@ -112,10 +121,7 @@ mod tests {
         assert_eq!(state.record_failure(TransportMode::Tcp), None);
         assert_eq!(state.record_failure(TransportMode::Tcp), None);
         assert_eq!(state.mode(), TransportMode::Udp);
-        assert_eq!(
-            state.failures(TransportMode::Tcp),
-            TRANSPORT_RETRY_ATTEMPTS
-        );
+        assert_eq!(state.failures(TransportMode::Tcp), TRANSPORT_RETRY_ATTEMPTS);
         assert!(state.packet_truncated());
     }
 }

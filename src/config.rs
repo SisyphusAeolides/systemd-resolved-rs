@@ -8,7 +8,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-
 include!("config_types.rs");
 include!("config_impl.rs");
 include!("config_helpers.rs");

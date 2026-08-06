@@ -23,7 +23,10 @@ fn main() {
     println!("cargo:rerun-if-changed=ffi/routing.f90");
 
     let target = env::var("CARGO_CFG_TARGET_OS").expect("target OS is set by cargo");
-    assert!(target == "linux", "systemd-resolved-rs currently supports Linux only");
+    assert!(
+        target == "linux",
+        "systemd-resolved-rs currently supports Linux only"
+    );
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
     fs::create_dir_all(&out_dir).expect("create build output directory");

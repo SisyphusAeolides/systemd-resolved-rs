@@ -28,7 +28,7 @@ impl Resolver {
         let mut transport_retries = 0usize;
 
         loop {
-            let (level, transport) = {
+            let (level, transport, payload_size) = {
                 let mut states = self.states();
                 let state = states.entry(server).or_default();
                 let best_level = if state.missing_root_rrsig
@@ -43,10 +43,13 @@ impl Resolver {
                         .features
                         .possible_level(best_level, Instant::now())
                 });
-                (level, state.transport.mode())
+                let payload_size = state
+                    .transport
+                    .advertised_payload_size()
+                    .unwrap_or(edns::DEFAULT_UDP_PAYLOAD_SIZE);
+                (level, state.transport.mode(), payload_size)
             };
-            let outbound =
-                edns::prepare_query(query, level, edns::DEFAULT_UDP_PAYLOAD_SIZE)?;
+            let outbound = edns::prepare_query(query, level, payload_size)?;
 
             let (response, response_transport) = match transport {
                 TransportMode::Udp => match self.exchange_udp(server, &outbound.packet) {
@@ -137,6 +140,11 @@ impl Resolver {
 
             let opt = edns::inspect_opt(&response)?;
             let rcode = edns::full_rcode(&response, opt.as_ref())?;
+
+            // Track server-advertised UDP payload size for adaptive MTU
+            if let Some(ref opt_record) = opt {
+                self.record_advertised_payload_size(server, opt_record.udp_payload_size);
+            }
 
             if outbound.managed_opt && outbound.sent_edns {
                 let Some(opt) = opt.as_ref() else {
@@ -325,6 +333,15 @@ impl Resolver {
             .or_default()
             .transport
             .clear_failures();
+    }
+
+    fn record_advertised_payload_size(&self, server: SocketAddr, size: u16) {
+        let mut states = self.states();
+        states
+            .entry(server)
+            .or_default()
+            .transport
+            .set_advertised_payload_size(size);
     }
 }
 

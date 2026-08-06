@@ -16,8 +16,8 @@ fn malformed_dns_corpus_never_panics() {
         wire::make_query(".", wire::TYPE_AAAA, 0x4321).expect("root query"),
     ];
 
-    let mut pointer_loop = wire::make_query("example.test", wire::TYPE_A, 0x0102)
-        .expect("compression-loop seed");
+    let mut pointer_loop =
+        wire::make_query("example.test", wire::TYPE_A, 0x0102).expect("compression-loop seed");
     pointer_loop[wire::DNS_HEADER_LEN] = 0xc0;
     pointer_loop[wire::DNS_HEADER_LEN + 1] = wire::DNS_HEADER_LEN as u8;
     seeds.push(pointer_loop);
@@ -131,7 +131,9 @@ fn overwrite_u16(packet: &mut [u8], state: &mut u64) {
 
 fn append_run(packet: &mut Vec<u8>, state: &mut u64) {
     let available = MAX_PACKET_SIZE.saturating_sub(packet.len());
-    let length = usize::try_from(next(state) % 33).unwrap_or(0).min(available);
+    let length = usize::try_from(next(state) % 33)
+        .unwrap_or(0)
+        .min(available);
     let value = next(state) as u8;
     packet.extend(std::iter::repeat(value).take(length));
 }
