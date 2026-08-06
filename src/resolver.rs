@@ -5,8 +5,8 @@ use crate::hosts::Hosts;
 use crate::policy::{choose_server, update_rtt, ServerMetric};
 use crate::wire::{
     self, extract_addresses, extract_ptr_names, first_question, local_response, make_query,
-    response_matches, reverse_name, servfail_for, validate, Header, WireError, TYPE_A, TYPE_AAAA,
-    TYPE_PTR,
+    make_query_with_class, response_matches, reverse_name, servfail_for, validate, Header,
+    WireError, TYPE_A, TYPE_AAAA, TYPE_PTR,
 };
 use std::collections::HashSet;
 use std::error::Error;
@@ -329,7 +329,16 @@ impl Resolver {
     }
 
     pub fn resolve_record(&self, name: &str, rr_type: u16) -> Result<Vec<u8>, ResolveError> {
-        let query = make_query(name, rr_type, self.transaction_id())?;
+        self.resolve_record_with_class(name, wire::CLASS_IN, rr_type)
+    }
+
+    pub fn resolve_record_with_class(
+        &self,
+        name: &str,
+        class: u16,
+        rr_type: u16,
+    ) -> Result<Vec<u8>, ResolveError> {
+        let query = make_query_with_class(name, rr_type, class, self.transaction_id())?;
         self.query(&query, QueryMode::Full)
     }
 
