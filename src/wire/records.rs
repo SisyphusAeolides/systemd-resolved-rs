@@ -1,4 +1,44 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
+pub fn extract_answer_records(packet: &[u8]) -> Result<Vec<AnswerRecord>, WireError> {
+    let header = Header::parse(packet)?;
+    if !header.is_response() {
+        return Err(WireError::WrongDirection);
+    }
+    let mut offset = DNS_HEADER_LEN;
+    for _ in 0..header.question_count {
+        offset = parse_question(packet, offset)?.next_offset;
+    }
+
+    let mut output = Vec::with_capacity(usize::from(header.answer_count));
+    for _ in 0..header.answer_count {
+        let record = parse_record(packet, offset)?;
+        offset = record.next_offset;
+
+        let mut raw = Vec::with_capacity(
+            record.name.canonical_wire().len() + 10 + record.rdata.len(),
+        );
+        raw.extend_from_slice(record.name.canonical_wire());
+        raw.extend_from_slice(&record.rr_type.to_be_bytes());
+        raw.extend_from_slice(&record.class.to_be_bytes());
+        raw.extend_from_slice(&record.ttl.to_be_bytes());
+        raw.extend_from_slice(
+            &u16::try_from(record.rdata.len())
+                .map_err(|_| WireError::InvalidRecord)?
+                .to_be_bytes(),
+        );
+        raw.extend_from_slice(&record.rdata);
+
+        output.push(AnswerRecord {
+            name: record.name,
+            rr_type: record.rr_type,
+            class: record.class,
+            ttl: record.ttl,
+            raw,
+        });
+    }
+    Ok(output)
+}
+
 pub fn extract_addresses(
     packet: &[u8],
     family: Option<i32>,
