@@ -66,6 +66,7 @@ impl Resolver {
         for state in self.states().values_mut() {
             state.metric = ServerMetric::default();
             state.cooldown_until = None;
+            state.features.reset();
         }
     }
 
