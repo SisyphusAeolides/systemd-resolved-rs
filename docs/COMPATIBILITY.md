@@ -9,7 +9,7 @@ gate at the end of this document passes against the pinned upstream baseline.
 
 - [x] Rust package paths have concrete library and binary sources
 - [x] C and Fortran ABI declarations agree at the repository boundary
-- [ ] Rust formatting, Clippy, and all-target test suite pass in the release environment
+- [x] Rust formatting, Clippy, tests, and release builds pass on Rust 1.74 and stable
 - [ ] Idris 2 and Agda modules pass with pinned compiler versions
 - [ ] Reproducible release build and package manifest are verified
 
@@ -22,7 +22,8 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] proxy-mode UDP/TCP listener on `127.0.0.54`
 - [x] generated stub and uplink `resolv.conf` files
 - [ ] `org.freedesktop.resolve1` D-Bus manager and link objects
-- [ ] complete `io.systemd.Resolve` Varlink interface
+- [x] core `ResolveHostname`, `ResolveAddress`, `ResolveRecord`, and `ResolveService` Varlink methods
+- [ ] complete `io.systemd.Resolve` Varlink flags, errors, and service semantics
 - [ ] `io.systemd.Resolve.Monitor` Varlink interface
 - [ ] complete `resolvectl` command and output compatibility
 - [ ] NSS integration parity with `nss-resolve`
@@ -40,8 +41,9 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] RFC 2308 negative lifetime from SOA TTL and MINIMUM
 - [x] optional stale-answer retention with zeroed TTLs
 - [x] TSIG-bearing response cache exclusion
+- [x] in-answer CNAME and DNAME redirect-chain validation
+- [ ] cross-transaction CNAME and DNAME follow-up parity
 - [ ] EDNS feature negotiation, downgrade state, and DNS cookies
-- [ ] complete CNAME and DNAME processing
 - [ ] complete resource-record validation and compression expansion
 - [ ] transaction coalescing
 - [ ] parallel queries across equivalent scopes
@@ -63,11 +65,11 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] route-only and search-domain representation
 - [x] `/etc/resolv.conf` uplink discovery with local-stub exclusion
 - [x] SIGHUP hosts-database reload
+- [x] ordered search-domain candidate expansion with route-only exclusion
 - [ ] live configuration reload parity
 - [ ] per-link DNS state from D-Bus and netlink
 - [ ] longest-suffix routing integrated with per-link scopes
 - [ ] default-route link inference
-- [ ] search-domain candidate expansion parity
 - [ ] split-DNS parallel scope behavior
 - [ ] interface binding and scoped IPv6 upstreams
 - [ ] credential-based DNS and search-domain configuration
