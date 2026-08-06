@@ -1,3 +1,5 @@
+const RCODE_REFUSED: u16 = 5;
+
 impl Resolver {
     fn query_scopes(&self, scopes: &[RouteScope], query: &[u8]) -> Result<Vec<u8>, ResolveError> {
         if scopes.len() == 1 {
@@ -41,6 +43,7 @@ impl Resolver {
             return Err(ResolveError::NoNameServers);
         }
         let mut attempted = HashSet::new();
+        let mut last_response = None;
         let mut last_error = None;
         for _ in 0..self.config.attempts {
             if attempted.len() == servers.len() {
@@ -54,6 +57,10 @@ impl Resolver {
             match self.exchange_with_features(server, query) {
                 Ok(response) => {
                     self.record_success(server, started.elapsed());
+                    if Header::parse(&response)?.response_code() == RCODE_REFUSED {
+                        last_response = Some(response);
+                        continue;
+                    }
                     return Ok(response);
                 }
                 Err(error) => {
@@ -62,7 +69,11 @@ impl Resolver {
                 }
             }
         }
-        Err(last_error.unwrap_or(ResolveError::NoNameServers))
+        if let Some(response) = last_response {
+            Ok(response)
+        } else {
+            Err(last_error.unwrap_or(ResolveError::NoNameServers))
+        }
     }
 
     fn select_server(
