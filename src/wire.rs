@@ -112,6 +112,15 @@ pub struct ResourceRecord {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnswerRecord {
+    pub name: DnsName,
+    pub rr_type: u16,
+    pub class: u16,
+    pub ttl: u32,
+    pub raw: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalRecord {
     A(Ipv4Addr),
     Aaaa(Ipv6Addr),
