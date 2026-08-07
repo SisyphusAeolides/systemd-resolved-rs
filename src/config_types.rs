@@ -163,6 +163,7 @@ impl ConfigAssignments {
 }
 
 #[derive(Clone, Debug)]
+#[allow(unknown_lints)]
 #[allow(clippy::struct_excessive_bools, clippy::struct_field_names)]
 pub struct Config {
     pub upstreams: Vec<SocketAddr>,
