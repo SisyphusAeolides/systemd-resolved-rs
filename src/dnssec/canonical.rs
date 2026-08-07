@@ -79,8 +79,12 @@ fn canonical_owner(owner: &[u8], labels: u8) -> Result<Vec<u8>, WireError> {
     if labels > label_count {
         return Err(WireError::InvalidRecord);
     }
+    let canonical = owner
+        .iter()
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect::<Vec<_>>();
     if labels == label_count {
-        return Ok(owner.to_vec());
+        return Ok(canonical);
     }
 
     let mut output = vec![1, b'*'];
@@ -89,7 +93,7 @@ fn canonical_owner(owner: &[u8], labels: u8) -> Result<Vec<u8>, WireError> {
         return Ok(output);
     }
     output.extend_from_slice(
-        owner
+        canonical
             .get(label_offsets[label_count - labels]..)
             .ok_or(WireError::InvalidRecord)?,
     );
@@ -260,8 +264,8 @@ mod tests {
 
     #[test]
     fn signed_data_uses_original_ttl_and_sorted_rrs() {
-        let (packet, _) = record("example.", TYPE_A, 5, &[192, 0, 2, 2]);
-        let (_, _) = record("example.", TYPE_A, 999, &[192, 0, 2, 1]);
+        let (first_wire, _) = record("example.", TYPE_A, 5, &[192, 0, 2, 2]);
+        let (second_wire, _) = record("example.", TYPE_A, 999, &[192, 0, 2, 1]);
         let mut rrsig_rdata = Vec::new();
         rrsig_rdata.extend_from_slice(&TYPE_A.to_be_bytes());
         rrsig_rdata.extend_from_slice(&[15, 1]);
@@ -271,21 +275,14 @@ mod tests {
         rrsig_rdata.extend_from_slice(&1234_u16.to_be_bytes());
         rrsig_rdata.extend_from_slice(&encode_name("example.").expect("signer"));
         rrsig_rdata.push(1);
-        let (rrsig_packet, _) = record("example.", TYPE_RRSIG, 60, &rrsig_rdata);
+        let (rrsig_wire, _) = record("example.", TYPE_RRSIG, 60, &rrsig_rdata);
 
-        let mut combined = packet;
-        combined.extend_from_slice(&rrsig_packet);
-        let owner_len = encode_name("example.").expect("owner").len();
-        let first_len = owner_len + 10 + 4;
-        let second_offset = first_len;
-        let mut rrset_packet = combined[..first_len].to_vec();
-        let second_wire = {
-            let (wire, _) = record("example.", TYPE_A, 999, &[192, 0, 2, 1]);
-            wire
-        };
+        let second_offset = first_wire.len();
+        let mut rrset_packet = first_wire;
         rrset_packet.extend_from_slice(&second_wire);
         let rrsig_offset = rrset_packet.len();
-        rrset_packet.extend_from_slice(&rrsig_packet);
+        rrset_packet.extend_from_slice(&rrsig_wire);
+
         let first = parse_record(&rrset_packet, 0).expect("first RR");
         let second = parse_record(&rrset_packet, second_offset).expect("second RR");
         let rrsig = parse_record(&rrset_packet, rrsig_offset).expect("RRSIG");
