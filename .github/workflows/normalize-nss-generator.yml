@@ -28,24 +28,13 @@ jobs:
 
           workflow = Path(".github/workflows/apply-nss-varlink-recovered.yml")
           text = workflow.read_text(encoding="utf-8")
-          anchor = '''          elif corrected not in text:
-              raise SystemExit("NSS Varlink IPv6 fixture anchor mismatch")
-          path.write_text(text, encoding="utf-8")
-          PY
-'''
-          replacement = '''          elif corrected not in text:
-              raise SystemExit("NSS Varlink IPv6 fixture anchor mismatch")
-          path.write_text(text, encoding="utf-8")
-
-          stub = Path("nss/nss_dns_stub.c")
-          stub.write_text(stub.read_text(encoding="utf-8").rstrip() + "\\n", encoding="utf-8")
-          PY
-'''
-          if anchor not in text:
+          marker = '          path.write_text(text, encoding="utf-8")\n          PY\n          tar --create'
+          replacement = '          path.write_text(text, encoding="utf-8")\n\n          stub = Path("nss/nss_dns_stub.c")\n          stub.write_text(stub.read_text(encoding="utf-8").rstrip() + chr(10), encoding="utf-8")\n          PY\n          tar --create'
+          if marker not in text:
               if replacement in text:
                   raise SystemExit(0)
               raise SystemExit("NSS generator normalization anchor mismatch")
-          workflow.write_text(text.replace(anchor, replacement, 1), encoding="utf-8")
+          workflow.write_text(text.replace(marker, replacement, 1), encoding="utf-8")
           PY
 
           rm -f .github/workflows/normalize-nss-generator.yml
