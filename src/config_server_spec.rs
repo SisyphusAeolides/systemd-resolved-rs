@@ -40,7 +40,8 @@ fn valid_interface(value: &str) -> bool {
     !value.is_empty()
         && value.is_ascii()
         && !value.chars().any(char::is_whitespace)
-        && !value.contains(['%', '#'])
+        && !value.contains('%')
+        && !value.contains('#')
 }
 
 fn valid_server_name(value: &str) -> bool {
@@ -48,7 +49,8 @@ fn valid_server_name(value: &str) -> bool {
     !value.is_empty()
         && value.is_ascii()
         && value.len() <= 253
-        && !value.contains(['%', '#'])
+        && !value.contains('%')
+        && !value.contains('#')
         && value
             .split('.')
             .all(|label| !label.is_empty() && label.len() <= 63)
