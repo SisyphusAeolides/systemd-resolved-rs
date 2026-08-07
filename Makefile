@@ -10,7 +10,7 @@ LIBEXECDIR ?= $(PREFIX)/lib/systemd
 UNITDIR ?= $(PREFIX)/lib/systemd/system
 TMPFILESDIR ?= $(PREFIX)/lib/tmpfiles.d
 
-.PHONY: all build test check-native check-rust check-formal check-packaging check-live clean install
+.PHONY: all build test check-native check-rust check-formal check-packaging check-live check-nss clean install
 .PHONY: supremacy-dirs nss release release-with-nss install-replace uninstall boot-smoke bench
 
 all: build
@@ -42,11 +42,12 @@ check-formal:
 	agda -i formal/agda formal/agda/Resolved/DNS/Transaction.agda
 
 check-packaging:
-	bash -n scripts/install-replace.sh scripts/uninstall-restore.sh scripts/boot-smoke.sh
+	bash -n scripts/install-replace.sh scripts/uninstall-restore.sh scripts/boot-smoke.sh nss/run-tests.sh
 	@set -eu; \
 	work=$$(mktemp -d); \
 	trap 'rm -rf "$$work"' EXIT HUP INT TERM; \
-	PYTHONPYCACHEPREFIX="$$work/pycache" python3 -m py_compile tests/live-dns.py scripts/probe-stub.py; \
+	PYTHONPYCACHEPREFIX="$$work/pycache" python3 -m py_compile \
+		tests/live-dns.py tests/deterministic-dns-server.py scripts/probe-stub.py; \
 	test "$$(grep -Fc 'ExecStart=@SYSTEMD_RESOLVED_RS@' packaging/systemd/systemd-resolved-replacement.service)" -eq 1; \
 	sed 's|@SYSTEMD_RESOLVED_RS@|/bin/true|g' \
 		packaging/systemd/systemd-resolved-replacement.service >"$$work/systemd-resolved.service"; \
@@ -58,7 +59,10 @@ check-packaging:
 check-live: build
 	python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
 
-test: check-native check-rust check-packaging
+check-nss:
+	$(MAKE) -C nss clean check
+
+test: check-native check-rust check-packaging check-nss
 
 install: build
 	install -Dm0755 target/release/systemd-resolved $(DESTDIR)$(LIBEXECDIR)/systemd-resolved
@@ -69,6 +73,7 @@ install: build
 
 clean:
 	rm -rf build target
+	$(MAKE) -C nss clean
 
 supremacy-dirs:
 	mkdir -p src/supremacy src/llmnr src/mdns nss scripts tests/parity tests/supremacy
@@ -77,9 +82,9 @@ supremacy-dirs:
 nss:
 	$(MAKE) -C nss
 
-release: build check-packaging
+release: build check-packaging check-nss
 
-release-with-nss: release nss
+release-with-nss: release
 
 install-replace: release
 	sudo bash scripts/install-replace.sh
