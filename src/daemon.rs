@@ -221,8 +221,7 @@ fn bind_endpoints(
                         mode,
                     });
                 }
-                Err(error)
-                    if ignore_addr_in_use && error.kind() == io::ErrorKind::AddrInUse => {}
+                Err(error) if ignore_addr_in_use && error.kind() == io::ErrorKind::AddrInUse => {}
                 Err(error) => return Err(error),
             }
         }
@@ -236,8 +235,7 @@ fn bind_endpoints(
                         mode,
                     });
                 }
-                Err(error)
-                    if ignore_addr_in_use && error.kind() == io::ErrorKind::AddrInUse => {}
+                Err(error) if ignore_addr_in_use && error.kind() == io::ErrorKind::AddrInUse => {}
                 Err(error) => return Err(error),
             }
         }
