@@ -42,10 +42,14 @@ impl Resolver {
         if servers.is_empty() {
             return Err(ResolveError::NoNameServers);
         }
+        let mut budget = DnsAttemptBudget::new();
         let mut attempted = HashSet::new();
         let mut last_response = None;
         let mut last_error = None;
         for _ in 0..self.config.attempts {
+            if budget.exhausted() || budget.expired() {
+                break;
+            }
             if attempted.len() == servers.len() {
                 attempted.clear();
             }
@@ -54,11 +58,14 @@ impl Resolver {
             };
             attempted.insert(server);
             let started = Instant::now();
-            match self.exchange_with_features(server, query) {
+            match self.exchange_with_features(server, query, &mut budget) {
                 Ok(response) => {
                     self.record_success(server, started.elapsed());
                     if Header::parse(&response)?.response_code() == RCODE_REFUSED {
                         last_response = Some(response);
+                        if attempted.len() == servers.len() {
+                            break;
+                        }
                         continue;
                     }
                     return Ok(response);
@@ -66,11 +73,20 @@ impl Resolver {
                 Err(error) => {
                     self.record_failure(server, started.elapsed());
                     last_error = Some(error);
+                    if budget.exhausted() || budget.expired() {
+                        break;
+                    }
                 }
             }
         }
         if let Some(response) = last_response {
             Ok(response)
+        } else if budget.expired() {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "DNS query timed out").into())
+        } else if budget.exhausted() && last_error.is_none() {
+            Err(ResolveError::Protocol(
+                "maximum DNS transaction attempts reached",
+            ))
         } else {
             Err(last_error.unwrap_or(ResolveError::NoNameServers))
         }
