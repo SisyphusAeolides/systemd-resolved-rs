@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/systemd/systemd.git",
+  "release": "v261",
+  "commit": "de9dbc37ad4aa637e200ac02a0545095997055df"
+}

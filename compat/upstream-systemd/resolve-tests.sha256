@@ -1,0 +1,7 @@
+ea0f981e7a73fb28c6e37437aab8b73d14223678e9941e1c39f49df142ee1094  test/auxv/resolved.arm32
+66272f11091dbe49c1b887b2c18882e30efd55bea26c8e30de5b5f408bc8eb82  test/fuzz/fuzz-unit-file/systemd-resolved.service
+d949d90e0dad4270f0a9d413ada0a57abe196105bff553cf61bf819c704b95d5  test/integration-tests/TEST-75-RESOLVED/meson.build
+aa5476a9cc436af53c0766de3fe644a5d86ea1fe6f0c1a4d07c97720bbc2777e  test/test-network/conf/25-dhcp-client-resolve-hook.network
+4bae252335aacad973dc9796754fa2861132b787b0e1c73438ff3dcce85cffc6  test/test-network/conf/25-dhcp-server-resolve-hook.network
+bf4551f76d6d978921f9ff8cfdf863d8dbd4523c2064200c4a7b9652a58050c2  test/units/TEST-75-RESOLVED.sh
+5ea1f09dd4b434da27f7d8429cc25a79b7d0ab9acb7e42b73026f59594085060  test/units/TEST-89-RESOLVED-MDNS.sh
