@@ -17,14 +17,16 @@ mod test_22_logical_server_identity {
     #[test]
     fn same_address_metadata_expands_into_distinct_server_keys() {
         let address = "192.0.2.53:853".parse().expect("DNS server");
-        let mut config = Config::default();
-        config.upstreams = vec![address];
-        config.upstream_specs = vec![
-            spec(address, "eth0", "one.example"),
-            spec(address, "eth1", "two.example"),
-        ];
-        config.fallback_upstreams.clear();
-        config.fallback_upstream_specs.clear();
+        let config = Config {
+            upstreams: vec![address],
+            upstream_specs: vec![
+                spec(address, "eth0", "one.example"),
+                spec(address, "eth1", "two.example"),
+            ],
+            fallback_upstreams: Vec::new(),
+            fallback_upstream_specs: Vec::new(),
+            ..Config::default()
+        };
         let resolver = Resolver::new(config);
 
         let specs = resolver.server_specs_for_scope(ScopeKind::Global, &[address]);
@@ -39,12 +41,14 @@ mod test_22_logical_server_identity {
     #[test]
     fn attempted_identity_does_not_suppress_same_address_peer() {
         let address = "192.0.2.53:853".parse().expect("DNS server");
-        let mut config = Config::default();
-        config.upstreams = vec![address];
-        config.upstream_specs = vec![
-            spec(address, "eth0", "one.example"),
-            spec(address, "eth1", "two.example"),
-        ];
+        let config = Config {
+            upstreams: vec![address],
+            upstream_specs: vec![
+                spec(address, "eth0", "one.example"),
+                spec(address, "eth1", "two.example"),
+            ],
+            ..Config::default()
+        };
         let resolver = Resolver::new(config);
         let specs = resolver.server_specs_for_scope(ScopeKind::Global, &[address]);
         let keys = server_keys_for_specs(ScopeKind::Global, &specs);
