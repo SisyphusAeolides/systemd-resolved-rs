@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use crate::cache::{Cache, CacheKey};
-use crate::config::{Config, Domain, SupportMode, TlsMode, ValidationMode};
+use crate::config::{Config, DnsServerSpec, Domain, SupportMode, TlsMode, ValidationMode};
 use crate::edns::{self, FeatureLevel, ServerFeatureState};
 use crate::hosts::Hosts;
 use crate::native;
@@ -289,6 +289,7 @@ pub struct Resolver {
     tcp_streams: Mutex<HashMap<ServerKey, Vec<TcpStream>>>,
     routing: RwLock<RoutingTable>,
     networkd_links: RwLock<HashMap<i32, NetworkdLinkState>>,
+    link_server_specs: RwLock<HashMap<i32, Vec<DnsServerSpec>>>,
     routing_generation: AtomicU64,
     inflight: Inflight,
     cache: Cache,
