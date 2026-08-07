@@ -5,7 +5,7 @@ use crate::native;
 use crate::resolver::{ResolveError, Resolver};
 use crate::wire::{
     extract_answer_records, extract_service_records, make_query, Header, CLASS_ANY, CLASS_IN,
-    TYPE_SRV, TYPE_TXT,
+    TYPE_A, TYPE_AAAA, TYPE_SRV, TYPE_TXT,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -349,10 +349,11 @@ struct ServiceEntries {
 }
 
 fn resolve_service(parameters: &Value, resolver: &Resolver) -> Value {
-    let request = match service_request(parameters) {
+    let mut request = match service_request(parameters) {
         Ok(request) => request,
         Err(error) => return error,
     };
+    apply_refused_service_flags(&mut request, resolver);
     let srv_response = match resolver.resolve_record_on_link(
         &request.question.owner,
         CLASS_IN,
@@ -376,11 +377,26 @@ fn resolve_service(parameters: &Value, resolver: &Resolver) -> Value {
         return error("io.systemd.Resolve.NoSuchResourceRecord");
     }
 
-    let mut output = service_parameters(&request.question, entries.values, &srv_response);
+    let mut output = service_parameters(
+        &request.question,
+        entries.values,
+        &srv_response,
+        request.flags,
+    );
     if let Err(error) = add_service_txt(&mut output, &request, resolver) {
         return error;
     }
     success(Value::Object(output))
+}
+
+fn apply_refused_service_flags(request: &mut ServiceRequest, resolver: &Resolver) {
+    let refused = &resolver.config().refuse_record_types;
+    if refused.contains(&TYPE_A) && refused.contains(&TYPE_AAAA) {
+        request.flags |= SD_RESOLVED_NO_ADDRESS;
+    }
+    if refused.contains(&TYPE_TXT) {
+        request.flags |= SD_RESOLVED_NO_TXT;
+    }
 }
 
 fn service_request(parameters: &Value) -> Result<ServiceRequest, Value> {
@@ -488,6 +504,7 @@ fn service_parameters(
     question: &ServiceQuestion,
     services: Vec<Value>,
     srv_response: &[u8],
+    request_flags: u64,
 ) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("services".to_owned(), Value::Array(services)),
@@ -507,7 +524,10 @@ fn service_parameters(
         ),
         (
             "flags".to_owned(),
-            Value::Number(i128::from(response_flags(srv_response))),
+            Value::Number(i128::from(
+                response_flags(srv_response)
+                    | (request_flags & (SD_RESOLVED_NO_ADDRESS | SD_RESOLVED_NO_TXT)),
+            )),
         ),
     ])
 }
@@ -875,6 +895,21 @@ fn optional_i32(parameters: &Value, key: &str, default: i32) -> Result<i32, Valu
 }
 
 fn resolver_error(error_value: &ResolveError) -> Value {
+    if let ResolveError::DnsError { rcode, query } = error_value {
+        return Value::object([
+            (
+                "error",
+                Value::String("io.systemd.Resolve.DNSError".to_owned()),
+            ),
+            (
+                "parameters",
+                Value::object([
+                    ("rcode", Value::Number(i128::from(*rcode))),
+                    ("queryString", Value::String(query.clone())),
+                ]),
+            ),
+        ]);
+    }
     error(error_value.varlink_id())
 }
 
@@ -960,6 +995,64 @@ mod tests {
             .get("raw")
             .and_then(Value::as_str)
             .is_some_and(|raw| !raw.is_empty()));
+    }
+
+    #[test]
+    fn refused_record_returns_structured_dns_error() {
+        let mut config = Config::default();
+        config
+            .apply_text("[Resolve]\nRefuseRecordTypes=AAAA\n")
+            .expect("refuse configuration");
+        let resolver = Resolver::new(config);
+        let reply = dispatch(
+            r#"{"method":"io.systemd.Resolve.ResolveRecord","parameters":{"name":"localhost","class":1,"type":28}}"#,
+            &resolver,
+        );
+        assert_eq!(
+            reply.get("error").and_then(Value::as_str),
+            Some("io.systemd.Resolve.DNSError")
+        );
+        let parameters = reply.get("parameters").expect("error parameters");
+        assert_eq!(parameters.get("rcode").and_then(Value::as_u64), Some(5));
+        assert_eq!(
+            parameters.get("queryString").and_then(Value::as_str),
+            Some("localhost")
+        );
+    }
+
+    #[test]
+    fn refused_service_auxiliary_types_set_implicit_flags() {
+        let mut config = Config::default();
+        config
+            .apply_text("[Resolve]\nRefuseRecordTypes=A AAAA TXT\n")
+            .expect("refuse configuration");
+        let resolver = Resolver::new(config);
+        let mut request = service_request(&Value::object([
+            ("name", Value::Null),
+            ("type", Value::String("_demo._tcp".to_owned())),
+            ("domain", Value::String("example.test".to_owned())),
+        ]))
+        .expect("service request");
+        apply_refused_service_flags(&mut request, &resolver);
+        assert_ne!(request.flags & SD_RESOLVED_NO_ADDRESS, 0);
+        assert_ne!(request.flags & SD_RESOLVED_NO_TXT, 0);
+    }
+
+    #[test]
+    fn refusing_only_one_address_family_does_not_disable_addresses() {
+        let mut config = Config::default();
+        config
+            .apply_text("[Resolve]\nRefuseRecordTypes=AAAA\n")
+            .expect("refuse configuration");
+        let resolver = Resolver::new(config);
+        let mut request = service_request(&Value::object([
+            ("name", Value::Null),
+            ("type", Value::String("_demo._tcp".to_owned())),
+            ("domain", Value::String("example.test".to_owned())),
+        ]))
+        .expect("service request");
+        apply_refused_service_flags(&mut request, &resolver);
+        assert_eq!(request.flags & SD_RESOLVED_NO_ADDRESS, 0);
     }
 
     #[test]
