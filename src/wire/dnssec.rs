@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
+include!("dnssec_records.rs");
 
 const RRSIG_FIXED_FIELDS_LEN: usize = 18;
 const RRSIG_MINIMUM_RDATA_LEN: usize = RRSIG_FIXED_FIELDS_LEN + 2;
