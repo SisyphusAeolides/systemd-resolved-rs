@@ -23,6 +23,27 @@ mod test_19_refuse_record_types {
     }
 
     #[test]
+    fn high_level_record_api_preserves_refused_rcode() {
+        let mut config = Config {
+            upstreams: Vec::new(),
+            fallback_upstreams: Vec::new(),
+            ..Config::default()
+        };
+        config
+            .apply_text("[Resolve]\nRefuseRecordTypes=AAAA\n")
+            .expect("refuse record type configuration");
+        let resolver = Resolver::new(config);
+        let error = resolver
+            .resolve_record("localhost", TYPE_AAAA)
+            .expect_err("AAAA must be refused");
+        assert!(matches!(
+            error,
+            ResolveError::DnsError { rcode: 5, ref query } if query == "localhost"
+        ));
+        assert_eq!(error.varlink_id(), "io.systemd.Resolve.DNSError");
+    }
+
+    #[test]
     fn unrefused_type_still_uses_local_synthesis() {
         let mut config = Config {
             upstreams: Vec::new(),
