@@ -8,19 +8,15 @@ impl Config {
             assignments.merge(apply_optional_file(&mut config, &drop_in)?);
         }
 
-        let credentials = apply_credentials_from_environment(
-            &mut config,
-            !assignments.dns,
-            !assignments.domains,
-        );
-        assignments.merge(credentials);
-
-        if !assignments.dns || !assignments.domains {
+        let may_read_external_configuration = !assignments.dns && !assignments.domains;
+        let credentials_present =
+            may_read_external_configuration && apply_credentials_from_environment(&mut config);
+        if may_read_external_configuration && !credentials_present {
             let discovered = discover_resolv_conf_state(Path::new("/etc/resolv.conf"))?;
-            if !assignments.dns && config.upstreams.is_empty() {
+            if config.upstreams.is_empty() {
                 config.upstreams = discovered.servers;
             }
-            if !assignments.domains && config.domains.is_empty() {
+            if config.domains.is_empty() {
                 config.domains = discovered.domains;
             }
         }
