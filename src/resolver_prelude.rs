@@ -116,6 +116,20 @@ impl ServerKey {
         self.server
     }
 
+    const fn scope_kind(self) -> ScopeKind {
+        if self.scope > 0 {
+            ScopeKind::Link(self.scope)
+        } else if self.scope < 0 {
+            ScopeKind::Fallback
+        } else {
+            ScopeKind::Global
+        }
+    }
+
+    const fn slot(self) -> usize {
+        self.slot
+    }
+
     const fn ifindex(self) -> Option<i32> {
         if self.scope > 0 {
             Some(self.scope)
