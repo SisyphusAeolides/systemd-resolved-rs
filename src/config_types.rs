@@ -97,6 +97,28 @@ pub struct DnsStubListenerExtra {
 }
 
 impl DnsStubListenerExtra {
+    pub fn parse(value: &str) -> Result<Self, ConfigError> {
+        let value = value.trim();
+        let (mode, address) = if let Some(address) = value.strip_prefix("udp:") {
+            (DnsStubListenerMode::Udp, address)
+        } else if let Some(address) = value.strip_prefix("tcp:") {
+            (DnsStubListenerMode::Tcp, address)
+        } else {
+            (DnsStubListenerMode::Yes, value)
+        };
+        if address.is_empty() {
+            return Err(ConfigError::InvalidValue(value.to_owned()));
+        }
+        let address = if let Ok(address) = address.parse::<SocketAddr>() {
+            address
+        } else if let Ok(address) = address.parse::<IpAddr>() {
+            SocketAddr::new(address, 53)
+        } else {
+            return Err(ConfigError::InvalidValue(value.to_owned()));
+        };
+        Ok(Self { address, mode })
+    }
+
     pub const fn address(self) -> SocketAddr {
         self.address
     }
