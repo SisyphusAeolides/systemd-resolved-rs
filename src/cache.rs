@@ -130,7 +130,11 @@ impl Cache {
 
         let now = Instant::now();
         let expires = now.checked_add(ttl).unwrap_or(now);
-        let stale_until = expires.checked_add(self.stale_retention).unwrap_or(expires);
+        let stale_until = if negative {
+            expires
+        } else {
+            expires.checked_add(self.stale_retention).unwrap_or(expires)
+        };
         let mut packet = response.to_vec();
         rewrite_id(&mut packet, 0)?;
 
@@ -263,5 +267,37 @@ mod tests {
         let response = servfail_response(7);
         assert!(!cache.insert(key(), &response).expect("SERVFAIL insert"));
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn negative_entries_do_not_receive_stale_retention() {
+        let cache = Cache::new(
+            16,
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+            true,
+        );
+        let response = servfail_response(7);
+        assert!(cache.insert(key(), &response).expect("SERVFAIL insert"));
+        let state = cache.state();
+        let entry = state.entries.get(&key()).expect("cache entry");
+        assert_eq!(entry.stale_until, entry.expires);
+    }
+
+    #[test]
+    fn positive_entries_receive_stale_retention() {
+        let cache = Cache::new(
+            16,
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+            true,
+        );
+        let query = make_query("example", TYPE_A, 7).expect("query");
+        let response = local_response(&query, &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))], 30)
+            .expect("response");
+        assert!(cache.insert(key(), &response).expect("cache insert"));
+        let state = cache.state();
+        let entry = state.entries.get(&key()).expect("cache entry");
+        assert!(entry.stale_until > entry.expires);
     }
 }
