@@ -6,6 +6,61 @@ mod test_13_transport_fallback {
     use std::net::TcpListener;
 
     #[test]
+    fn reuses_idle_connected_udp_socket() {
+        let datagram_socket = UdpSocket::bind("127.0.0.1:0").expect("mock UDP bind");
+        let server_address = datagram_socket.local_addr().expect("mock DNS address");
+        datagram_socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("mock UDP timeout");
+
+        let datagram_thread = thread::spawn(move || {
+            let mut peer_ports = Vec::new();
+            for address in [Ipv4Addr::new(192, 0, 2, 20), Ipv4Addr::new(192, 0, 2, 21)] {
+                let mut buffer = [0; 2048];
+                let (length, peer) = datagram_socket
+                    .recv_from(&mut buffer)
+                    .expect("mock UDP query");
+                peer_ports.push(peer.port());
+                let response = local_response(
+                    &buffer[..length],
+                    &[LocalRecord::A(address)],
+                    30,
+                )
+                .expect("mock A response");
+                let response =
+                    edns::add_test_response_opt(&response, 0, false).expect("response OPT");
+                datagram_socket
+                    .send_to(&response, peer)
+                    .expect("mock UDP response");
+            }
+            peer_ports
+        });
+
+        let resolver = Resolver::new(Config {
+            upstreams: vec![server_address],
+            fallback_upstreams: Vec::new(),
+            cache: false,
+            attempts: 1,
+            query_timeout: Duration::from_millis(500),
+            read_etc_hosts: false,
+            read_static_records: false,
+            dnssec: ValidationMode::No,
+            ..Config::default()
+        });
+
+        for (id, name) in [(0x70f0, "pool-one.example"), (0x70f1, "pool-two.example")] {
+            let query = make_query(name, TYPE_A, id).expect("client query");
+            resolver
+                .query(&query, QueryMode::Full)
+                .expect("resolver response");
+        }
+
+        let peer_ports = datagram_thread.join().expect("mock UDP thread");
+        assert_eq!(peer_ports.len(), 2);
+        assert_eq!(peer_ports[0], peer_ports[1]);
+    }
+
+    #[test]
     fn ignores_unrelated_udp_reply_and_uses_path_mtu_payload_size() {
         let datagram_socket = UdpSocket::bind("127.0.0.1:0").expect("mock UDP bind");
         let server_address = datagram_socket.local_addr().expect("mock DNS address");
