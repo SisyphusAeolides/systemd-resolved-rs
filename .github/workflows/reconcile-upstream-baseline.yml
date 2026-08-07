@@ -1,0 +1,129 @@
+name: Reconcile upstream resolver baseline
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/reconcile-upstream-baseline.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  pin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out and synchronize source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize with current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Pin official upstream release
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/systemd-upstream
+          git clone --filter=blob:none --no-checkout https://github.com/systemd/systemd.git /tmp/systemd-upstream
+          git -C /tmp/systemd-upstream fetch --tags --force
+          release=$(git -C /tmp/systemd-upstream tag --list 'v[0-9]*' --sort=-version:refname \
+            | grep -E '^v[0-9]+$' | head -n1)
+          test -n "$release"
+          git -C /tmp/systemd-upstream checkout --detach "$release"
+          commit=$(git -C /tmp/systemd-upstream rev-parse HEAD)
+
+          rm -rf compat/upstream-systemd
+          mkdir -p compat/upstream-systemd/interfaces compat/upstream-systemd/proofs
+          printf '%s\n' "$release" > compat/upstream-systemd/release
+          printf '%s\n' "$commit" > compat/upstream-systemd/commit
+          printf '%s\n' 'https://github.com/systemd/systemd.git' > compat/upstream-systemd/repository
+          printf '{\n  "schema": 1,\n  "repository": "https://github.com/systemd/systemd.git",\n  "release": "%s",\n  "commit": "%s"\n}\n' \
+            "$release" "$commit" > compat/upstream-systemd/baseline.json
+
+          find /tmp/systemd-upstream/src/resolve -type f -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's#  /tmp/systemd-upstream/#  #' \
+            > compat/upstream-systemd/resolve-source.sha256
+
+          find /tmp/systemd-upstream/test -type f \
+            \( -path '*/TEST-75-RESOLVED/*' \
+               -o -iname '*resolved*' \
+               -o -iname '*resolve*' \
+               -o -iname '*mdns*' \
+               -o -iname '*dnssd*' \) \
+            -print0 \
+            | sort -z \
+            | xargs -0 --no-run-if-empty sha256sum \
+            | sed 's#  /tmp/systemd-upstream/#  #' \
+            > compat/upstream-systemd/resolve-tests.sha256
+
+          find /tmp/systemd-upstream/src/resolve -maxdepth 1 -type f \
+            \( -name 'org.freedesktop.resolve1*.xml' \
+               -o -name 'varlink-io.systemd.Resolve*.c' \
+               -o -name 'varlink-io.systemd.Resolve*.h' \) \
+            -exec cp -f '{}' compat/upstream-systemd/interfaces/ ';'
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('/tmp/systemd-upstream')
+          surfaces = []
+          for path in sorted((root / 'src' / 'resolve').rglob('*')):
+              if path.is_file():
+                  surfaces.append(path.relative_to(root).as_posix())
+          for path in sorted((root / 'test').rglob('*')):
+              if not path.is_file():
+                  continue
+              lowered = path.name.lower()
+              relative = path.relative_to(root).as_posix()
+              if 'TEST-75-RESOLVED' in relative or any(
+                  token in lowered for token in ('resolved', 'resolve', 'mdns', 'dnssd')
+              ):
+                  surfaces.append(relative)
+          Path('compat/upstream-systemd/surfaces.txt').write_text(
+              '\n'.join(sorted(set(surfaces))) + '\n', encoding='utf-8'
+          )
+          PY
+
+          test -s compat/upstream-systemd/resolve-source.sha256
+          test -s compat/upstream-systemd/resolve-tests.sha256
+          test -s compat/upstream-systemd/surfaces.txt
+
+      - name: Commit baseline
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git rm --force .github/workflows/reconcile-upstream-baseline.yml
+          git add compat/upstream-systemd
+          git diff --cached --check
+          git commit -m 'Pin the official systemd resolver baseline'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
