@@ -7,7 +7,7 @@ impl Resolver {
         query: &[u8],
     ) -> Result<(Vec<u8>, SocketAddr), ResolveError> {
         if scopes.len() == 1 {
-            return self.query_servers(&scopes[0].servers, query);
+            return self.query_servers(scopes[0].kind, &scopes[0].servers, query);
         }
 
         thread::scope(|thread_scope| {
@@ -15,7 +15,11 @@ impl Resolver {
             for route_scope in scopes {
                 let sender = sender.clone();
                 thread_scope.spawn(move || {
-                    let _ = sender.send(self.query_servers(&route_scope.servers, query));
+                    let _ = sender.send(self.query_servers(
+                        route_scope.kind,
+                        &route_scope.servers,
+                        query,
+                    ));
                 });
             }
             drop(sender);
@@ -44,6 +48,7 @@ impl Resolver {
 
     fn query_servers(
         &self,
+        scope: ScopeKind,
         servers: &[SocketAddr],
         query: &[u8],
     ) -> Result<(Vec<u8>, SocketAddr), ResolveError> {
@@ -61,14 +66,15 @@ impl Resolver {
             if attempted.len() == servers.len() {
                 attempted.clear();
             }
-            let Some(server) = self.select_server(servers, &attempted) else {
+            let Some(server_key) = self.select_server(scope, servers, &attempted) else {
                 break;
             };
+            let server = server_key.server();
             attempted.insert(server);
             let started = Instant::now();
-            match self.exchange_with_features(server, query, &mut budget) {
+            match self.exchange_with_features(server_key, query, &mut budget) {
                 Ok(response) => {
-                    self.record_success(server, started.elapsed());
+                    self.record_success(server_key, started.elapsed());
                     if Header::parse(&response)?.response_code() == RCODE_REFUSED {
                         last_response = Some((response, server));
                         if attempted.len() == servers.len() {
@@ -79,7 +85,7 @@ impl Resolver {
                     return Ok((response, server));
                 }
                 Err(error) => {
-                    self.record_failure(server, started.elapsed());
+                    self.record_failure(server_key, started.elapsed());
                     last_error = Some(error);
                     if budget.exhausted() || budget.expired() {
                         break;
@@ -102,15 +108,17 @@ impl Resolver {
 
     fn select_server(
         &self,
+        scope: ScopeKind,
         servers: &[SocketAddr],
         attempted: &HashSet<SocketAddr>,
-    ) -> Option<SocketAddr> {
+    ) -> Option<ServerKey> {
         let now = Instant::now();
         let mut states = self.states();
         let metrics: Vec<_> = servers
             .iter()
             .map(|server| {
-                let state = states.entry(*server).or_default();
+                let key = ServerKey::new(scope, *server);
+                let state = states.entry(key).or_default();
                 let mut metric = state.metric;
                 metric.cooldown_ms = state
                     .cooldown_until
@@ -123,10 +131,10 @@ impl Resolver {
                 metric
             })
             .collect();
-        choose_server(&metrics).map(|index| servers[index])
+        choose_server(&metrics).map(|index| ServerKey::new(scope, servers[index]))
     }
 
-    fn record_success(&self, server: SocketAddr, duration: Duration) {
+    fn record_success(&self, server: ServerKey, duration: Duration) {
         let mut states = self.states();
         let state = states.entry(server).or_default();
         state.metric.round_trip_ms = update_rtt(
@@ -138,7 +146,7 @@ impl Resolver {
         state.cooldown_until = None;
     }
 
-    fn record_failure(&self, server: SocketAddr, duration: Duration) {
+    fn record_failure(&self, server: ServerKey, duration: Duration) {
         let mut states = self.states();
         let state = states.entry(server).or_default();
         state.metric.round_trip_ms = update_rtt(
