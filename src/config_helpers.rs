@@ -167,10 +167,11 @@ fn parse_bool(value: &str) -> Result<bool, ConfigError> {
     }
 }
 
-fn parse_cache_mode(value: &str) -> Result<bool, ConfigError> {
+fn parse_cache_mode(value: &str) -> Result<(bool, bool), ConfigError> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "yes" | "true" | "on" | "1" | "no-negative" => Ok(true),
-        "no" | "false" | "off" | "0" => Ok(false),
+        "yes" | "true" | "on" | "1" => Ok((true, true)),
+        "no-negative" => Ok((true, false)),
+        "no" | "false" | "off" | "0" => Ok((false, false)),
         _ => Err(ConfigError::InvalidValue(value.to_owned())),
     }
 }
@@ -266,4 +267,3 @@ fn atomic_write(path: &Path, contents: &str) -> Result<(), ConfigError> {
     fs::rename(temporary, path)?;
     Ok(())
 }
-
