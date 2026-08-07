@@ -12,6 +12,14 @@ int resolved_take_reload(void);
 int resolved_should_stop(void);
 int resolved_peer_credentials(int fd, uint32_t *pid, uint32_t *uid, uint32_t *gid);
 
+int resolved_udp_connect(const char *address, uint16_t port, uint32_t scope_id, int ifindex);
+int resolved_tcp_connect(
+    const char *address,
+    uint16_t port,
+    uint32_t scope_id,
+    int ifindex,
+    uint32_t timeout_msec
+);
 int resolved_udp_path_mtu(int fd, int ipv6);
 int resolved_udp_enable_recvfragsize(int fd, int ipv6);
 int64_t resolved_udp_recv(int fd, void *buffer, size_t capacity, uint32_t *fragment_size);
