@@ -17,6 +17,7 @@ pub mod hosts;
 pub mod json;
 pub mod native;
 pub mod netlink;
+pub mod networkd;
 pub mod policy;
 pub mod resolver;
 pub mod routing;
