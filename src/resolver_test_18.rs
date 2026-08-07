@@ -116,7 +116,11 @@ mod test_18_servfail_ede {
         let query = make_query("not-ready.example", TYPE_A, 0x7401).expect("client query");
         let mut budget = DnsAttemptBudget::new();
         let response = resolver
-            .exchange_with_features(server_address, &query, &mut budget)
+            .exchange_with_features(
+                ServerKey::new(ScopeKind::Global, server_address),
+                &query,
+                &mut budget,
+            )
             .expect("resolver response");
         let records = extract_address_records(&response, Some(2)).expect("address records");
         assert_eq!(
@@ -166,15 +170,16 @@ mod test_18_servfail_ede {
             ..Config::default()
         });
         let query = make_query("ede-servfail.example", TYPE_A, 0x7402).expect("client query");
+        let key = ServerKey::new(ScopeKind::Global, server_address);
         let mut budget = DnsAttemptBudget::new();
         let response = resolver
-            .exchange_with_features(server_address, &query, &mut budget)
+            .exchange_with_features(key, &query, &mut budget)
             .expect("SERVFAIL response");
         assert_eq!(Header::parse(&response).expect("response header").response_code(), 2);
         assert_eq!(budget.attempts(), 1);
 
         let mut states = resolver.states();
-        let state = states.get_mut(&server_address).expect("server state");
+        let state = states.get_mut(&key).expect("server state");
         assert_eq!(
             state
                 .features
