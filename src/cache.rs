@@ -180,11 +180,7 @@ mod tests {
 
     #[test]
     fn concurrent_hits_keep_transaction_ids_isolated() {
-        let cache = std::sync::Arc::new(Cache::new(
-            16,
-            Duration::from_secs(60),
-            Duration::ZERO,
-        ));
+        let cache = std::sync::Arc::new(Cache::new(16, Duration::from_secs(60), Duration::ZERO));
         let query = make_query("example", TYPE_A, 7).expect("query");
         let response = local_response(&query, &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))], 30)
             .expect("response");
