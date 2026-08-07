@@ -1,0 +1,119 @@
+name: Apply tested NSS Varlink integration
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-nss-varlink-recovered.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/nss-varlink","description":"NSS Varlink integration in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Recover and apply the tested integration script
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          source = "2242ea4dedede2f693b4373213e29c22f8cb670b:.github/workflows/apply-nss-varlink.yml"
+          text = subprocess.check_output(["git", "show", source], text=True)
+          lines = text.splitlines()
+          section = "      - name: Install NSS Varlink client and tests"
+          try:
+              start = lines.index(section)
+          except ValueError as error:
+              raise SystemExit("historical NSS integration section is missing") from error
+          while start < len(lines) and lines[start] != "        run: |":
+              start += 1
+          if start == len(lines):
+              raise SystemExit("historical NSS integration run block is missing")
+          start += 1
+          end = start
+          while end < len(lines) and not lines[end].startswith("      - name: "):
+              end += 1
+          body = []
+          for line in lines[start:end]:
+              if line.startswith("          "):
+                  body.append(line[10:])
+              elif not line:
+                  body.append("")
+              else:
+                  raise SystemExit(f"unexpected indentation in historical workflow: {line!r}")
+          script = "\n".join(body) + "\n"
+          Path("/tmp/apply-nss-varlink.sh").write_text(script, encoding="utf-8")
+          PY
+          bash -n /tmp/apply-nss-varlink.sh
+          bash /tmp/apply-nss-varlink.sh
+
+      - name: Canonicalize and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          cargo fmt --all
+          make check-packaging
+          make check-nss
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          git diff --check
+
+      - name: Commit tested integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/apply-nss-varlink-recovered.yml
+          git config user.name "SisyphusAeolides"
+          git config user.email "37166405+SisyphusAeolides@users.noreply.github.com"
+          git add -A
+          git commit -m "Use Varlink for NSS resolution with stub fallback"
+          git push origin HEAD:main
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'NSS Varlink integration passed' || 'NSS Varlink integration failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/nss-varlink","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
