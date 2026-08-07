@@ -46,10 +46,7 @@ impl OperationalState {
     }
 
     pub const fn resolver_relevant(self) -> bool {
-        matches!(
-            Self::DegradedCarrier | Self::Degraded | Self::Routable,
-            self
-        )
+        matches!(self, Self::DegradedCarrier | Self::Degraded | Self::Routable)
     }
 }
 
