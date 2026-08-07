@@ -70,12 +70,6 @@ jobs:
               else:
                   raise SystemExit(f"unexpected indentation in historical workflow: {line!r}")
           script = "\n".join(body) + "\n"
-
-          # The historical workflow embedded its final Makefile match across a
-          # YAML-indented Python string, making the matcher depend on whitespace
-          # that never existed in the Makefile. Replace only that final edit with
-          # an idempotent token replacement; the generated feature code remains
-          # byte-for-byte the historical implementation.
           block_start = script.index('path = Path("Makefile")')
           block_end = script.index("\nPY\n", block_start)
           replacement = '''path = Path("Makefile")
@@ -93,6 +87,17 @@ jobs:
           PY
           bash -n /tmp/apply-nss-varlink.sh
           bash /tmp/apply-nss-varlink.sh
+          tar --create --gzip --file=/tmp/generated-nss-varlink.tar.gz \
+            nss Makefile tests/fake-varlink-resolve.py
+
+      - name: Upload generated integration
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-nss-varlink
+          path: /tmp/generated-nss-varlink.tar.gz
+          if-no-files-found: ignore
+          retention-days: 1
 
       - name: Canonicalize and verify
         shell: bash
