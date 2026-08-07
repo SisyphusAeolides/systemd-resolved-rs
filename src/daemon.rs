@@ -143,7 +143,7 @@ pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
         threads.push(
             thread::Builder::new()
                 .name(format!("resolved-udp-worker-{index}"))
-                .spawn(move || udp_worker(&resolver, receiver))?,
+                .spawn(move || udp_worker(&resolver, &receiver))?,
         );
     }
     let dispatcher = Arc::new(UdpDispatcher::new(senders));
@@ -249,7 +249,7 @@ fn udp_listener(endpoint: &UdpEndpoint, dispatcher: &UdpDispatcher) {
     }
 }
 
-fn udp_worker(resolver: &Resolver, receiver: Receiver<UdpJob>) {
+fn udp_worker(resolver: &Resolver, receiver: &Receiver<UdpJob>) {
     while !stop_requested() {
         let job = match receiver.recv_timeout(Duration::from_millis(250)) {
             Ok(job) => job,
