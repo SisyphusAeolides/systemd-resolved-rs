@@ -7,6 +7,7 @@ use crate::native;
 use crate::networkd::LinkState as NetworkdLinkState;
 use crate::policy::{choose_server, update_rtt, ServerMetric};
 use crate::routing::{LinkError, LinkState, RouteScope, RoutingTable, ScopeKind};
+use crate::tls::{TlsCapability, TlsStream};
 use crate::transport::{ServerTransportState, TransportMode, TRANSPORT_RETRY_ATTEMPTS};
 use crate::wire::{
     self, extract_address_records, extract_ptr_names, first_question, local_response, make_query,
@@ -29,6 +30,7 @@ use std::time::{Duration, Instant};
 
 const UDP_POOL_PER_SERVER_MAX: usize = 8;
 const TCP_POOL_PER_SERVER_MAX: usize = 4;
+const TLS_POOL_PER_SERVER_MAX: usize = 4;
 const DNS_TRANSACTION_ATTEMPTS_MAX: usize = 24;
 const DNS_QUERY_TIMEOUT: Duration = Duration::from_secs(120);
 const DNS_TRANSACTION_UDP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -139,11 +141,24 @@ impl ServerKey {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TlsPoolKey {
+    server: ServerKey,
+    strict: bool,
+}
+
+impl TlsPoolKey {
+    const fn new(server: ServerKey, strict: bool) -> Self {
+        Self { server, strict }
+    }
+}
+
 #[derive(Debug, Default)]
 struct ServerState {
     metric: ServerMetric,
     cooldown_until: Option<Instant>,
     features: ServerFeatureState,
+    tls: TlsCapability,
     transport: ServerTransportState,
     missing_root_rrsig: bool,
 }
@@ -301,6 +316,7 @@ pub struct Resolver {
     states: Mutex<HashMap<ServerKey, ServerState>>,
     udp_sockets: Mutex<HashMap<ServerKey, Vec<UdpSocket>>>,
     tcp_streams: Mutex<HashMap<ServerKey, Vec<TcpStream>>>,
+    tls_streams: Mutex<HashMap<TlsPoolKey, Vec<TlsStream>>>,
     routing: RwLock<RoutingTable>,
     networkd_links: RwLock<HashMap<i32, NetworkdLinkState>>,
     link_server_specs: RwLock<HashMap<i32, Vec<DnsServerSpec>>>,
