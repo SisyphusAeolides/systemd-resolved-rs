@@ -81,7 +81,7 @@ fn canonical_owner(owner: &[u8], labels: u8) -> Result<Vec<u8>, WireError> {
     }
     let canonical = owner
         .iter()
-        .map(|byte| byte.to_ascii_lowercase())
+        .map(u8::to_ascii_lowercase)
         .collect::<Vec<_>>();
     if labels == label_count {
         return Ok(canonical);
