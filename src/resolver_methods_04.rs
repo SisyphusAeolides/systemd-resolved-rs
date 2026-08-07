@@ -1,4 +1,20 @@
 impl Resolver {
+    fn udp_transaction_timeout(&self, remaining: Duration) -> Duration {
+        self.config
+            .query_timeout
+            .min(DNS_TRANSACTION_UDP_TIMEOUT)
+            .min(remaining)
+    }
+
+    fn tcp_transaction_timeout(&self, remaining: Duration) -> Duration {
+        let timeout = if self.config.query_timeout == DNS_TRANSACTION_UDP_TIMEOUT {
+            DNS_TRANSACTION_TCP_TIMEOUT
+        } else {
+            self.config.query_timeout.min(DNS_TRANSACTION_TCP_TIMEOUT)
+        };
+        timeout.min(remaining)
+    }
+
     fn take_udp_socket(&self, server: SocketAddr) -> Result<UdpSocket, ResolveError> {
         let pooled = {
             let mut sockets = self
@@ -8,22 +24,18 @@ impl Resolver {
             sockets.get_mut(&server).and_then(Vec::pop)
         };
 
-        let socket = if let Some(socket) = pooled {
-            socket
-        } else {
-            let bind_address = if server.is_ipv4() {
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
-            } else {
-                SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
-            };
-            let socket = UdpSocket::bind(bind_address)?;
-            socket.connect(server)?;
-            let _ = native::enable_udp_fragment_size(socket.as_raw_fd(), server.is_ipv6());
-            socket
-        };
+        if let Some(socket) = pooled {
+            return Ok(socket);
+        }
 
-        socket.set_read_timeout(Some(self.config.query_timeout))?;
-        socket.set_write_timeout(Some(self.config.query_timeout))?;
+        let bind_address = if server.is_ipv4() {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+        } else {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
+        };
+        let socket = UdpSocket::bind(bind_address)?;
+        socket.connect(server)?;
+        let _ = native::enable_udp_fragment_size(socket.as_raw_fd(), server.is_ipv6());
         Ok(socket)
     }
 
@@ -42,8 +54,12 @@ impl Resolver {
         &self,
         server: SocketAddr,
         query: &[u8],
+        remaining: Duration,
     ) -> Result<(Vec<u8>, u32), ResolveError> {
         let socket = self.take_udp_socket(server)?;
+        let timeout = self.udp_transaction_timeout(remaining);
+        socket.set_read_timeout(Some(timeout))?;
+        socket.set_write_timeout(Some(timeout))?;
         let result = (|| {
             if socket.send(query)? != query.len() {
                 return Err(ResolveError::Protocol("short UDP send"));
@@ -52,7 +68,7 @@ impl Resolver {
             let started = Instant::now();
             let mut response = vec![0; usize::from(u16::MAX)];
             loop {
-                let Some(remaining) = self.config.query_timeout.checked_sub(started.elapsed()) else {
+                let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
                     return Err(
                         io::Error::new(io::ErrorKind::TimedOut, "DNS UDP query timed out").into(),
                     );
@@ -85,14 +101,22 @@ impl Resolver {
         result
     }
 
-    fn new_tcp_stream(&self, server: SocketAddr) -> Result<TcpStream, ResolveError> {
-        let stream = TcpStream::connect_timeout(&server, self.config.query_timeout)?;
-        stream.set_read_timeout(Some(self.config.query_timeout))?;
-        stream.set_write_timeout(Some(self.config.query_timeout))?;
+    fn new_tcp_stream(
+        &self,
+        server: SocketAddr,
+        timeout: Duration,
+    ) -> Result<TcpStream, ResolveError> {
+        let stream = TcpStream::connect_timeout(&server, timeout)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
         Ok(stream)
     }
 
-    fn take_tcp_stream(&self, server: SocketAddr) -> Result<(TcpStream, bool), ResolveError> {
+    fn take_tcp_stream(
+        &self,
+        server: SocketAddr,
+        timeout: Duration,
+    ) -> Result<(TcpStream, bool), ResolveError> {
         let pooled = {
             let mut streams = self
                 .tcp_streams
@@ -103,10 +127,10 @@ impl Resolver {
         let reused = pooled.is_some();
         let stream = match pooled {
             Some(stream) => stream,
-            None => self.new_tcp_stream(server)?,
+            None => self.new_tcp_stream(server, timeout)?,
         };
-        stream.set_read_timeout(Some(self.config.query_timeout))?;
-        stream.set_write_timeout(Some(self.config.query_timeout))?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
         Ok((stream, reused))
     }
 
@@ -142,8 +166,15 @@ impl Resolver {
         Ok(response)
     }
 
-    fn exchange_tcp(&self, server: SocketAddr, query: &[u8]) -> Result<Vec<u8>, ResolveError> {
-        let (mut stream, reused) = self.take_tcp_stream(server)?;
+    fn exchange_tcp(
+        &self,
+        server: SocketAddr,
+        query: &[u8],
+        remaining: Duration,
+    ) -> Result<Vec<u8>, ResolveError> {
+        let timeout = self.tcp_transaction_timeout(remaining);
+        let started = Instant::now();
+        let (mut stream, reused) = self.take_tcp_stream(server, timeout)?;
         let result = Self::exchange_tcp_stream(&mut stream, query);
         if result.is_ok() {
             self.recycle_tcp_stream(server, stream);
@@ -153,7 +184,13 @@ impl Resolver {
             return result;
         }
 
-        let mut fresh = self.new_tcp_stream(server)?;
+        let Some(timeout) = timeout.checked_sub(started.elapsed()) else {
+            return result;
+        };
+        if timeout.is_zero() {
+            return result;
+        }
+        let mut fresh = self.new_tcp_stream(server, timeout)?;
         let result = Self::exchange_tcp_stream(&mut fresh, query);
         if result.is_ok() {
             self.recycle_tcp_stream(server, fresh);
