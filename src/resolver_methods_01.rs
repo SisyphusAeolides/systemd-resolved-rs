@@ -70,6 +70,15 @@ impl Resolver {
         self.routing().link(ifindex)
     }
 
+    pub fn sync_kernel_links(
+        &self,
+        links: Vec<crate::routing::KernelLinkState>,
+    ) -> Result<(), LinkError> {
+        let changed = self.routing_mut().sync_kernel_links(links)?;
+        self.finish_routing_change(changed);
+        Ok(())
+    }
+
     pub fn set_link_dns(&self, ifindex: i32, servers: Vec<SocketAddr>) -> Result<(), LinkError> {
         let changed = self.routing_mut().set_dns(ifindex, servers)?;
         self.finish_routing_change(changed);
