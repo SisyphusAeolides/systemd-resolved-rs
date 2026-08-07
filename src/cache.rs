@@ -271,12 +271,7 @@ mod tests {
 
     #[test]
     fn negative_entries_do_not_receive_stale_retention() {
-        let cache = Cache::new(
-            16,
-            Duration::from_secs(60),
-            Duration::from_secs(300),
-            true,
-        );
+        let cache = Cache::new(16, Duration::from_secs(60), Duration::from_secs(300), true);
         let response = servfail_response(7);
         assert!(cache.insert(key(), &response).expect("SERVFAIL insert"));
         let state = cache.state();
@@ -286,12 +281,7 @@ mod tests {
 
     #[test]
     fn positive_entries_receive_stale_retention() {
-        let cache = Cache::new(
-            16,
-            Duration::from_secs(60),
-            Duration::from_secs(300),
-            true,
-        );
+        let cache = Cache::new(16, Duration::from_secs(60), Duration::from_secs(300), true);
         let query = make_query("example", TYPE_A, 7).expect("query");
         let response = local_response(&query, &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))], 30)
             .expect("response");
