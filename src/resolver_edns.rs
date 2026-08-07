@@ -20,7 +20,7 @@ impl Resolver {
     #[allow(clippy::similar_names, clippy::too_many_lines)]
     fn exchange_with_features(
         &self,
-        server: SocketAddr,
+        server: ServerKey,
         query: &[u8],
         budget: &mut DnsAttemptBudget,
     ) -> Result<Vec<u8>, ResolveError> {
@@ -32,6 +32,7 @@ impl Resolver {
         let mut transport_retries = 0usize;
 
         loop {
+            let address = server.server();
             let path_mtu = self.udp_path_mtu(server);
             let (level, transport, payload_size) = {
                 let mut states = self.states();
@@ -44,14 +45,12 @@ impl Resolver {
                     configured_best_level
                 };
                 let level = forced_level.unwrap_or_else(|| {
-                    state
-                        .features
-                        .possible_level(best_level, Instant::now())
+                    state.features.possible_level(best_level, Instant::now())
                 });
                 let payload_size = native::dns_udp_payload_size(
                     path_mtu,
-                    server.is_ipv6(),
-                    server.ip().is_loopback(),
+                    address.is_ipv6(),
+                    address.ip().is_loopback(),
                     state.transport.packet_fragmented(),
                     state.transport.received_udp_fragment_max(),
                 );
@@ -288,7 +287,7 @@ impl Resolver {
         }
     }
 
-    fn record_bad_opt(&self, server: SocketAddr, level: FeatureLevel) -> FeatureLevel {
+    fn record_bad_opt(&self, server: ServerKey, level: FeatureLevel) -> FeatureLevel {
         let mut states = self.states();
         let state = states.entry(server).or_default();
         let lower = state.features.record_bad_opt(level, Instant::now());
@@ -296,7 +295,7 @@ impl Resolver {
         lower
     }
 
-    fn record_do_off(&self, server: SocketAddr, level: FeatureLevel) -> FeatureLevel {
+    fn record_do_off(&self, server: ServerKey, level: FeatureLevel) -> FeatureLevel {
         let mut states = self.states();
         let state = states.entry(server).or_default();
         let lower = state.features.record_do_off(level, Instant::now());
@@ -306,7 +305,7 @@ impl Resolver {
 
     fn record_missing_root_rrsig(
         &self,
-        server: SocketAddr,
+        server: ServerKey,
         allow_downgrade: bool,
     ) -> FeatureLevel {
         let mut states = self.states();
@@ -321,14 +320,14 @@ impl Resolver {
         FeatureLevel::Edns0
     }
 
-    fn downgrade_feature(&self, server: SocketAddr, level: FeatureLevel) {
+    fn downgrade_feature(&self, server: ServerKey, level: FeatureLevel) {
         let mut states = self.states();
         let state = states.entry(server).or_default();
         state.features.downgrade_to(level, Instant::now());
         state.transport.clear_failures();
     }
 
-    fn record_transport_success(&self, server: SocketAddr, mode: TransportMode) {
+    fn record_transport_success(&self, server: ServerKey, mode: TransportMode) {
         let mut states = self.states();
         states
             .entry(server)
@@ -339,7 +338,7 @@ impl Resolver {
 
     fn record_transport_failure(
         &self,
-        server: SocketAddr,
+        server: ServerKey,
         mode: TransportMode,
     ) -> (Option<TransportMode>, u8) {
         let mut states = self.states();
@@ -348,7 +347,7 @@ impl Resolver {
         (switched, transport.failures(mode))
     }
 
-    fn record_transport_truncated(&self, server: SocketAddr) {
+    fn record_transport_truncated(&self, server: ServerKey) {
         let mut states = self.states();
         states
             .entry(server)
@@ -357,7 +356,7 @@ impl Resolver {
             .record_truncated();
     }
 
-    fn clear_transport_failures(&self, server: SocketAddr) {
+    fn clear_transport_failures(&self, server: ServerKey) {
         let mut states = self.states();
         states
             .entry(server)
@@ -366,12 +365,14 @@ impl Resolver {
             .clear_failures();
     }
 
-    fn record_udp_packet(&self, server: SocketAddr, dns_size: usize, fragment_size: u32) {
+    fn record_udp_packet(&self, server: ServerKey, dns_size: usize, fragment_size: u32) {
         let mut states = self.states();
         let state = states.entry(server).or_default();
-        state
-            .transport
-            .record_udp_packet(dns_size, fragment_size, server.is_ipv6());
+        state.transport.record_udp_packet(
+            dns_size,
+            fragment_size,
+            server.server().is_ipv6(),
+        );
     }
 }
 
