@@ -83,10 +83,11 @@ mod test_03_synthetic_and_parallel_scopes {
         ];
         let query = make_query("parallel.example", TYPE_A, 0x7200).expect("client query");
         let started = Instant::now();
-        let response = resolver
+        let (response, winning_server) = resolver
             .query_scopes(&scopes, &query)
             .expect("parallel scoped query");
         assert!(started.elapsed() < Duration::from_millis(750));
+        assert!(winning_server == first_server || winning_server == second_server);
 
         let records = extract_address_records(&response, Some(2)).expect("address records");
         assert!(records.addresses.iter().any(|address| {
@@ -102,6 +103,79 @@ mod test_03_synthetic_and_parallel_scopes {
         second_thread.join().expect("second mock DNS thread");
     }
 
+    #[test]
+    fn localhost_upstream_is_not_cached_by_default() {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("mock DNS bind");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("mock DNS timeout");
+        let server = socket.local_addr().expect("mock DNS address");
+        let server_thread = thread::spawn(move || {
+            for _ in 0..2 {
+                reply_once(&socket, Ipv4Addr::new(192, 0, 2, 31));
+            }
+        });
+
+        let resolver = Resolver::new(Config {
+            upstreams: vec![server],
+            fallback_upstreams: Vec::new(),
+            attempts: 1,
+            query_timeout: Duration::from_secs(1),
+            read_etc_hosts: false,
+            read_static_records: false,
+            dnssec: ValidationMode::No,
+            ..Config::default()
+        });
+        let first = make_query("local-cache.example", TYPE_A, 0x7300).expect("first query");
+        resolver
+            .query(&first, QueryMode::Full)
+            .expect("first response");
+        assert!(resolver.cache.is_empty());
+
+        let second = make_query("local-cache.example", TYPE_A, 0x7301).expect("second query");
+        resolver
+            .query(&second, QueryMode::Full)
+            .expect("second response");
+        assert!(resolver.cache.is_empty());
+        server_thread.join().expect("mock DNS thread");
+    }
+
+    #[test]
+    fn cache_from_localhost_allows_explicit_local_caching() {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("mock DNS bind");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("mock DNS timeout");
+        let server = socket.local_addr().expect("mock DNS address");
+        let server_thread = thread::spawn(move || {
+            reply_once(&socket, Ipv4Addr::new(192, 0, 2, 32));
+        });
+
+        let resolver = Resolver::new(Config {
+            upstreams: vec![server],
+            fallback_upstreams: Vec::new(),
+            cache_from_localhost: true,
+            attempts: 1,
+            query_timeout: Duration::from_secs(1),
+            read_etc_hosts: false,
+            read_static_records: false,
+            dnssec: ValidationMode::No,
+            ..Config::default()
+        });
+        let first = make_query("local-cache.example", TYPE_A, 0x7400).expect("first query");
+        resolver
+            .query(&first, QueryMode::Full)
+            .expect("first response");
+        assert_eq!(resolver.cache.len(), 1);
+
+        let second = make_query("local-cache.example", TYPE_A, 0x7401).expect("second query");
+        let response = resolver
+            .query(&second, QueryMode::Full)
+            .expect("cached response");
+        assert_eq!(&response[..2], &0x7401u16.to_be_bytes());
+        server_thread.join().expect("mock DNS thread");
+    }
+
     fn reply_after_both_scopes_arrive(socket: &UdpSocket, barrier: &Barrier, address: Ipv4Addr) {
         let mut buffer = [0; 2048];
         let (length, peer) = socket.recv_from(&mut buffer).expect("mock scoped query");
@@ -111,5 +185,15 @@ mod test_03_synthetic_and_parallel_scopes {
         socket
             .send_to(&response, peer)
             .expect("mock scoped response send");
+    }
+
+    fn reply_once(socket: &UdpSocket, address: Ipv4Addr) {
+        let mut buffer = [0; 2048];
+        let (length, peer) = socket.recv_from(&mut buffer).expect("mock DNS query");
+        let response = local_response(&buffer[..length], &[LocalRecord::A(address)], 30)
+            .expect("mock DNS response");
+        socket
+            .send_to(&response, peer)
+            .expect("mock DNS response send");
     }
 }
