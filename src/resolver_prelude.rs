@@ -51,7 +51,7 @@ impl DnsAttemptBudget {
     }
 
     fn begin_attempt(&mut self) -> Result<Duration, ResolveError> {
-        if self.attempts >= DNS_TRANSACTION_ATTEMPTS_MAX {
+        if self.exhausted() {
             return Err(ResolveError::Protocol(
                 "maximum DNS transaction attempts reached",
             ));
@@ -67,6 +67,14 @@ impl DnsAttemptBudget {
 
     const fn attempts(&self) -> usize {
         self.attempts
+    }
+
+    const fn exhausted(&self) -> bool {
+        self.attempts >= DNS_TRANSACTION_ATTEMPTS_MAX
+    }
+
+    fn expired(&self) -> bool {
+        Instant::now() >= self.deadline
     }
 }
 
