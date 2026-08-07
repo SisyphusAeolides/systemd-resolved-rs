@@ -78,7 +78,11 @@ mod test_17_dns_attempt_budget {
         let query = make_query("budget.example", TYPE_A, 0x7300).expect("client query");
         let mut budget = DnsAttemptBudget::new();
         let response = resolver
-            .exchange_with_features(server_address, &query, &mut budget)
+            .exchange_with_features(
+                ServerKey::new(ScopeKind::Global, server_address),
+                &query,
+                &mut budget,
+            )
             .expect("resolver response");
         let records = extract_address_records(&response, Some(2)).expect("address records");
         assert_eq!(
