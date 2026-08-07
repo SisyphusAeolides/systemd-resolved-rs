@@ -31,3 +31,4 @@ include!("resolver_test_19.rs");
 include!("resolver_test_20.rs");
 include!("resolver_test_21.rs");
 include!("resolver_test_22.rs");
+include!("resolver_test_23.rs");
