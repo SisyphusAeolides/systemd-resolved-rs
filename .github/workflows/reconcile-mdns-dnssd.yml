@@ -1,0 +1,636 @@
+name: Reconcile complete mDNS and DNS-SD stack
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/reconcile-mdns-dnssd.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize with current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install complete verification dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran iproute2 libssl-dev liburing-dev openssl python3 systemd
+
+      - name: Reconstruct the integrated tree idempotently
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          required = [
+              'src/mdns_full.rs',
+              'src/mdns_runtime.rs',
+              'src/mdns_responder.rs',
+              'src/dnssd_full.rs',
+              'src/dnssd_config.rs',
+              'src/dnssd_runtime.rs',
+              'src/resolver_mdns_policy.rs',
+              'ffi/mdns.c',
+              'ffi/mdns.h',
+              'ffi/test_mdns.c',
+              'tests/live-mdns.py',
+              'tests/live-mdns-responder.py',
+              'tests/live-dnssd.py',
+          ]
+          missing = [path for path in required if not Path(path).is_file()]
+          if missing:
+              raise SystemExit('missing staged files: ' + ', '.join(missing))
+
+          c_path = Path('ffi/mdns.c')
+          c = c_path.read_text(encoding='utf-8')
+          if '#include <limits.h>' not in c:
+              c = c.replace('#include <ifaddrs.h>\n', '#include <ifaddrs.h>\n#include <limits.h>\n', 1)
+          c = re.sub(
+              r'#ifdef SO_REUSEPORT\n.*?#endif\n',
+              '',
+              c,
+              count=1,
+              flags=re.S,
+          )
+          c_path.write_text(c, encoding='utf-8')
+
+          runtime_path = Path('src/mdns_runtime.rs')
+          runtime = runtime_path.read_text(encoding='utf-8')
+          runtime = runtime.replace(
+              'matches!(error.raw_os_error(), Some(13 | 19 | 98 | 99 | 101))',
+              'matches!(\n                error.raw_os_error(),\n                Some(13) | Some(19) | Some(98) | Some(99) | Some(101)\n            )',
+          )
+          runtime = runtime.replace(
+              '''            if matches!(
+                error.kind(),
+                io::ErrorKind::AddrNotAvailable
+                    | io::ErrorKind::NetworkUnreachable
+                    | io::ErrorKind::PermissionDenied
+            ) {
+                continue;
+            }
+''',
+              '''            if matches!(
+                error.raw_os_error(),
+                Some(13) | Some(19) | Some(98) | Some(99) | Some(101)
+            ) {
+                continue;
+            }
+''',
+          )
+          runtime = runtime.replace(
+              '''    if output.len() > usize::from(u16::MAX) {
+        output[2..4].copy_from_slice(&(flags | DNS_FLAG_TC).to_be_bytes());
+        output.truncate(1232);
+    }
+''',
+              '',
+          )
+          runtime = runtime.replace('const DNS_FLAG_TC: u16 = 1 << 9;\n', '')
+          runtime_path.write_text(runtime, encoding='utf-8')
+
+          build_path = Path('build.rs')
+          build = build_path.read_text(encoding='utf-8')
+          if 'ffi/mdns.c' not in build:
+              matches = list(re.finditer(r'(?m)^(?P<indent>\s*)\.file\("ffi/[^"\n]+\.c"\)', build))
+              if matches:
+                  match = matches[-1]
+                  build = build[:match.end()] + f'\n{match.group("indent")}.file("ffi/mdns.c")' + build[match.end():]
+              elif '"ffi/networkd.c"' in build:
+                  build = build.replace('"ffi/networkd.c"', '"ffi/networkd.c",\n        "ffi/mdns.c"', 1)
+              else:
+                  raise SystemExit('cannot locate native source list in build.rs')
+          if 'cargo:rerun-if-changed=ffi/mdns.c' not in build:
+              build = build.replace(
+                  'fn main() {',
+                  'fn main() {\n    println!("cargo:rerun-if-changed=ffi/mdns.c");\n'
+                  '    println!("cargo:rerun-if-changed=ffi/mdns.h");',
+                  1,
+              )
+          build_path.write_text(build, encoding='utf-8')
+
+          make_path = Path('Makefile')
+          make = make_path.read_text(encoding='utf-8')
+          compile_anchor = '\t$(CC) $(CFLAGS) -Iffi -c ffi/networkd.c -o build/networkd.o\n'
+          if 'ffi/mdns.c -o build/mdns.o' not in make:
+              if compile_anchor not in make:
+                  raise SystemExit('cannot locate native compilation block')
+              make = make.replace(
+                  compile_anchor,
+                  compile_anchor
+                  + '\t$(CC) $(CFLAGS) -Iffi -c ffi/mdns.c -o build/mdns.o\n'
+                  + '\t$(CC) $(CFLAGS) -Iffi -c ffi/test_mdns.c -o build/test_mdns.o\n',
+                  1,
+              )
+          link_lines = [line for line in make.splitlines() if 'build/test_native.o' in line and ' -o build/test_native' in line]
+          if not link_lines:
+              raise SystemExit('cannot locate native link command')
+          old_link = link_lines[0]
+          if 'build/mdns.o' not in old_link:
+              if ' build/routing.o ' in old_link:
+                  new_link = old_link.replace(' build/routing.o ', ' build/mdns.o build/routing.o ')
+              else:
+                  new_link = old_link.replace(' -o build/test_native', ' build/mdns.o -o build/test_native')
+              make = make.replace(old_link, new_link, 1)
+          if './build/test_mdns' not in make:
+              anchor = '\t./build/test_native\n'
+              if anchor not in make:
+                  raise SystemExit('cannot locate native test execution')
+              make = make.replace(
+                  anchor,
+                  anchor
+                  + '\t$(CC) build/test_mdns.o build/mdns.o -o build/test_mdns\n'
+                  + '\t./build/test_mdns\n',
+                  1,
+              )
+          make_path.write_text(make, encoding='utf-8')
+
+          mdns_path = Path('src/mdns.rs')
+          mdns = mdns_path.read_text(encoding='utf-8')
+          for marker in (
+              '#[path = "mdns_full.rs"]\npub mod parity;\n',
+              '#[path = "dnssd_full.rs"]\npub mod parity_dnssd;\n',
+              '#[path = "mdns_runtime.rs"]\npub mod runtime;\n',
+              '#[path = "mdns_responder.rs"]\npub mod responder;\n',
+              '#[path = "dnssd_config.rs"]\npub mod dnssd_config;\n',
+              '#[path = "dnssd_runtime.rs"]\npub mod dnssd_runtime;\n',
+          ):
+              if marker not in mdns:
+                  if not mdns.endswith('\n'):
+                      mdns += '\n'
+                  mdns += '\n' + marker
+          mdns_path.write_text(mdns, encoding='utf-8')
+
+          resolver_path = Path('src/resolver.rs')
+          resolver = resolver_path.read_text(encoding='utf-8')
+          policy_include = 'include!("resolver_mdns_policy.rs");\n'
+          if policy_include not in resolver:
+              anchor = 'include!("resolver_support.rs");\n'
+              if anchor not in resolver:
+                  raise SystemExit('cannot locate resolver support include')
+              resolver = resolver.replace(anchor, anchor + policy_include, 1)
+          resolver_path.write_text(resolver, encoding='utf-8')
+
+          query_path = Path('src/resolver_query_on_link.rs')
+          query = query_path.read_text(encoding='utf-8')
+          pattern = re.compile(
+              r'// Route RFC 6762 names exclusively through the interface-scoped mDNS runtime\.\n.*?^\}\n\n',
+              re.S | re.M,
+          )
+          query = pattern.sub('', query, count=1)
+          policy = '''// Route RFC 6762 names exclusively through the interface-scoped mDNS runtime.
+if mode == QueryMode::Full && crate::mdns::runtime::should_handle_query(query) {
+    if !self.multicast_dns_resolve_enabled(ifindex) {
+        return Err(ResolveError::NoSuchResourceRecord);
+    }
+    let response = crate::mdns::runtime::query_raw(
+        query,
+        ifindex,
+        self.config().query_timeout,
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+    return response.ok_or(ResolveError::NoSuchResourceRecord);
+}
+
+'''
+          query_path.write_text(policy + query, encoding='utf-8')
+
+          config_path = Path('src/dnssd_config.rs')
+          config = config_path.read_text(encoding='utf-8')
+          old_load = '''    pub fn load() -> Result<Self, DnsSdConfigError> {
+        let directories = DEFAULT_DIRECTORIES
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        Self::load_from_directories(&directories)
+    }
+'''
+          new_load = '''    pub fn load() -> Result<Self, DnsSdConfigError> {
+        let directories = std::env::var_os("RESOLVED_RS_DNSSD_PATH").map_or_else(
+            || {
+                DEFAULT_DIRECTORIES
+                    .iter()
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>()
+            },
+            |value| {
+                std::env::split_paths(&value)
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .collect::<Vec<_>>()
+            },
+        );
+        Self::load_from_directories(&directories)
+    }
+'''
+          if 'RESOLVED_RS_DNSSD_PATH' not in config:
+              if old_load not in config:
+                  raise SystemExit('cannot locate ServiceCatalog::load')
+              config = config.replace(old_load, new_load, 1)
+          config_path.write_text(config, encoding='utf-8')
+
+          dnssd_runtime_path = Path('src/dnssd_runtime.rs')
+          dnssd_runtime = dnssd_runtime_path.read_text(encoding='utf-8')
+          dnssd_runtime = dnssd_runtime.replace(
+              '    state.next_reload = Instant::now();\n',
+              '    state.next_reload = Instant::now() + RELOAD_INTERVAL;\n',
+          )
+          dnssd_runtime_path.write_text(dnssd_runtime, encoding='utf-8')
+
+          responder_path = Path('src/mdns_responder.rs')
+          responder = responder_path.read_text(encoding='utf-8')
+          if 'use crate::resolver::Resolver;' not in responder:
+              responder = responder.replace(
+                  'use std::collections::{BTreeMap, BTreeSet, HashSet};\n',
+                  'use crate::resolver::Resolver;\nuse std::collections::{BTreeMap, BTreeSet, HashSet};\n',
+                  1,
+              )
+          if 'resolver: Arc<Resolver>,' not in responder:
+              responder = responder.replace('pub struct MdnsResponder {\n', 'pub struct MdnsResponder {\n    resolver: Arc<Resolver>,\n', 1)
+          old_start = '''    pub fn start_from_environment() -> io::Result<Option<Self>> {
+        if !responder_enabled() {
+            return Ok(None);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = thread::Builder::new()
+            .name("resolved-mdns-responder".to_owned())
+            .spawn(move || responder_loop(&thread_stop))?;
+        Ok(Some(Self {
+            stop,
+            thread: Some(thread),
+        }))
+    }
+'''
+          new_start = '''    pub fn start_from_environment(
+        resolver: Arc<Resolver>,
+    ) -> io::Result<Option<Self>> {
+        if !responder_enabled() {
+            return Ok(None);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread_resolver = Arc::clone(&resolver);
+        let thread = thread::Builder::new()
+            .name("resolved-mdns-responder".to_owned())
+            .spawn(move || responder_loop(&thread_stop, &thread_resolver))?;
+        Ok(Some(Self {
+            resolver,
+            stop,
+            thread: Some(thread),
+        }))
+    }
+'''
+          responder = responder.replace(old_start, new_start)
+          responder = responder.replace('fn responder_loop(stop: &AtomicBool) {\n', 'fn responder_loop(stop: &AtomicBool, resolver: &Resolver) {\n')
+          responder = responder.replace(
+              '            synchronize_interfaces(&mut interfaces, &name, now);\n',
+              '            synchronize_interfaces(&mut interfaces, &name, resolver, now);\n',
+          )
+          responder = responder.replace(
+              '''fn synchronize_interfaces(
+    states: &mut BTreeMap<MdnsInterface, InterfaceState>,
+    name: &NameState,
+    now: Instant,
+) {''',
+              '''fn synchronize_interfaces(
+    states: &mut BTreeMap<MdnsInterface, InterfaceState>,
+    name: &NameState,
+    resolver: &Resolver,
+    now: Instant,
+) {''',
+          )
+          if 'multicast_dns_respond_enabled' not in responder:
+              responder = responder.replace('    let discovered = match discover_interfaces() {\n', '    let mut discovered = match discover_interfaces() {\n', 1)
+              anchor = '''            return;
+        }
+    };
+    states.retain'''
+              replacement = '''            return;
+        }
+    };
+    discovered.retain(|interface, _| {
+        i32::try_from(interface.ifindex)
+            .ok()
+            .is_some_and(|ifindex| resolver.multicast_dns_respond_enabled(ifindex))
+    });
+    states.retain'''
+              if anchor not in responder:
+                  raise SystemExit('cannot locate responder interface discovery')
+              responder = responder.replace(anchor, replacement, 1)
+
+          responder = responder.replace('            if state.generation != name.generation {\n', '            if state.generation != responder_generation(&name) {\n')
+          responder = responder.replace('        self.generation = name.generation;\n', '        self.generation = responder_generation(name);\n')
+          responder = responder.replace('                        generation: name.generation,\n', '                        generation: responder_generation(name),\n')
+
+          conflict_anchor = '                if detect_conflict(state, &name, &parsed, validated.kind, now) {\n'
+          if 'detect_service_conflict(state, &name' not in responder:
+              if conflict_anchor not in responder:
+                  raise SystemExit('cannot locate responder conflict dispatch')
+              responder = responder.replace(
+                  conflict_anchor,
+                  '''                if detect_service_conflict(state, &name, &parsed, validated.kind) {
+                    state.restart_probe(&name, now);
+                    continue;
+                }
+''' + conflict_anchor,
+                  1,
+              )
+
+          sort_anchor = '''    output.sort();
+    output
+}
+
+fn reverse_owner'''
+          if 'DNS-SD record generation failed' not in responder:
+              service_records = '''    match super::dnssd_runtime::records_for(
+        interface,
+        addresses,
+        &name.label(),
+        false,
+    ) {
+        Ok(records) => output.extend(records.into_iter().map(|record| LocalRecord {
+            owner: record.owner,
+            rr_type: record.rr_type,
+            class: record.class,
+            ttl: record.ttl,
+            cache_flush: record.cache_flush,
+            rdata: record.rdata,
+        })),
+        Err(error) => eprintln!("systemd-resolved: DNS-SD record generation failed: {error}"),
+    }
+    output.sort();
+    output.dedup();
+    output
+}
+
+fn reverse_owner'''
+              if sort_anchor not in responder:
+                  raise SystemExit('cannot locate responder local records')
+              responder = responder.replace(sort_anchor, service_records, 1)
+
+          if 'add_related_records(&mut multicast' not in responder:
+              anchor = '    if !unicast.is_empty() {\n'
+              if anchor not in responder:
+                  raise SystemExit('cannot locate responder answer emission')
+              responder = responder.replace(
+                  anchor,
+                  '    add_related_records(&mut multicast, &all_records);\n'
+                  '    add_related_records(&mut unicast, &all_records);\n\n'
+                  + anchor,
+                  1,
+              )
+
+          if 'fn responder_generation(name: &NameState)' not in responder:
+              helpers = r'''fn responder_generation(name: &NameState) -> u64 {
+    name.generation ^ super::dnssd_runtime::generation().rotate_left(17)
+}
+
+fn detect_service_conflict(
+    state: &InterfaceState,
+    name: &NameState,
+    message: &ParsedMessage,
+    kind: MdnsMessageKind,
+) -> bool {
+    let owners = match super::dnssd_runtime::instance_owners(
+        state.interface,
+        &state.addresses,
+        &name.label(),
+    ) {
+        Ok(owners) => owners,
+        Err(error) => {
+            eprintln!("systemd-resolved: DNS-SD conflict lookup failed: {error}");
+            return false;
+        }
+    };
+    let ours = state.records(name);
+    for owner in owners.keys() {
+        for rr_type in [TYPE_SRV, TYPE_TXT] {
+            let our_data = ours
+                .iter()
+                .filter(|record| record.owner == *owner && record.rr_type == rr_type && record.class == CLASS_IN)
+                .map(|record| record.rdata.clone())
+                .collect::<Vec<_>>();
+            if our_data.is_empty() {
+                continue;
+            }
+            let their_data = message
+                .records
+                .iter()
+                .filter(|record| {
+                    record.owner == *owner
+                        && record.rr_type == rr_type
+                        && record.class == CLASS_IN
+                        && (kind == MdnsMessageKind::Response || record.section == ParsedSection::Authority)
+                })
+                .map(|record| record.rdata.clone())
+                .collect::<Vec<_>>();
+            if their_data.is_empty() || sets_equal(&our_data, &their_data) {
+                continue;
+            }
+            if !state.probe.is_established()
+                && kind == MdnsMessageKind::Query
+                && probe_tie_break(&our_data, &their_data) != MdnsTieBreak::WeLose
+            {
+                continue;
+            }
+            match super::dnssd_runtime::rename_conflicting_owner(
+                owner,
+                rr_type,
+                state.interface,
+                &state.addresses,
+                &name.label(),
+            ) {
+                Ok(Some(service)) => {
+                    eprintln!("systemd-resolved: renamed conflicting DNS-SD service {service}");
+                    return true;
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!("systemd-resolved: DNS-SD conflict rename failed: {error}"),
+            }
+        }
+    }
+    false
+}
+
+fn add_related_records(selected: &mut BTreeSet<LocalRecord>, all_records: &[LocalRecord]) {
+    loop {
+        let before = selected.len();
+        let current = selected.iter().cloned().collect::<Vec<_>>();
+        for record in current {
+            if record.rr_type == TYPE_PTR {
+                for related in all_records.iter().filter(|candidate| {
+                    candidate.owner == record.rdata && matches!(candidate.rr_type, TYPE_SRV | TYPE_TXT)
+                }) {
+                    selected.insert(related.clone());
+                }
+            } else if record.rr_type == TYPE_SRV && record.rdata.len() >= 7 {
+                let target = &record.rdata[6..];
+                for related in all_records.iter().filter(|candidate| {
+                    candidate.owner == target && matches!(candidate.rr_type, TYPE_A | TYPE_AAAA)
+                }) {
+                    selected.insert(related.clone());
+                }
+            }
+        }
+        if selected.len() == before {
+            break;
+        }
+    }
+}
+
+'''
+              responder = responder.replace('fn response_packet(\n', helpers + 'fn response_packet(\n', 1)
+          responder_path.write_text(responder, encoding='utf-8')
+
+          daemon_path = Path('src/daemon.rs')
+          daemon = daemon_path.read_text(encoding='utf-8')
+          function = 'pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {\n'
+          if 'MdnsResponder::start_from_environment' not in daemon:
+              if function not in daemon:
+                  raise SystemExit('cannot locate daemon run_stub')
+              daemon = daemon.replace(
+                  function,
+                  function
+                  + '    let mdns_responder = crate::mdns::responder::MdnsResponder::start_from_environment(Arc::clone(resolver))?;\n',
+                  1,
+              )
+          daemon = daemon.replace(
+              'crate::mdns::responder::MdnsResponder::start_from_environment()?;',
+              'crate::mdns::responder::MdnsResponder::start_from_environment(Arc::clone(resolver))?;',
+          )
+          if 'drop(mdns_responder);' not in daemon:
+              anchor = '    drop(dispatcher);\n'
+              if anchor not in daemon:
+                  raise SystemExit('cannot locate daemon dispatcher shutdown')
+              daemon = daemon.replace(anchor, '    drop(mdns_responder);\n' + anchor, 1)
+          reload_anchor = '''            if let Err(error) = resolver.reload_hosts() {
+                eprintln!("systemd-resolved: failed to reload hosts database: {error}");
+            }
+'''
+          if 'failed to reload DNS-SD services' not in daemon:
+              if reload_anchor not in daemon:
+                  raise SystemExit('cannot locate daemon reload path')
+              daemon = daemon.replace(
+                  reload_anchor,
+                  reload_anchor
+                  + '            if let Err(error) = crate::mdns::dnssd_runtime::force_reload() {\n'
+                  + '                eprintln!("systemd-resolved: failed to reload DNS-SD services: {error}");\n'
+                  + '            }\n',
+                  1,
+              )
+          daemon_path.write_text(daemon, encoding='utf-8')
+
+          preflight_path = Path('scripts/preflight-replacement.sh')
+          preflight = preflight_path.read_text(encoding='utf-8')
+          if 'RESOLVED_RS_MDNS_RESPONDER=no' not in preflight:
+              anchor = '    "RESOLVED_RS_RUN_DIR=$RUN_DIR" \\\n'
+              if anchor not in preflight:
+                  raise SystemExit('cannot locate preflight environment')
+              preflight = preflight.replace(anchor, anchor + '    "RESOLVED_RS_MDNS_RESPONDER=no" \\\n', 1)
+          preflight_path.write_text(preflight, encoding='utf-8')
+
+          live_path = Path('tests/live-mdns.py')
+          live = live_path.read_text(encoding='utf-8')
+          if '"RESOLVED_RS_MDNS_RESPONDER": "no"' not in live:
+              anchor = '                    "RESOLVED_RS_MDNS": "yes",\n'
+              if anchor not in live:
+                  raise SystemExit('cannot locate live mDNS environment')
+              live = live.replace(anchor, anchor + '                    "RESOLVED_RS_MDNS_RESPONDER": "no",\n', 1)
+          live_path.write_text(live, encoding='utf-8')
+          PY
+
+      - name: Remove superseded landing workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/workflows/pin-upstream-resolved.yml \
+            .github/workflows/land-mdns-core.yml \
+            .github/workflows/land-dnssd-core.yml \
+            .github/workflows/land-mdns-native.yml \
+            .github/workflows/integrate-mdns-stack.yml \
+            .github/workflows/finalize-mdns-integration.yml \
+            .github/workflows/finalize-mdns-responder.yml \
+            .github/workflows/finalize-dnssd-responder.yml \
+            .github/workflows/finalize-dnssd-live.yml \
+            .github/workflows/finalize-mdns-policy.yml
+
+      - name: Verify complete integrated tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            tests/differential-resolved.py \
+            tests/live-mdns.py \
+            tests/live-mdns-responder.py \
+            tests/live-dnssd.py
+          bash -n \
+            scripts/preflight-replacement.sh \
+            scripts/certify-replacement.sh \
+            scripts/switch-resolved-transactionally.sh
+          cargo fmt --all
+          make check-native
+          make check-packaging
+          make check-nss
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+          python3 tests/live-dns.py \
+            target/release/systemd-resolved \
+            target/release/resolvectl
+          python3 tests/live-mdns.py target/release/systemd-resolved
+          python3 tests/live-mdns-responder.py target/release/systemd-resolved
+          python3 tests/live-dnssd.py target/release/systemd-resolved
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          git diff --check
+
+      - name: Commit the reconciled stack
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git rm --force .github/workflows/reconcile-mdns-dnssd.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'Reconcile the complete mDNS and DNS-SD stack'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
