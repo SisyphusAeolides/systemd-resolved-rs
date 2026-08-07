@@ -21,24 +21,25 @@ name = "resolvectl"
 path = "src/bin/resolvectl.rs"
 
 [dependencies]
-idna = { version = "1", optional = true }
 anyhow = "1"
-async-trait = { version = "0.1.91", optional = true }
+async-trait = { version = "0.1", optional = true }
 bincode = "1"
-bytes = "1.12.1"
+bytes = "1"
 crossbeam-queue = "0.3.13"
-memmap2 = "0.9.5"
-parking_lot = "0.12.5"
+memmap2 = "0.9"
+parking_lot = "0.12"
 rand = "0.9.5"
 sd-notify = "0.4"
 serde = { version = "1", features = ["derive"] }
-socket2 = { version = "0.5.7", features = ["all"] }
+socket2 = { version = "0.5", features = ["all"] }
 seahash = "4.1.0"
-thiserror = "2.0.19"
-tokio = { version = "1.53.1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net", "io-util", "signal"] }
+thiserror = "1"
+tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7.19", optional = true }
-tracing = "0.1.44"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zbus = "=3.15.2"
+idna = { version = "1", optional = true }
 
 [features]
 default = ["fortran-routing", "hyper", "supremacy"]
@@ -55,6 +56,7 @@ sigcache = []
 doq = []
 obs = []
 supremacy = ["mmap-nss", "dataplane", "swr", "nsec-agg", "sigcache", "doq", "obs"]
+idna = ["dep:idna"]
 
 [profile.release]
 codegen-units = 1
@@ -73,4 +75,4 @@ pedantic = "warn"
 zbus_macros = { path = "vendor/zbus_macros" }
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile = "3"
