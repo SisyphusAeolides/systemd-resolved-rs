@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Small deterministic UDP/TCP DNS server for live interface tests."""
+"""Small deterministic UDP/TCP DNS server for live interface and NSS tests."""
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 from pathlib import Path
 import signal
 import socket
@@ -11,7 +12,8 @@ import struct
 import threading
 
 TEST_NAME = "example.test"
-TEST_ADDRESS = "192.0.2.123"
+TEST_ADDRESS_V4 = "192.0.2.123"
+TEST_ADDRESS_V6 = "2001:db8::123"
 LOOPBACK = "127.0.0.1"
 
 
@@ -41,17 +43,44 @@ def question(packet: bytes) -> tuple[int, str, int, int]:
     return offset + 4, b".".join(labels).decode("ascii").lower(), qtype, qclass
 
 
+def encode_name(name: str) -> bytes:
+    output = bytearray()
+    for label in name.rstrip(".").split("."):
+        encoded = label.encode("ascii")
+        if not encoded or len(encoded) > 63:
+            raise ValueError("invalid answer name")
+        output.append(len(encoded))
+        output.extend(encoded)
+    output.append(0)
+    return bytes(output)
+
+
+def answer_rdata(name: str, qtype: int, qclass: int) -> bytes | None:
+    if qclass != 1:
+        return None
+    if name == TEST_NAME and qtype == 1:
+        return socket.inet_pton(socket.AF_INET, TEST_ADDRESS_V4)
+    if name == TEST_NAME and qtype == 28:
+        return socket.inet_pton(socket.AF_INET6, TEST_ADDRESS_V6)
+    if qtype == 12 and name in {
+        ipaddress.ip_address(TEST_ADDRESS_V4).reverse_pointer,
+        ipaddress.ip_address(TEST_ADDRESS_V6).reverse_pointer,
+    }:
+        return encode_name(TEST_NAME)
+    return None
+
+
 def response(query: bytes) -> bytes:
     end, name, qtype, qclass = question(query)
     identifier, query_flags = struct.unpack_from("!HH", query, 0)
-    answer = name == TEST_NAME and qtype == 1 and qclass == 1
+    rdata = answer_rdata(name, qtype, qclass)
     flags = 0x8000 | 0x0080 | (query_flags & (0x0100 | 0x0010))
-    packet = bytearray(struct.pack("!HHHHHH", identifier, flags, 1, int(answer), 0, 0))
+    packet = bytearray(struct.pack("!HHHHHH", identifier, flags, 1, int(rdata is not None), 0, 0))
     packet.extend(query[12:end])
-    if answer:
+    if rdata is not None:
         packet.extend(b"\xc0\x0c")
-        packet.extend(struct.pack("!HHIH", 1, 1, 60, 4))
-        packet.extend(socket.inet_aton(TEST_ADDRESS))
+        packet.extend(struct.pack("!HHIH", qtype, 1, 60, len(rdata)))
+        packet.extend(rdata)
     return bytes(packet)
 
 
