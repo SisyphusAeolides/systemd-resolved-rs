@@ -1,0 +1,42 @@
+name: Recover main
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/recover-main.yml
+
+permissions:
+  contents: write
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restore canonical source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+          cargo fmt --all
+          rm -f .github/workflows/apply-nss-varlink.yml
+          rm -f .github/workflows/recover-main.yml
+          git diff --check
+
+      - name: Commit recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "SisyphusAeolides"
+          git config user.email "37166405+SisyphusAeolides@users.noreply.github.com"
+          git add -A
+          git commit -m "Restore canonical main branch state"
+          git push origin HEAD:main
