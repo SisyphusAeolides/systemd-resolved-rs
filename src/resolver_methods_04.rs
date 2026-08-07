@@ -85,13 +85,49 @@ impl Resolver {
         result
     }
 
-    fn exchange_tcp(&self, server: SocketAddr, query: &[u8]) -> Result<Vec<u8>, ResolveError> {
-        let length = u16::try_from(query.len())
-            .map_err(|_| ResolveError::Protocol("DNS query exceeds the TCP frame limit"))?;
-        let mut stream = TcpStream::connect_timeout(&server, self.config.query_timeout)?;
+    fn new_tcp_stream(&self, server: SocketAddr) -> Result<TcpStream, ResolveError> {
+        let stream = TcpStream::connect_timeout(&server, self.config.query_timeout)?;
         stream.set_read_timeout(Some(self.config.query_timeout))?;
         stream.set_write_timeout(Some(self.config.query_timeout))?;
-        stream.write_all(&length.to_be_bytes())?;
+        Ok(stream)
+    }
+
+    fn take_tcp_stream(&self, server: SocketAddr) -> Result<(TcpStream, bool), ResolveError> {
+        let pooled = {
+            let mut streams = self
+                .tcp_streams
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            streams.get_mut(&server).and_then(Vec::pop)
+        };
+        let reused = pooled.is_some();
+        let stream = match pooled {
+            Some(stream) => stream,
+            None => self.new_tcp_stream(server)?,
+        };
+        stream.set_read_timeout(Some(self.config.query_timeout))?;
+        stream.set_write_timeout(Some(self.config.query_timeout))?;
+        Ok((stream, reused))
+    }
+
+    fn recycle_tcp_stream(&self, server: SocketAddr, stream: TcpStream) {
+        let mut streams = self
+            .tcp_streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pool = streams.entry(server).or_default();
+        if pool.len() < TCP_POOL_PER_SERVER_MAX {
+            pool.push(stream);
+        }
+    }
+
+    fn exchange_tcp_stream(
+        stream: &mut TcpStream,
+        query: &[u8],
+    ) -> Result<Vec<u8>, ResolveError> {
+        let query_length = u16::try_from(query.len())
+            .map_err(|_| ResolveError::Protocol("DNS query exceeds the TCP frame limit"))?;
+        stream.write_all(&query_length.to_be_bytes())?;
         stream.write_all(query)?;
 
         let mut length = [0; 2];
@@ -104,6 +140,25 @@ impl Resolver {
         stream.read_exact(&mut response)?;
         response_matches(query, &response)?;
         Ok(response)
+    }
+
+    fn exchange_tcp(&self, server: SocketAddr, query: &[u8]) -> Result<Vec<u8>, ResolveError> {
+        let (mut stream, reused) = self.take_tcp_stream(server)?;
+        let result = Self::exchange_tcp_stream(&mut stream, query);
+        if result.is_ok() {
+            self.recycle_tcp_stream(server, stream);
+            return result;
+        }
+        if !reused {
+            return result;
+        }
+
+        let mut fresh = self.new_tcp_stream(server)?;
+        let result = Self::exchange_tcp_stream(&mut fresh, query);
+        if result.is_ok() {
+            self.recycle_tcp_stream(server, fresh);
+        }
+        result
     }
 
     pub fn lookup_name(&self, name: &str, family: i32) -> Result<NameLookup, ResolveError> {
