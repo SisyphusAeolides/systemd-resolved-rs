@@ -3,6 +3,8 @@ const RCODE_FORMERR: u16 = 1;
 const RCODE_SERVFAIL: u16 = 2;
 const RCODE_NOTIMP: u16 = 4;
 const RCODE_BADVERS: u16 = 16;
+const EDNS_OPTION_EXTENDED_ERROR: u16 = 15;
+const EDE_NOT_READY: u16 = 14;
 const MAX_FEATURE_RETRIES: usize = 2;
 const MAX_TRANSPORT_RETRIES: usize = 2;
 
@@ -25,6 +27,7 @@ impl Resolver {
         let configured_best_level = self.preferred_feature_level();
         let mut forced_level = None;
         let mut rcode_probe = false;
+        let mut servfail_retried = false;
         let mut feature_retries = 0usize;
         let mut transport_retries = 0usize;
 
@@ -236,6 +239,26 @@ impl Resolver {
                 ));
             }
 
+            if rcode == RCODE_SERVFAIL {
+                if let Some(ede) = opt.as_ref().map(extended_error_code).transpose()?.flatten() {
+                    if ede == EDE_NOT_READY {
+                        forced_level = Some(level);
+                        continue;
+                    }
+                    return edns::response_for_client(query, &response)
+                        .map_err(ResolveError::from);
+                }
+
+                if level > FeatureLevel::Udp
+                    && self.config.dnssec != ValidationMode::Yes
+                    && !servfail_retried
+                {
+                    servfail_retried = true;
+                    forced_level = Some(level);
+                    continue;
+                }
+            }
+
             if rcode_requests_feature_downgrade(rcode)
                 && level > FeatureLevel::Udp
                 && self.config.dnssec != ValidationMode::Yes
@@ -350,6 +373,18 @@ impl Resolver {
             .transport
             .record_udp_packet(dns_size, fragment_size, server.is_ipv6());
     }
+}
+
+fn extended_error_code(opt: &edns::OptRecord) -> Result<Option<u16>, WireError> {
+    let Some(option) = opt
+        .options
+        .iter()
+        .find(|option| option.code == EDNS_OPTION_EXTENDED_ERROR)
+    else {
+        return Ok(None);
+    };
+    let bytes = option.data.get(..2).ok_or(WireError::InvalidRecord)?;
+    Ok(Some(u16::from_be_bytes([bytes[0], bytes[1]])))
 }
 
 fn udp_requires_tcp_retry(truncated: bool, fragment_size: u32, level: FeatureLevel) -> bool {
