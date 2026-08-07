@@ -112,11 +112,11 @@ impl Resolver {
         &self,
         scope: ScopeKind,
         servers: &[SocketAddr],
-    ) -> Vec<crate::config::DnsServerSpec> {
+    ) -> Vec<DnsServerSpec> {
         let configured = match scope {
             ScopeKind::Global => self.config.configured_upstream_specs(),
             ScopeKind::Fallback => self.config.configured_fallback_upstream_specs(),
-            ScopeKind::Link(_) => Vec::new(),
+            ScopeKind::Link(ifindex) => self.link_dns_specs(ifindex),
         };
         let mut output = Vec::new();
         for &address in servers {
@@ -127,7 +127,7 @@ impl Resolver {
                 }
             }
             if output.len() == before {
-                output.push(crate::config::DnsServerSpec {
+                output.push(DnsServerSpec {
                     address,
                     interface: None,
                     server_name: None,
@@ -190,10 +190,7 @@ impl Resolver {
     }
 }
 
-fn server_keys_for_specs(
-    scope: ScopeKind,
-    specs: &[crate::config::DnsServerSpec],
-) -> Vec<ServerKey> {
+fn server_keys_for_specs(scope: ScopeKind, specs: &[DnsServerSpec]) -> Vec<ServerKey> {
     let mut slots = HashMap::<SocketAddr, usize>::new();
     specs
         .iter()
