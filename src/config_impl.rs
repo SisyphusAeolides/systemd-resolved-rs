@@ -63,7 +63,11 @@ impl Config {
             "DNS" => apply_server_assignment(&mut self.upstreams, value)?,
             "FallbackDNS" => apply_server_assignment(&mut self.fallback_upstreams, value)?,
             "Domains" => apply_domain_assignment(&mut self.domains, value)?,
-            "Cache" => self.cache = parse_cache_mode(value)?,
+            "Cache" => {
+                let (cache, cache_negative) = parse_cache_mode(value)?;
+                self.cache = cache;
+                self.cache_negative = cache_negative;
+            }
             "DNSCacheSize" => {
                 self.cache_size = value
                     .parse()
@@ -134,6 +138,11 @@ impl Config {
                 "Workers must be between 1 and 4096".to_owned(),
             ));
         }
+        if self.cache_size > 1 << 24 {
+            return Err(ConfigError::InvalidValue(
+                "DNSCacheSize must not exceed 16777216".to_owned(),
+            ));
+        }
         if self.query_timeout.is_zero() {
             return Err(ConfigError::InvalidValue(
                 "QueryTimeoutSec must be greater than zero".to_owned(),
@@ -178,4 +187,3 @@ impl Config {
         Ok(())
     }
 }
-
