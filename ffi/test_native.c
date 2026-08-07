@@ -15,12 +15,29 @@ int main(void) {
         0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
         0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
     };
+    static const uint8_t ed25519_public_key[32] = {
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
+        0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
+        0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
+        0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a,
+    };
+    static const uint8_t ed25519_signature[64] = {
+        0xe5, 0x56, 0x43, 0x00, 0xc3, 0x60, 0xac, 0x72,
+        0x90, 0x86, 0xe2, 0xcc, 0x80, 0x6e, 0x82, 0x8a,
+        0x84, 0x87, 0x7f, 0x1e, 0xb8, 0xe5, 0xd9, 0x74,
+        0xd8, 0x73, 0xe0, 0x65, 0x22, 0x49, 0x01, 0x55,
+        0x5f, 0xb8, 0x82, 0x15, 0x90, 0xa3, 0x3b, 0xac,
+        0xc6, 0x1e, 0x39, 0x70, 0x1c, 0xf9, 0xb4, 0x6b,
+        0xd2, 0x5b, 0xf5, 0xf0, 0x59, 0x5b, 0xbe, 0x24,
+        0x65, 0x51, 0x41, 0x43, 0x8e, 0x7a, 0x10, 0x0b,
+    };
     const char *name = "api.eu.example.com";
     const char *parent = "example.com";
     const char *child = "eu.example.com";
     const char *miss = "example.net";
     resolved_link_info *links;
     uint8_t digest[48];
+    uint8_t invalid_signature[sizeof(ed25519_signature)];
     int64_t link_count;
     int64_t filled;
     int64_t parent_score;
@@ -68,6 +85,36 @@ int main(void) {
     assert(memcmp(digest, sha256_abc, sizeof(sha256_abc)) == 0);
     assert(resolved_dnssec_digest(3, "abc", 3, digest, sizeof(digest)) < 0);
     assert(resolved_dnssec_digest(2, "abc", 3, digest, 1) < 0);
+
+    assert(resolved_dnssec_verify(
+        15,
+        ed25519_public_key,
+        sizeof(ed25519_public_key),
+        (const uint8_t *)"",
+        0,
+        ed25519_signature,
+        sizeof(ed25519_signature)
+    ) == 1);
+    memcpy(invalid_signature, ed25519_signature, sizeof(invalid_signature));
+    invalid_signature[0] ^= 1U;
+    assert(resolved_dnssec_verify(
+        15,
+        ed25519_public_key,
+        sizeof(ed25519_public_key),
+        (const uint8_t *)"",
+        0,
+        invalid_signature,
+        sizeof(invalid_signature)
+    ) == 0);
+    assert(resolved_dnssec_verify(
+        16,
+        ed25519_public_key,
+        sizeof(ed25519_public_key),
+        (const uint8_t *)"",
+        0,
+        ed25519_signature,
+        sizeof(ed25519_signature)
+    ) < 0);
 
     assert(resolved_link_snapshot(NULL, 1) < 0);
     link_count = resolved_link_snapshot(NULL, 0);
