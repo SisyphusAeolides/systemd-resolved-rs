@@ -68,6 +68,7 @@ impl DnsAttemptBudget {
         Ok(remaining)
     }
 
+    #[cfg(test)]
     const fn attempts(&self) -> usize {
         self.attempts
     }
