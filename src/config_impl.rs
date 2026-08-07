@@ -106,6 +106,16 @@ impl Config {
                 self.resolve_unicast_single_label = parse_bool(value)?;
             }
             "DNSStubListener" => self.dns_stub_listener = DnsStubListenerMode::parse(value)?,
+            "DNSStubListenerExtra" => {
+                if value.is_empty() {
+                    self.dns_stub_listener_extra.clear();
+                } else {
+                    let listener = DnsStubListenerExtra::parse(value)?;
+                    if !self.dns_stub_listener_extra.contains(&listener) {
+                        self.dns_stub_listener_extra.push(listener);
+                    }
+                }
+            }
             _ => {}
         }
         Ok(())
