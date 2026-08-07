@@ -17,8 +17,30 @@ fn object(out_dir: &Path, name: &str) -> PathBuf {
     out_dir.join(format!("{name}.o"))
 }
 
+fn compile_c(cc: &OsString, source: &str, output: &Path) {
+    command(
+        cc,
+        &[
+            OsString::from("-c"),
+            OsString::from("-std=c17"),
+            OsString::from("-O2"),
+            OsString::from("-fPIC"),
+            OsString::from("-fstack-protector-strong"),
+            OsString::from("-D_FORTIFY_SOURCE=3"),
+            OsString::from("-Wall"),
+            OsString::from("-Wextra"),
+            OsString::from("-Werror"),
+            OsString::from("-Iffi"),
+            OsString::from(source),
+            OsString::from("-o"),
+            output.as_os_str().to_owned(),
+        ],
+    );
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=ffi/native.c");
+    println!("cargo:rerun-if-changed=ffi/netlink.c");
     println!("cargo:rerun-if-changed=ffi/native.h");
     println!("cargo:rerun-if-changed=ffi/routing.f90");
 
@@ -34,26 +56,11 @@ fn main() {
     let cc = env::var_os("CC").unwrap_or_else(|| OsString::from("cc"));
     let ar = env::var_os("AR").unwrap_or_else(|| OsString::from("ar"));
     let native_obj = object(&out_dir, "resolved_native");
-    command(
-        &cc,
-        &[
-            OsString::from("-c"),
-            OsString::from("-std=c17"),
-            OsString::from("-O2"),
-            OsString::from("-fPIC"),
-            OsString::from("-fstack-protector-strong"),
-            OsString::from("-D_FORTIFY_SOURCE=3"),
-            OsString::from("-Wall"),
-            OsString::from("-Wextra"),
-            OsString::from("-Werror"),
-            OsString::from("-Iffi"),
-            OsString::from("ffi/native.c"),
-            OsString::from("-o"),
-            native_obj.clone().into_os_string(),
-        ],
-    );
+    let netlink_obj = object(&out_dir, "resolved_netlink");
+    compile_c(&cc, "ffi/native.c", &native_obj);
+    compile_c(&cc, "ffi/netlink.c", &netlink_obj);
 
-    let mut objects = vec![native_obj];
+    let mut objects = vec![native_obj, netlink_obj];
     let fortran_enabled = env::var_os("CARGO_FEATURE_FORTRAN_ROUTING").is_some();
     if fortran_enabled {
         let fc = env::var_os("FC").unwrap_or_else(|| OsString::from("gfortran"));
