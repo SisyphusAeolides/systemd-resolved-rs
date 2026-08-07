@@ -77,6 +77,8 @@ extern "C" {
     fn resolved_link_snapshot(entries: *mut NativeLinkSnapshot, capacity: usize) -> i64;
     fn resolved_rtnl_open() -> c_int;
     fn resolved_rtnl_wait(fd: c_int, timeout_msec: u32) -> c_int;
+    fn resolved_networkd_open() -> c_int;
+    fn resolved_networkd_wait(fd: c_int, timeout_msec: u32) -> c_int;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -259,6 +261,17 @@ pub fn rtnl_wait(fd: RawFd, timeout: Duration) -> io::Result<bool> {
     result(unsafe { resolved_rtnl_wait(fd, timeout_msec) }).map(|value| value != 0)
 }
 
+pub fn networkd_open() -> io::Result<RawFd> {
+    // SAFETY: the function takes no pointers and returns an owned descriptor or negative errno.
+    result(unsafe { resolved_networkd_open() })
+}
+
+pub fn networkd_wait(fd: RawFd, timeout: Duration) -> io::Result<bool> {
+    let timeout_msec = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+    // SAFETY: the descriptor is borrowed for the duration of poll/read draining.
+    result(unsafe { resolved_networkd_wait(fd, timeout_msec) }).map(|value| value != 0)
+}
+
 pub fn peer_credentials(fd: c_int) -> io::Result<PeerCredentials> {
     let mut process_id = 0;
     let mut user_id = 0;
@@ -369,5 +382,13 @@ mod tests {
         // SAFETY: rtnl_open returns a new owned descriptor.
         let owned = unsafe { OwnedFd::from_raw_fd(fd) };
         assert!(!rtnl_wait(owned.as_raw_fd(), Duration::ZERO).expect("RTNL poll"));
+    }
+
+    #[test]
+    fn networkd_monitor_socket_opens() {
+        let fd = networkd_open().expect("networkd monitor socket");
+        // SAFETY: networkd_open returns a new owned descriptor.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        assert!(!networkd_wait(owned.as_raw_fd(), Duration::ZERO).expect("networkd poll"));
     }
 }
