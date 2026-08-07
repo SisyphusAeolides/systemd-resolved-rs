@@ -61,21 +61,6 @@ jobs:
           rustc --version --verbose
           cargo --version --verbose
 
-      - name: Select Rust 1.74-compatible IDNA backend
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo update --package idna_adapter --precise 1.1.0
-
-      - name: Upload Rust 1.74-compatible lockfile
-        if: ${{ matrix.toolchain == '1.74.0' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-lock-msrv
-          path: Cargo.lock
-          if-no-files-found: error
-          retention-days: 1
-
       - name: Check native ABI
         run: make check-native
 
@@ -268,7 +253,7 @@ jobs:
           STATUS_CONTEXT: build-and-test/formal
           STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
           STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Formal verification passed' || 'Formal verification failed' }}
-          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           payload=$(printf '{"state":"%s","context":"%s","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_CONTEXT" "$STATUS_DESCRIPTION" "$STATUS_URL")
