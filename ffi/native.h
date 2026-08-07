@@ -70,6 +70,15 @@ int resolved_dnssec_digest(
     uint8_t *output,
     size_t capacity
 );
+int resolved_dnssec_verify(
+    uint8_t algorithm,
+    const uint8_t *key,
+    size_t key_length,
+    const uint8_t *data,
+    size_t data_length,
+    const uint8_t *signature,
+    size_t signature_length
+);
 
 int64_t resolved_link_snapshot(resolved_link_info *entries, size_t capacity);
 int resolved_rtnl_open(void);
