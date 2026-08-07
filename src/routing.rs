@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use crate::config::{Domain, SupportMode, TlsMode, ValidationMode};
 use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-use std::net::{SocketAddr, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV6};
+
+const IFF_UP: u32 = 0x0001;
+const IFF_LOOPBACK: u32 = 0x0008;
+const IFF_RUNNING: u32 = 0x0040;
+const IFF_LOWER_UP: u32 = 0x1_0000;
+const IFF_DORMANT: u32 = 0x2_0000;
+const IF_OPER_UNKNOWN: u8 = 0;
+const IF_OPER_UP: u8 = 6;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ScopeKind {
@@ -20,6 +28,55 @@ pub struct RouteScope {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KernelLinkState {
+    pub ifindex: i32,
+    pub ifname: String,
+    pub flags: u32,
+    pub mtu: u32,
+    pub operstate: u8,
+    pub has_ipv4_global: bool,
+    pub has_ipv4_link_local: bool,
+    pub has_ipv6_global: bool,
+    pub has_ipv6_link_local: bool,
+}
+
+impl KernelLinkState {
+    fn has_carrier(&self) -> bool {
+        if self.operstate == IF_OPER_UP {
+            return true;
+        }
+        if self.operstate != IF_OPER_UNKNOWN {
+            return false;
+        }
+        self.flags & (IFF_LOWER_UP | IFF_RUNNING) == (IFF_LOWER_UP | IFF_RUNNING)
+            && self.flags & IFF_DORMANT == 0
+    }
+
+    fn relevant_unicast(&self, servers: &[SocketAddr]) -> bool {
+        if self.flags & (IFF_LOOPBACK | IFF_DORMANT) != 0
+            || self.flags & (IFF_UP | IFF_LOWER_UP) != (IFF_UP | IFF_LOWER_UP)
+            || !self.has_carrier()
+        {
+            return false;
+        }
+
+        let allow_ipv4_link_local = servers.iter().any(|server| match server.ip() {
+            IpAddr::V4(address) => ipv4_is_link_local(address),
+            IpAddr::V6(_) => false,
+        });
+        let allow_ipv6_link_local = servers.iter().any(|server| match server.ip() {
+            IpAddr::V4(_) => false,
+            IpAddr::V6(address) => address.is_unicast_link_local(),
+        });
+
+        self.has_ipv4_global
+            || self.has_ipv6_global
+            || (allow_ipv4_link_local && self.has_ipv4_link_local)
+            || (allow_ipv6_link_local && self.has_ipv6_link_local)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinkState {
     pub ifindex: i32,
     pub dns_servers: Vec<SocketAddr>,
@@ -30,6 +87,7 @@ pub struct LinkState {
     pub dns_over_tls: TlsMode,
     pub dnssec: ValidationMode,
     pub dnssec_negative_trust_anchors: Vec<String>,
+    pub kernel: Option<KernelLinkState>,
 }
 
 impl LinkState {
@@ -45,6 +103,7 @@ impl LinkState {
             dns_over_tls: TlsMode::No,
             dnssec: ValidationMode::AllowDowngrade,
             dnssec_negative_trust_anchors: Vec::new(),
+            kernel: None,
         })
     }
 
@@ -56,11 +115,18 @@ impl LinkState {
                 .any(|domain| domain.route_only && domain.name != "."),
         )
     }
+
+    pub fn kernel_relevant_unicast(&self) -> bool {
+        self.kernel
+            .as_ref()
+            .map_or(true, |kernel| kernel.relevant_unicast(&self.dns_servers))
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RoutingTable {
     links: BTreeMap<i32, LinkState>,
+    kernel_synchronized: bool,
 }
 
 impl RoutingTable {
@@ -177,9 +243,49 @@ impl RoutingTable {
         Ok(true)
     }
 
+    pub fn sync_kernel_links(&mut self, links: Vec<KernelLinkState>) -> Result<bool, LinkError> {
+        let mut changed = !self.kernel_synchronized;
+        let mut seen = BTreeSet::new();
+        for kernel in links {
+            validate_ifindex(kernel.ifindex)?;
+            seen.insert(kernel.ifindex);
+            let link = match self.links.entry(kernel.ifindex) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(LinkState::new(kernel.ifindex)?),
+            };
+            if link.kernel.as_ref() != Some(&kernel) {
+                link.kernel = Some(kernel);
+                changed = true;
+            }
+        }
+
+        let before = self.links.len();
+        self.links.retain(|ifindex, link| {
+            if seen.contains(ifindex) {
+                true
+            } else {
+                link.kernel.is_none() && !self.kernel_synchronized
+            }
+        });
+        changed |= self.links.len() != before;
+        self.kernel_synchronized = true;
+        Ok(changed)
+    }
+
     pub fn revert(&mut self, ifindex: i32) -> Result<bool, LinkError> {
         validate_ifindex(ifindex)?;
-        Ok(self.links.remove(&ifindex).is_some())
+        let link = self
+            .links
+            .get_mut(&ifindex)
+            .ok_or(LinkError::NoSuchLink(ifindex))?;
+        let kernel = link.kernel.clone();
+        let mut reset = LinkState::new(ifindex)?;
+        reset.kernel = kernel;
+        if *link == reset {
+            return Ok(false);
+        }
+        *link = reset;
+        Ok(true)
     }
 
     pub fn search_domains(
@@ -218,7 +324,7 @@ impl RoutingTable {
                 .links
                 .get(&ifindex)
                 .ok_or(LinkError::NoSuchLink(ifindex))?;
-            if link.dns_servers.is_empty() {
+            if link.dns_servers.is_empty() || !link.kernel_relevant_unicast() {
                 return Ok(Vec::new());
             }
             return Ok(vec![RouteScope {
@@ -241,7 +347,7 @@ impl RoutingTable {
             }
         }
         for link in self.links.values() {
-            if link.dns_servers.is_empty() {
+            if link.dns_servers.is_empty() || !link.kernel_relevant_unicast() {
                 continue;
             }
             if let Some(labels) = best_domain_match(&name, &link.domains) {
@@ -270,7 +376,10 @@ impl RoutingTable {
             });
         }
         for link in self.links.values() {
-            if link.effective_default_route() && !link.dns_servers.is_empty() {
+            if link.effective_default_route()
+                && !link.dns_servers.is_empty()
+                && link.kernel_relevant_unicast()
+            {
                 scopes.push(RouteScope {
                     kind: ScopeKind::Link(link.ifindex),
                     servers: link.dns_servers.clone(),
@@ -290,6 +399,7 @@ impl RoutingTable {
         validate_ifindex(ifindex)?;
         match self.links.entry(ifindex) {
             Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(_) if self.kernel_synchronized => Err(LinkError::NoSuchLink(ifindex)),
             Entry::Vacant(entry) => Ok(entry.insert(LinkState::new(ifindex)?)),
         }
     }
@@ -310,6 +420,11 @@ fn validate_ifindex(ifindex: i32) -> Result<(), LinkError> {
     } else {
         Ok(())
     }
+}
+
+fn ipv4_is_link_local(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    octets[0] == 169 && octets[1] == 254
 }
 
 fn normalize_server(ifindex: i32, server: SocketAddr) -> SocketAddr {
@@ -401,7 +516,7 @@ impl Error for LinkError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     fn server(octet: u8) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet)), 53)
@@ -411,6 +526,20 @@ mod tests {
         Domain {
             name: name.to_owned(),
             route_only,
+        }
+    }
+
+    fn live_kernel(ifindex: i32) -> KernelLinkState {
+        KernelLinkState {
+            ifindex,
+            ifname: format!("test{ifindex}"),
+            flags: IFF_UP | IFF_RUNNING | IFF_LOWER_UP,
+            mtu: 1500,
+            operstate: IF_OPER_UNKNOWN,
+            has_ipv4_global: true,
+            has_ipv4_link_local: false,
+            has_ipv6_global: false,
+            has_ipv6_link_local: false,
         }
     }
 
@@ -532,5 +661,75 @@ mod tests {
             panic!("expected IPv6 server");
         };
         assert_eq!(address.scope_id(), 7);
+    }
+
+    #[test]
+    fn kernel_down_link_is_not_selected() {
+        let mut table = RoutingTable::default();
+        table
+            .sync_kernel_links(vec![KernelLinkState {
+                flags: 0,
+                ..live_kernel(2)
+            }])
+            .expect("kernel sync");
+        table.set_dns(2, vec![server(2)]).expect("link DNS");
+        assert!(table
+            .select("example", Some(2), &[], &[], &[])
+            .expect("route")
+            .is_empty());
+    }
+
+    #[test]
+    fn unknown_operstate_uses_running_carrier_flags() {
+        let kernel = live_kernel(2);
+        assert!(kernel.has_carrier());
+        let mut without_running = kernel.clone();
+        without_running.flags &= !IFF_RUNNING;
+        assert!(!without_running.has_carrier());
+    }
+
+    #[test]
+    fn link_local_address_requires_link_local_dns_for_unicast() {
+        let mut kernel = live_kernel(2);
+        kernel.has_ipv4_global = false;
+        kernel.has_ipv4_link_local = true;
+        assert!(!kernel.relevant_unicast(&[server(2)]));
+        let link_local_dns = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(169, 254, 1, 53)), 53);
+        assert!(kernel.relevant_unicast(&[link_local_dns]));
+    }
+
+    #[test]
+    fn revert_preserves_kernel_link_identity() {
+        let mut table = RoutingTable::default();
+        table
+            .sync_kernel_links(vec![live_kernel(2)])
+            .expect("kernel sync");
+        table.set_dns(2, vec![server(2)]).expect("link DNS");
+        table
+            .set_domains(2, vec![domain("corp.example", true)])
+            .expect("link domain");
+        assert!(table.revert(2).expect("revert"));
+        let link = table.link(2).expect("kernel link survives revert");
+        assert!(link.dns_servers.is_empty());
+        assert!(link.domains.is_empty());
+        assert_eq!(link.kernel.as_ref().map(|kernel| kernel.ifname.as_str()), Some("test2"));
+    }
+
+    #[test]
+    fn kernel_sync_removes_vanished_links_and_rejects_unknown_setters() {
+        let mut table = RoutingTable::default();
+        table
+            .sync_kernel_links(vec![live_kernel(2), live_kernel(3)])
+            .expect("initial kernel sync");
+        table.set_dns(2, vec![server(2)]).expect("known link DNS");
+        assert_eq!(
+            table.set_dns(9, vec![server(9)]),
+            Err(LinkError::NoSuchLink(9))
+        );
+        table
+            .sync_kernel_links(vec![live_kernel(2)])
+            .expect("updated kernel sync");
+        assert!(table.link(2).is_some());
+        assert!(table.link(3).is_none());
     }
 }
