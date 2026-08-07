@@ -155,32 +155,19 @@ mod tests {
     }
 
     #[test]
-    fn selective_credentials_preserve_explicit_dns() {
-        let directory = temporary_credential_directory("selective");
+    fn one_credential_is_enough_to_close_the_external_config_gate() {
+        let directory = temporary_credential_directory("one-present");
         fs::create_dir_all(&directory).expect("credential directory");
         fs::write(directory.join("network.dns"), "192.0.2.53\n").expect("DNS credential");
-        fs::write(
-            directory.join("network.search_domains"),
-            "credential.example\n",
-        )
-        .expect("domain credential");
 
-        let explicit: SocketAddr = "198.51.100.53:53".parse().expect("explicit DNS");
-        let mut config = Config {
-            upstreams: vec![explicit],
-            ..Config::default()
-        };
-        let assignments = apply_credentials_selective(&mut config, &directory, false, true);
-        assert!(!assignments.dns);
-        assert!(assignments.domains);
-        assert_eq!(config.upstreams, vec![explicit]);
+        let mut config = Config::default();
+        config.upstreams.clear();
+        assert!(apply_credentials(&mut config, &directory));
         assert_eq!(
-            config.domains,
-            vec![Domain {
-                name: "credential.example".to_owned(),
-                route_only: false,
-            }]
+            config.upstreams,
+            vec!["192.0.2.53:53".parse().expect("credential DNS")]
         );
+        assert!(config.domains.is_empty());
         fs::remove_dir_all(directory).expect("remove credential directory");
     }
 
