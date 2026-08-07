@@ -98,7 +98,7 @@ fn execute() -> Result<(), Box<dyn Error>> {
     }
     let stub_enabled = config.dns_stub_listener != DnsStubListenerMode::No
         && (!config.listeners.is_empty() || !config.proxy_listeners.is_empty());
-    if options.no_varlink && !stub_enabled {
+    if options.no_varlink && options.no_dbus && !stub_enabled {
         return Err("all resolver interfaces are disabled".into());
     }
 
@@ -106,6 +106,7 @@ fn execute() -> Result<(), Box<dyn Error>> {
     config.write_runtime_resolv_confs()?;
 
     let resolver = Arc::new(Resolver::new(config.clone()));
+    let netlink_thread = resolved::netlink::spawn(Arc::clone(&resolver))?;
     if config.effective_upstreams().is_empty() {
         eprintln!("systemd-resolved: warning: no upstream DNS servers are configured");
     }
@@ -165,6 +166,7 @@ fn execute() -> Result<(), Box<dyn Error>> {
     if let Some(thread) = dbus_thread {
         let _ = thread.join();
     }
+    let _ = netlink_thread.join();
     result?;
     Ok(())
 }
