@@ -73,5 +73,10 @@ int main(void) {
     assert(fd >= 0);
     assert(resolved_rtnl_wait(fd, 0) >= 0);
     assert(close(fd) == 0);
+
+    fd = resolved_networkd_open();
+    assert(fd >= 0);
+    assert(resolved_networkd_wait(fd, 0) >= 0);
+    assert(close(fd) == 0);
     return 0;
 }
