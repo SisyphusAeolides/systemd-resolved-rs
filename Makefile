@@ -10,12 +10,13 @@ LIBEXECDIR ?= $(PREFIX)/lib/systemd
 UNITDIR ?= $(PREFIX)/lib/systemd/system
 TMPFILESDIR ?= $(PREFIX)/lib/tmpfiles.d
 
-.PHONY: all build test check-native check-rust check-formal clean install
+.PHONY: all build test check-native check-rust check-formal check-packaging check-live clean install
+.PHONY: supremacy-dirs nss release release-with-nss install-replace uninstall boot-smoke bench
 
 all: build
 
 build:
-	cargo build --release --locked
+	cargo build --release --all-features --locked
 
 check-native:
 	mkdir -p build
@@ -31,14 +32,32 @@ check-native:
 	./build/test_native
 
 check-rust:
-	cargo test --all-targets --locked
+	cargo fmt --all -- --check
+	cargo clippy --all-targets --all-features --locked -- -D warnings
+	cargo test --all-targets --all-features --locked
 
 check-formal:
 	idris2 --build formal/idris/resolved-policy.ipkg
 	agda -i formal/agda formal/agda/Resolved/DNS/Name.agda
 	agda -i formal/agda formal/agda/Resolved/DNS/Transaction.agda
 
-test: check-native check-rust
+check-packaging:
+	bash -n scripts/install-replace.sh scripts/uninstall-restore.sh scripts/boot-smoke.sh
+	@set -eu; \
+	work=$$(mktemp -d); \
+	trap 'rm -rf "$$work"' EXIT HUP INT TERM; \
+	PYTHONPYCACHEPREFIX="$$work/pycache" python3 -m py_compile tests/live-dns.py scripts/probe-stub.py; \
+	sed 's|@SYSTEMD_RESOLVED_RS@|/usr/local/lib/systemd/systemd-resolved-rs|g' \
+		packaging/systemd/systemd-resolved-replacement.service >"$$work/systemd-resolved.service"; \
+	cp packaging/systemd/systemd-resolved-varlink.socket "$$work/systemd-resolved-varlink.socket"; \
+	SYSTEMD_UNIT_PATH="$$work" systemd-analyze verify \
+		"$$work/systemd-resolved.service" \
+		"$$work/systemd-resolved-varlink.socket"
+
+check-live: build
+	python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+
+test: check-native check-rust check-packaging
 
 install: build
 	install -Dm0755 target/release/systemd-resolved $(DESTDIR)$(LIBEXECDIR)/systemd-resolved
@@ -50,8 +69,6 @@ install: build
 clean:
 	rm -rf build target
 
-.PHONY: supremacy-dirs nss install-replace uninstall boot-smoke bench
-
 supremacy-dirs:
 	mkdir -p src/supremacy src/llmnr src/mdns nss scripts tests/parity tests/supremacy
 	mkdir -p packaging/polkit packaging/rpm
@@ -59,9 +76,9 @@ supremacy-dirs:
 nss:
 	$(MAKE) -C nss
 
-release:
-	cargo build --release
-	$(MAKE) nss
+release: build check-packaging
+
+release-with-nss: release nss
 
 install-replace: release
 	sudo bash scripts/install-replace.sh
