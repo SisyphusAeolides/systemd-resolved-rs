@@ -16,6 +16,7 @@ pub mod edns;
 pub mod hosts;
 pub mod json;
 pub mod native;
+pub mod netlink;
 pub mod policy;
 pub mod resolver;
 pub mod routing;
