@@ -26,12 +26,7 @@ pub fn is_command(command: &str) -> bool {
 
 pub fn execute(command: &str, arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let connection = Connection::system()?;
-    let proxy = Proxy::new(
-        &connection,
-        BUS_NAME,
-        MANAGER_PATH,
-        MANAGER_INTERFACE,
-    )?;
+    let proxy = Proxy::new(&connection, BUS_NAME, MANAGER_PATH, MANAGER_INTERFACE)?;
 
     match command {
         "dns" => set_dns(&proxy, arguments),
@@ -98,11 +93,7 @@ fn set_default_route(proxy: &Proxy<'_>, arguments: &[String]) -> Result<(), Box<
     Ok(())
 }
 
-fn set_mode(
-    proxy: &Proxy<'_>,
-    method: &str,
-    arguments: &[String],
-) -> Result<(), Box<dyn Error>> {
+fn set_mode(proxy: &Proxy<'_>, method: &str, arguments: &[String]) -> Result<(), Box<dyn Error>> {
     require_exact(method, arguments, 2)?;
     let link = parse_ifindex(&arguments[0])?;
     let mode = arguments[1].as_str();
@@ -144,7 +135,11 @@ fn link_and_values<'a>(
     Ok((parse_ifindex(link)?, values))
 }
 
-fn require_exact(command: &str, arguments: &[String], expected: usize) -> Result<(), Box<dyn Error>> {
+fn require_exact(
+    command: &str,
+    arguments: &[String],
+    expected: usize,
+) -> Result<(), Box<dyn Error>> {
     if arguments.len() != expected {
         return Err(format!(
             "{command} requires {expected} argument{}",
