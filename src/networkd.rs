@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-use crate::config::{parse_server_spec, DnsServerSpec, Domain, SupportMode, TlsMode, ValidationMode};
+use crate::config::{
+    parse_server_spec, DnsServerSpec, Domain, SupportMode, TlsMode, ValidationMode,
+};
 use crate::daemon::{request_stop, stop_requested};
 use crate::native;
 use crate::resolver::Resolver;
@@ -134,15 +136,15 @@ fn parse_link_state(ifindex: i32, text: &str) -> io::Result<LinkState> {
     }
 
     let dns_server_specs = parse_dns_specs(values.get("DNS").map_or("", String::as_str))?;
-    let dns_servers = dns_server_specs
-        .iter()
-        .map(|spec| spec.address)
-        .fold(Vec::new(), |mut servers, address| {
+    let dns_servers = dns_server_specs.iter().map(|spec| spec.address).fold(
+        Vec::new(),
+        |mut servers, address| {
             if !servers.contains(&address) {
                 servers.push(address);
             }
             servers
-        });
+        },
+    );
     let mut domains = parse_domains(values.get("DOMAINS").map_or("", String::as_str), false)?;
     for domain in parse_domains(values.get("ROUTE_DOMAINS").map_or("", String::as_str), true)? {
         if !domains.contains(&domain) {
@@ -423,10 +425,7 @@ mod tests {
         .expect("networkd DNS metadata");
         assert_eq!(state.dns_servers.len(), 1);
         assert_eq!(state.dns_server_specs.len(), 1);
-        assert_eq!(
-            state.dns_server_specs[0].interface.as_deref(),
-            Some("vpn0")
-        );
+        assert_eq!(state.dns_server_specs[0].interface.as_deref(), Some("vpn0"));
         assert_eq!(
             state.dns_server_specs[0].server_name.as_deref(),
             Some("resolver.example")
