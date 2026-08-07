@@ -207,6 +207,115 @@ impl Resolver {
         result
     }
 
+    fn new_tls_stream(
+        &self,
+        server: ServerKey,
+        strict: bool,
+        timeout: Duration,
+    ) -> Result<TlsStream, ResolveError> {
+        let (endpoint, server_name) = self.server_tls_endpoint(server);
+        Ok(TlsStream::connect(
+            endpoint,
+            self.server_transport_ifindex(server)?,
+            server_name.as_deref(),
+            strict,
+            timeout,
+        )?)
+    }
+
+    fn take_tls_stream(
+        &self,
+        server: ServerKey,
+        strict: bool,
+        timeout: Duration,
+    ) -> Result<(TlsStream, bool), ResolveError> {
+        let key = TlsPoolKey::new(server, strict);
+        let pooled = {
+            let mut streams = self
+                .tls_streams
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            streams.get_mut(&key).and_then(Vec::pop)
+        };
+        let reused = pooled.is_some();
+        let mut stream = match pooled {
+            Some(stream) => stream,
+            None => self.new_tls_stream(server, strict, timeout)?,
+        };
+        stream.set_timeout(timeout)?;
+        Ok((stream, reused))
+    }
+
+    fn recycle_tls_stream(&self, server: ServerKey, strict: bool, stream: TlsStream) {
+        let mut streams = self
+            .tls_streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pool = streams.entry(TlsPoolKey::new(server, strict)).or_default();
+        if pool.len() < TLS_POOL_PER_SERVER_MAX {
+            pool.push(stream);
+        }
+    }
+
+    fn exchange_tls_stream(
+        stream: &mut TlsStream,
+        query: &[u8],
+    ) -> Result<Vec<u8>, ResolveError> {
+        let query_length = u16::try_from(query.len())
+            .map_err(|_| ResolveError::Protocol("DNS query exceeds the TLS frame limit"))?;
+        stream.write_all(&query_length.to_be_bytes())?;
+        stream.write_all(query)?;
+
+        let mut length = [0; 2];
+        stream.read_exact(&mut length)?;
+        let length = usize::from(u16::from_be_bytes(length));
+        if length < wire::DNS_HEADER_LEN {
+            return Err(ResolveError::Protocol("short DNS-over-TLS frame"));
+        }
+        let mut response = vec![0; length];
+        stream.read_exact(&mut response)?;
+        response_matches(query, &response)?;
+        if Header::parse(&response)?.truncated() {
+            return Err(ResolveError::Protocol(
+                "truncated DNS-over-TLS response",
+            ));
+        }
+        Ok(response)
+    }
+
+    fn exchange_tls(
+        &self,
+        server: ServerKey,
+        query: &[u8],
+        remaining: Duration,
+        strict: bool,
+    ) -> Result<Vec<u8>, ResolveError> {
+        let timeout = self.tcp_transaction_timeout(remaining);
+        let started = Instant::now();
+        let (mut stream, reused) = self.take_tls_stream(server, strict, timeout)?;
+        let result = Self::exchange_tls_stream(&mut stream, query);
+        if result.is_ok() {
+            self.recycle_tls_stream(server, strict, stream);
+            return result;
+        }
+        if !reused {
+            return result;
+        }
+
+        let Some(timeout) = timeout.checked_sub(started.elapsed()) else {
+            return result;
+        };
+        if timeout.is_zero() {
+            return result;
+        }
+        let mut fresh = self.new_tls_stream(server, strict, timeout)?;
+        let result = Self::exchange_tls_stream(&mut fresh, query);
+        if result.is_ok() {
+            self.recycle_tls_stream(server, strict, fresh);
+        }
+        result
+    }
+
     pub fn lookup_name(&self, name: &str, family: i32) -> Result<NameLookup, ResolveError> {
         self.lookup_name_on_link(name, family, None)
     }
