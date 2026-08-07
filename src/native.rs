@@ -86,6 +86,7 @@ pub struct PeerCredentials {
     pub gid: u32,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LinkInfo {
     pub ifindex: i32,
@@ -242,8 +243,7 @@ pub fn link_snapshot() -> io::Result<Vec<LinkInfo>> {
         entries.truncate(count);
         return entries.into_iter().map(link_info).collect();
     }
-    Err(io::Error::new(
-        io::ErrorKind::Other,
+    Err(io::Error::other(
         "kernel link set changed repeatedly during snapshot",
     ))
 }
@@ -286,8 +286,15 @@ fn link_info(snapshot: NativeLinkSnapshot) -> io::Result<LinkInfo> {
         .unwrap_or(snapshot.ifname.len());
     let bytes = snapshot.ifname[..end]
         .iter()
-        .map(|byte| *byte as u8)
-        .collect::<Vec<_>>();
+        .copied()
+        .map(u8::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "kernel interface name contains non-ASCII bytes",
+            )
+        })?;
     let ifname = String::from_utf8(bytes).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
