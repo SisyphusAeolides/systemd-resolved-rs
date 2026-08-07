@@ -30,6 +30,15 @@ impl Resolver {
         }
     }
 
+    fn server_dnssec_mode(&self, server: ServerKey) -> ValidationMode {
+        match server.scope_kind() {
+            ScopeKind::Link(ifindex) => self
+                .link(ifindex)
+                .map_or(self.config.dnssec, |link| link.dnssec),
+            ScopeKind::Global | ScopeKind::Fallback => self.config.dnssec,
+        }
+    }
+
     fn server_tls_endpoint(&self, server: ServerKey) -> (SocketAddr, Option<String>) {
         let spec = self.server_spec_for_key(server);
         let mut endpoint = spec.address;
@@ -148,5 +157,25 @@ mod server_identity_tests {
         );
 
         assert_eq!(resolver.server_dns_over_tls_mode(key), TlsMode::Yes);
+    }
+
+    #[test]
+    fn link_dnssec_mode_overrides_global_policy() {
+        let resolver = Resolver::new(Config {
+            dnssec: ValidationMode::No,
+            ..Config::default()
+        });
+        resolver
+            .sync_kernel_links(vec![kernel_link(7)])
+            .expect("kernel link");
+        resolver
+            .set_link_dnssec(7, ValidationMode::Yes)
+            .expect("link DNSSEC mode");
+        let key = ServerKey::new(
+            ScopeKind::Link(7),
+            "192.0.2.53:53".parse().expect("DNS server"),
+        );
+
+        assert_eq!(resolver.server_dnssec_mode(key), ValidationMode::Yes);
     }
 }
