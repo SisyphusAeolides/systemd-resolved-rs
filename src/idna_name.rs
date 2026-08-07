@@ -1,39 +1,118 @@
-//! IDNA / UTS#46 helpers for qnames.
+//! Internationalized domain names → ASCII A-labels / Unicode U-labels.
 
-/// ASCII lowercase presentation → wire-ready A-label string (dots).
-/// Uses `idna` crate if available; else strict ASCII-only.
-pub fn to_ascii(name: &str) -> Result<String, String> {
-    let n = name.trim().trim_end_matches('.');
+use std::borrow::Cow;
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum IdnaError {
+    #[error("empty name")]
+    Empty,
+    #[error("idna conversion failed: {0}")]
+    Convert(String),
+    #[error("non-ASCII without idna support")]
+    NeedsIdna,
+}
+
+/// Convert a presentation name to ASCII (A-labels), without trailing dot.
+pub fn to_ascii(name: &str) -> Result<String, IdnaError> {
+    let n = name.trim();
     if n.is_empty() {
+        return Err(IdnaError::Empty);
+    }
+    let absolute = n.ends_with('.');
+    let core = n.trim_end_matches('.');
+    if core.is_empty() {
         return Ok(".".into());
     }
-    #[cfg(feature = "idna")]
-    {
-        return idna::domain_to_ascii(n).map_err(|e| e.to_string());
+
+    let ascii = to_ascii_core(core)?;
+    if absolute {
+        Ok(format!("{}.", ascii))
+    } else {
+        Ok(ascii)
     }
-    #[cfg(not(feature = "idna"))]
+}
+
+fn to_ascii_core(core: &str) -> Result<String, IdnaError> {
+    #[cfg(feature = "idna-name")]
     {
-        if n.is_ascii() {
-            Ok(n.to_ascii_lowercase())
+        // idna 1.x
+        match idna::domain_to_ascii(core) {
+            Ok(s) => Ok(s),
+            Err(e) => Err(IdnaError::Convert(format!("{:?}", e))),
+        }
+    }
+    #[cfg(not(feature = "idna-name"))]
+    {
+        if core.is_ascii() {
+            Ok(core.to_ascii_lowercase())
         } else {
-            Err("non-ASCII name requires idna feature".into())
+            Err(IdnaError::NeedsIdna)
         }
     }
 }
 
-pub fn to_ascii_absolute(name: &str) -> Result<String, String> {
-    let a = to_ascii(name)?;
-    if a == "." {
-        return Ok(a);
+/// Unicode form for display / D-Bus results.
+pub fn to_unicode(name: &str) -> Result<String, IdnaError> {
+    let n = name.trim().trim_end_matches('.');
+    if n.is_empty() {
+        return Ok(".".into());
     }
-    Ok(a.trim_end_matches('.').to_string())
+    #[cfg(feature = "idna-name")]
+    {
+        match idna::domain_to_unicode(n) {
+            (s, Ok(())) => Ok(s),
+            (s, Err(_)) => Ok(s), // best-effort
+        }
+    }
+    #[cfg(not(feature = "idna-name"))]
+    {
+        Ok(n.to_string())
+    }
+}
+
+/// Lowercase ASCII name suitable as cache key (A-labels).
+pub fn cache_key_name(name: &str) -> Result<String, IdnaError> {
+    Ok(to_ascii(name)?
+        .trim_end_matches('.')
+        .to_ascii_lowercase())
+}
+
+pub fn is_ldh_label(lab: &str) -> bool {
+    if lab.is_empty() || lab.len() > 63 {
+        return false;
+    }
+    let b = lab.as_bytes();
+    if b[0] == b'-' || b[lab.len() - 1] == b'-' {
+        return false;
+    }
+    b.iter()
+        .all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+}
+
+/// Validate each label of an ASCII domain.
+pub fn validate_ascii_domain(name: &str) -> bool {
+    let n = name.trim().trim_end_matches('.');
+    if n.is_empty() {
+        return true; // root
+    }
+    n.split('.').all(is_ldh_label)
+}
+
+pub fn cow_ascii_lower(s: &str) -> Cow<'_, str> {
+    if s.bytes().any(|b| (b'A'..=b'Z').contains(&b)) {
+        Cow::Owned(s.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(s)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn ascii_lower() {
+    fn ascii_path() {
         assert_eq!(to_ascii("ExAmPle.COM").unwrap(), "example.com");
+        assert!(validate_ascii_domain("example.com"));
     }
 }

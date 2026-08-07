@@ -56,7 +56,7 @@ sigcache = []
 doq = []
 obs = []
 supremacy = ["mmap-nss", "dataplane", "swr", "nsec-agg", "sigcache", "doq", "obs"]
-idna = ["dep:idna"]
+idna-name = ["dep:idna"]
 
 [profile.release]
 codegen-units = 1

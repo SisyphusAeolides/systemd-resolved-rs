@@ -41,13 +41,20 @@ pub async fn run(mut landing: LandingConfig) -> anyhow::Result<()> {
     lifecycle::install_signal_handlers();
 
     let publisher = ResolvConfPublisher {
-        run_dir: landing.run_dir.clone(),
+        run_dir: PathBuf::from("/run/systemd/resolve"),
         mode: ResolvConfMode::Stub,
+        file_mode: 0o644,
+        stub_addresses: vec![
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 53)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 54)),
+        ],
     };
     let state = GlobalDnsState {
         search: landing.search.clone(),
         uplink_servers: landing.uplink.clone(),
-        options: vec!["edns0".into(), "trust-ad".into()],
+        options: vec!["trust-ad".into()],
+        banner: None,
+        llmnr_hostname: None,
     };
     if let Err(e) = publisher.republish(&state) {
         warn!(error = %e, "resolv.conf publish failed (continuing)");
