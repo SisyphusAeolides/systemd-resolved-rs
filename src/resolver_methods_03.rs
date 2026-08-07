@@ -190,7 +190,10 @@ impl Resolver {
     }
 }
 
-fn server_keys_for_specs(scope: ScopeKind, specs: &[DnsServerSpec]) -> Vec<ServerKey> {
+fn server_keys_for_specs(
+    scope: ScopeKind,
+    specs: &[DnsServerSpec],
+) -> Vec<ServerKey> {
     let mut slots = HashMap::<SocketAddr, usize>::new();
     specs
         .iter()
