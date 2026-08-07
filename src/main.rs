@@ -98,14 +98,16 @@ fn configured_resolver(options: &Options) -> Result<Config, Box<dyn Error>> {
     }
     if options.no_stub {
         config.dns_stub_listener = DnsStubListenerMode::No;
+        config.dns_stub_listener_extra.clear();
     }
     config.validate()?;
     Ok(config)
 }
 
 fn run_resolver(config: &Config, options: &Options) -> Result<(), Box<dyn Error>> {
-    let stub_enabled = config.dns_stub_listener != DnsStubListenerMode::No
+    let primary_stub_enabled = config.dns_stub_listener != DnsStubListenerMode::No
         && (!config.listeners.is_empty() || !config.proxy_listeners.is_empty());
+    let stub_enabled = primary_stub_enabled || !config.dns_stub_listener_extra.is_empty();
     if options.no_varlink && options.no_dbus && !stub_enabled {
         return Err("all resolver interfaces are disabled".into());
     }
@@ -122,7 +124,7 @@ fn run_resolver(config: &Config, options: &Options) -> Result<(), Box<dyn Error>
 
     let dbus_thread = spawn_dbus(&resolver, options.no_dbus)?;
     let varlink_thread = spawn_varlink(&resolver, config, options.no_varlink)?;
-    log_stub_listeners(config, stub_enabled);
+    log_stub_listeners(config, primary_stub_enabled);
 
     let result = run_stub(&resolver);
     request_stop();
@@ -179,20 +181,26 @@ fn spawn_varlink(
     ))
 }
 
-fn log_stub_listeners(config: &Config, enabled: bool) {
-    if !enabled {
-        return;
+fn log_stub_listeners(config: &Config, primary_enabled: bool) {
+    if primary_enabled {
+        for address in &config.listeners {
+            eprintln!(
+                "systemd-resolved: full stub listening on {address} ({})",
+                config.dns_stub_listener.as_str()
+            );
+        }
+        for address in &config.proxy_listeners {
+            eprintln!(
+                "systemd-resolved: proxy stub listening on {address} ({})",
+                config.dns_stub_listener.as_str()
+            );
+        }
     }
-    for address in &config.listeners {
+    for listener in &config.dns_stub_listener_extra {
         eprintln!(
-            "systemd-resolved: full stub listening on {address} ({})",
-            config.dns_stub_listener.as_str()
-        );
-    }
-    for address in &config.proxy_listeners {
-        eprintln!(
-            "systemd-resolved: proxy stub listening on {address} ({})",
-            config.dns_stub_listener.as_str()
+            "systemd-resolved: extra stub listening on {} ({})",
+            listener.address(),
+            listener.mode().as_str()
         );
     }
 }
@@ -215,6 +223,10 @@ fn print_configuration(config: &Config, no_varlink: bool) {
     println!("upstreams: {}", config.effective_upstreams().len());
     println!("full listeners: {}", config.listeners.len());
     println!("proxy listeners: {}", config.proxy_listeners.len());
+    println!(
+        "extra listeners: {}",
+        config.dns_stub_listener_extra.len()
+    );
     println!("stub listener mode: {}", config.dns_stub_listener.as_str());
     if no_varlink {
         println!("varlink: disabled");
