@@ -70,3 +70,6 @@ pedantic = "warn"
 
 [patch.crates-io]
 zbus_macros = { path = "vendor/zbus_macros" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
