@@ -53,7 +53,7 @@ pub struct ShmBucket {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ShmAddr {
     pub family: u8,
     pub _pad: u8,
