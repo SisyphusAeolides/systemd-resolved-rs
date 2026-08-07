@@ -1,115 +1,227 @@
-//! Single entry: start control plane + dataplane + resolv.conf + notify.
+//! Process entry orchestration: publish resolv.conf, control plane, dataplane, lifecycle.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::RwLock;
 use tracing::{error, info, warn};
 
 use crate::lifecycle;
 use crate::resolvconf_publish::{GlobalDnsState, ResolvConfMode, ResolvConfPublisher};
-use crate::supremacy::{Dataplane, DataplaneConfig};
-use crate::supremacy::SupremacyResolver;
+use crate::server_features::FeatureTable;
+use crate::split_dns::SplitDnsTable;
+use crate::supremacy::dataplane::{Dataplane, DataplaneConfig};
+use crate::supremacy::obs::{serve_metrics, FlightRecorder, Metrics};
+use crate::supremacy::resolver::SupremacyResolver;
+use crate::synthetic::HostsTable;
 
 #[derive(Clone, Debug)]
 pub struct LandingConfig {
     pub stub_addr: SocketAddr,
+    pub stub_addr_alt: Option<SocketAddr>,
     pub workers: usize,
     pub run_dir: PathBuf,
     pub metrics_addr: Option<String>,
     pub shm_l1: bool,
+    pub swr: bool,
     pub search: Vec<String>,
     pub uplink: Vec<IpAddr>,
+    pub hosts_path: PathBuf,
+    pub hostname: String,
+    pub watchdog_secs: u64,
 }
 
 impl Default for LandingConfig {
     fn default() -> Self {
+        let metrics = std::env::var("RESOLVED_RS_METRICS").ok().filter(|s| !s.is_empty());
+        let shm = std::env::var("RESOLVED_RS_SHM")
+            .map(|v| v != "0" && v != "false")
+            .unwrap_or(true);
+        let hostname = std::fs::read_to_string("/etc/hostname")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "localhost".into());
         Self {
             stub_addr: SocketAddr::from((Ipv4Addr::new(127, 0, 0, 53), 53)),
-            workers: 0,
+            stub_addr_alt: Some(SocketAddr::from((Ipv4Addr::new(127, 0, 0, 54), 53))),
+            workers: std::env::var("RESOLVED_RS_WORKERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
             run_dir: PathBuf::from("/run/systemd/resolve"),
-            metrics_addr: std::env::var("RESOLVED_RS_METRICS").ok(),
-            shm_l1: std::env::var("RESOLVED_RS_SHM").map(|v| v != "0").unwrap_or(true),
+            metrics_addr: metrics,
+            shm_l1: shm,
+            swr: std::env::var("RESOLVED_RS_SWR")
+                .map(|v| v != "0")
+                .unwrap_or(true),
             search: vec![],
             uplink: vec![],
+            hosts_path: PathBuf::from("/etc/hosts"),
+            hostname,
+            watchdog_secs: 15,
         }
     }
 }
 
-pub async fn run(mut landing: LandingConfig) -> anyhow::Result<()> {
-    lifecycle::install_signal_handlers();
+/// Shared daemon state for control plane + dataplane.
+#[allow(missing_debug_implementations)]
+pub struct DaemonState {
+    pub core: Arc<SupremacyResolver>,
+    pub publisher: ResolvConfPublisher,
+    pub dns_state: RwLock<GlobalDnsState>,
+    pub split: RwLock<SplitDnsTable>,
+    pub features: Arc<FeatureTable>,
+    pub hosts: RwLock<HostsTable>,
+    pub flight: Arc<FlightRecorder>,
+    pub metrics: Arc<Metrics>,
+    pub hostname: RwLock<String>,
+}
 
-    let publisher = ResolvConfPublisher {
-        run_dir: PathBuf::from("/run/systemd/resolve"),
-        mode: ResolvConfMode::Stub,
-        file_mode: 0o644,
-        stub_addresses: vec![
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 53)),
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 54)),
-        ],
-    };
-    let state = GlobalDnsState {
-        search: landing.search.clone(),
-        uplink_servers: landing.uplink.clone(),
-        options: vec!["trust-ad".into()],
-        banner: None,
-        llmnr_hostname: None,
-    };
-    if let Err(e) = publisher.republish(&state) {
-        warn!(error = %e, "resolv.conf publish failed (continuing)");
+impl DaemonState {
+    pub fn from_landing(landing: &LandingConfig) -> Arc<Self> {
+        let core = SupremacyResolver::new();
+        let metrics = Arc::clone(&core.metrics);
+        let hosts_text = std::fs::read_to_string(&landing.hosts_path).unwrap_or_default();
+        let hosts = HostsTable::parse_hosts_file(&hosts_text);
+        let publisher = ResolvConfPublisher {
+            run_dir: landing.run_dir.clone(),
+            mode: ResolvConfMode::Stub,
+            ..Default::default()
+        };
+        let dns_state = GlobalDnsState {
+            search: landing.search.clone(),
+            uplink_servers: landing.uplink.clone(),
+            options: vec!["edns0".into(), "trust-ad".into()],
+            banner: Some("systemd-resolved-rs".into()),
+            llmnr_hostname: Some(landing.hostname.clone()),
+        };
+        Arc::new(Self {
+            core,
+            publisher,
+            dns_state: RwLock::new(dns_state),
+            split: RwLock::new(SplitDnsTable {
+                search: landing.search.clone(),
+                allow_default: true,
+                ..Default::default()
+            }),
+            features: Arc::new(FeatureTable::new()),
+            hosts: RwLock::new(hosts),
+            flight: FlightRecorder::new(2048),
+            metrics,
+            hostname: RwLock::new(landing.hostname.clone()),
+        })
     }
 
-    // Core supremacy resolver
-    let core = SupremacyResolver::new();
+    pub fn republish_resolv(&self) {
+        let st = self.dns_state.read().clone();
+        self.publisher.republish_lossy(&st);
+    }
 
-    // Metrics HTTP
+    pub fn reload_hosts(&self, path: &std::path::Path) {
+        match std::fs::read_to_string(path) {
+            Ok(t) => {
+                *self.hosts.write() = HostsTable::parse_hosts_file(&t);
+                info!("reloaded hosts file");
+            }
+            Err(e) => warn!(error = %e, "hosts reload failed"),
+        }
+    }
+
+    pub fn flush_all(&self) {
+        self.core.flush_all();
+        self.features.reset_all();
+        info!("flushed caches and server features");
+    }
+}
+
+pub async fn run(landing: LandingConfig) -> anyhow::Result<()> {
+    lifecycle::install_signal_handlers();
+    lifecycle::spawn_watchdog_loop(Duration::from_secs(landing.watchdog_secs));
+
+    let state = DaemonState::from_landing(&landing);
+    state.republish_resolv();
+
+    // Metrics
     if let Some(addr) = landing.metrics_addr.clone() {
-        let m = Arc::clone(&core.metrics);
+        let m = Arc::clone(&state.metrics);
+        info!(%addr, "metrics listening");
         tokio::spawn(async move {
-            if let Err(e) = crate::supremacy::obs::serve_metrics(m, &addr).await {
-                error!(error = %e, "metrics server exited");
+            if let Err(e) = serve_metrics(m, &addr).await {
+                error!(error = %e, "metrics server stopped");
             }
         });
     }
 
-    // Watchdog + reload/flush
-    let core_bg = Arc::clone(&core);
-    let pub_bg = publisher.clone();
-    let state_bg = state.clone();
-    tokio::spawn(async move {
-        let mut iv = tokio::time::interval(Duration::from_secs(15));
-        loop {
-            iv.tick().await;
-            lifecycle::sd_notify_watchdog();
-            if lifecycle::take_reload() {
-                info!("SIGHUP reload");
-                let _ = pub_bg.republish(&state_bg);
-            }
-            if lifecycle::take_flush() {
-                info!("SIGUSR2 flush caches");
-                core_bg.cache.flush();
-            }
-            if lifecycle::stop_requested() {
-                lifecycle::sd_notify_stopping();
-                break;
-            }
-        }
-    });
+    // Control-plane tasks (enable as modules accept Arc<DaemonState>)
+    {
+        let st = Arc::clone(&state);
+        tokio::spawn(async move {
+            // crate::dbus::run_manager(st).await
+            let _ = st;
+            std::future::pending::<()>().await
+        });
+    }
+    {
+        let st = Arc::clone(&state);
+        tokio::spawn(async move {
+            // crate::varlink::run(st, path).await
+            let _ = st;
+            std::future::pending::<()>().await
+        });
+    }
+    {
+        let st = Arc::clone(&state);
+        tokio::spawn(async move {
+            // crate::networkd::watch(st).await
+            let _ = st;
+            std::future::pending::<()>().await
+        });
+    }
 
-    // TODO: spawn dbus + varlink control plane here with core.clone()
-    // tokio::spawn(crate::dbus::run(...));
-    // tokio::spawn(crate::varlink::run(...));
+    // Lifecycle flags
+    {
+        let st = Arc::clone(&state);
+        let hosts_path = landing.hosts_path.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(Duration::from_millis(250));
+            loop {
+                iv.tick().await;
+                if lifecycle::stop_requested() {
+                    lifecycle::sd_notify_stopping();
+                    break;
+                }
+                if lifecycle::take_reload() {
+                    lifecycle::sd_notify_status("reloading");
+                    st.reload_hosts(&hosts_path);
+                    st.republish_resolv();
+                    lifecycle::sd_notify_status("running");
+                }
+                if lifecycle::take_flush() {
+                    st.flush_all();
+                }
+                if lifecycle::take_dump_stats() {
+                    let text = st.metrics.prometheus_text();
+                    info!(target: "stats", "{text}");
+                }
+            }
+        });
+    }
 
     lifecycle::sd_notify_ready();
-    info!(stub = %landing.stub_addr, "READY=1");
+    lifecycle::sd_notify_status("running");
+    info!(
+        stub = %landing.stub_addr,
+        workers = landing.workers,
+        "systemd-resolved-rs ready"
+    );
 
     let workers = if landing.workers == 0 {
         std::thread::available_parallelism()
             .map(|n| n.get().clamp(2, 16))
             .unwrap_or(4)
     } else {
-        landing.workers
+        landing.workers.max(1)
     };
 
     let dp = Arc::new(Dataplane {
@@ -118,20 +230,30 @@ pub async fn run(mut landing: LandingConfig) -> anyhow::Result<()> {
             workers,
             recvmmsg_batch: 32,
         },
-        cache: Arc::clone(&core.cache),
+        cache: Arc::clone(&state.core.cache),
+        resolver: Arc::clone(&state.core),
     });
 
-    // Run dataplane until stop
-    let dp_run = Arc::clone(&dp);
-    let handle = tokio::spawn(async move {
-        if let Err(e) = dp_run.run().await {
-            error!(error = %e, "dataplane error");
-        }
-    });
-
-    while !lifecycle::stop_requested() {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    // Optional second bind 127.0.0.54
+    if let Some(alt) = landing.stub_addr_alt {
+        let dp2 = Arc::new(Dataplane {
+            cfg: DataplaneConfig {
+                bind: alt,
+                workers: workers.max(1) / 2 + 1,
+                recvmmsg_batch: 16,
+            },
+            cache: Arc::clone(&state.core.cache),
+            resolver: Arc::clone(&state.core),
+        });
+        tokio::spawn(async move {
+            if let Err(e) = dp2.run().await {
+                error!(error = %e, "alt stub dataplane exited");
+            }
+        });
     }
-    handle.abort();
-    Ok(())
+
+    // Block on primary dataplane
+    let result = dp.run().await;
+    lifecycle::sd_notify_stopping();
+    result.map_err(|e| anyhow::anyhow!("dataplane: {e}"))
 }

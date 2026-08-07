@@ -50,6 +50,7 @@ pub fn open_reuseport_udp(addr: SocketAddr, n: usize) -> std::io::Result<Vec<std
 pub struct Dataplane {
     pub cfg: DataplaneConfig,
     pub cache: Arc<L2Cache>,
+    pub resolver: Arc<crate::supremacy::resolver::SupremacyResolver>,
 }
 
 impl Dataplane {
@@ -107,8 +108,11 @@ impl Dataplane {
         if budget.expired() {
             return Err(());
         }
-        let _ = budget;
-        Err(())
+        let name = crate::nss_backend::wire_to_presentation(&key.owner).unwrap_or_else(|_| ".".into());
+        match self.resolver.resolve_name(&name, key.qtype, key.qclass, QueryClass::Interactive).await {
+            Ok(val) => Ok(rewrite_id(&val.answer, id)),
+            Err(_) => Err(()),
+        }
     }
 }
 
