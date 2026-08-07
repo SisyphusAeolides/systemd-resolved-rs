@@ -75,4 +75,4 @@ pedantic = "warn"
 zbus_macros = { path = "vendor/zbus_macros" }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = "=3.10.1"
