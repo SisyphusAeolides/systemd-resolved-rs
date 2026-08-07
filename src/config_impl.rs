@@ -68,6 +68,7 @@ impl Config {
                 self.cache = cache;
                 self.cache_negative = cache_negative;
             }
+            "CacheFromLocalhost" => self.cache_from_localhost = parse_bool(value)?,
             "DNSCacheSize" => {
                 self.cache_size = value
                     .parse()
