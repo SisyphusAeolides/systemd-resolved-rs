@@ -21,11 +21,39 @@ name = "resolvectl"
 path = "src/bin/resolvectl.rs"
 
 [dependencies]
+anyhow = "1"
+async-trait = { version = "0.1.91", optional = true }
+bincode = "1"
+bytes = "1.12.1"
+crossbeam-queue = "0.3.13"
+memmap2 = "0.9.5"
+parking_lot = "0.12.5"
+rand = "0.9.5"
+sd-notify = "0.4"
+serde = { version = "1", features = ["derive"] }
+socket2 = { version = "0.5.7", features = ["all"] }
+seahash = "4.1.0"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "net", "io-util", "signal"] }
+tokio-util = { version = "0.7.19", optional = true }
+tracing = "0.1.44"
 zbus = "=3.15.2"
 
 [features]
-default = ["fortran-routing"]
+default = ["fortran-routing", "hyper"]
 fortran-routing = []
+hyper = ["dep:async-trait", "dep:tokio-util"]
+beast-wire = []
+kalman = []
+formal-crosscheck = []
+mmap-nss = []
+dataplane = []
+swr = []
+nsec-agg = []
+sigcache = []
+doq = []
+obs = []
+supremacy = ["mmap-nss", "dataplane", "swr", "nsec-agg", "sigcache", "doq", "obs"]
 
 [profile.release]
 codegen-units = 1

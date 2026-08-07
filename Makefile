@@ -48,3 +48,28 @@ install: build
 
 clean:
 	rm -rf build target
+
+.PHONY: supremacy-dirs nss install-replace uninstall boot-smoke bench
+
+supremacy-dirs:
+	mkdir -p src/supremacy src/llmnr src/mdns nss scripts tests/parity tests/supremacy
+	mkdir -p packaging/polkit packaging/rpm
+
+nss:
+	$(MAKE) -C nss
+
+release:
+	cargo build --release
+	$(MAKE) nss
+
+install-replace: release
+	sudo bash scripts/install-replace.sh
+
+uninstall:
+	sudo bash scripts/uninstall-restore.sh
+
+boot-smoke:
+	bash scripts/boot-smoke.sh
+
+bench:
+	bash tests/supremacy/bench_compare.sh

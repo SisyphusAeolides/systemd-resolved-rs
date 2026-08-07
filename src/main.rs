@@ -68,7 +68,11 @@ fn execute() -> Result<(), Box<dyn Error>> {
         print_configuration(&config, options.no_varlink);
         return Ok(());
     }
-    run_resolver(&config, &options)
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    rt.block_on(async {
+        resolved::landing_glue::run(resolved::landing_glue::LandingConfig::default()).await
+    })?;
+    Ok(())
 }
 
 fn configured_resolver(options: &Options) -> Result<Config, Box<dyn Error>> {

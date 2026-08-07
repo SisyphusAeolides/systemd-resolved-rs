@@ -520,6 +520,26 @@ impl fmt::Display for LinkError {
 
 impl Error for LinkError {}
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ServerMetrics {
+    pub ewma_rtt_ms: f64,
+    pub ewma_fail: f64,
+    pub samples: i32,
+    pub consecutive_fail: i32,
+    pub dnssec_ok: i32,
+    pub reachable: i32,
+    pub family_pref: i32,
+    pub scope_pref: i32,
+}
+
+extern "C" {
+    pub fn rs_init_table(n: i32, table: *mut ServerMetrics);
+    pub fn rs_update_sample(idx0: i32, success: i32, rtt_ms: f64, table: *mut ServerMetrics);
+    pub fn rs_score_servers(n: i32, table: *const ServerMetrics, out_scores: *mut f64);
+    pub fn rs_pick_best(n: i32, table: *const ServerMetrics) -> i32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

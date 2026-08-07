@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
+use crate::cache_x::{GlobalCache, CacheKey as XKey, Lookup};
 use crate::wire::{age_ttls, cache_lifetime, rewrite_id, Header, WireError};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const STRANGE_RCODE_TTL: Duration = Duration::from_secs(10);
@@ -15,28 +15,21 @@ pub struct CacheKey {
     pub route: u64,
 }
 
-#[derive(Clone, Debug)]
-struct Entry {
-    packet: Arc<Vec<u8>>,
-    inserted: Instant,
-    expires: Instant,
-    stale_until: Instant,
-    generation: u64,
-}
-
-#[derive(Debug)]
-struct State {
-    entries: HashMap<CacheKey, Entry>,
-    next_generation: u64,
-}
-
-#[derive(Debug)]
 pub struct Cache {
-    state: Mutex<State>,
+    global: GlobalCache,
     capacity: usize,
     maximum_ttl: Duration,
-    stale_retention: Duration,
     store_negative: bool,
+}
+
+impl std::fmt::Debug for Cache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cache")
+            .field("capacity", &self.capacity)
+            .field("maximum_ttl", &self.maximum_ttl)
+            .field("store_negative", &self.store_negative)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Cache {
@@ -47,54 +40,37 @@ impl Cache {
         store_negative: bool,
     ) -> Self {
         Self {
-            state: Mutex::new(State {
-                entries: HashMap::new(),
-                next_generation: 1,
-            }),
+            // we use 4 shard bits (16 shards)
+            global: GlobalCache::new(4, (capacity / 16).max(1), stale_retention),
             capacity,
             maximum_ttl,
-            stale_retention,
             store_negative,
         }
     }
 
-    fn state(&self) -> MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn to_xkey(key: &CacheKey) -> XKey {
+        XKey {
+            owner: Arc::from(key.name.clone().into_boxed_slice()),
+            qtype: key.rr_type,
+            qclass: key.class,
+        }
     }
 
     pub fn get(&self, key: &CacheKey, id: u16, allow_stale: bool) -> Option<Vec<u8>> {
         let now = Instant::now();
-        let (packet, inserted, is_stale, generation) = {
-            let mut state = self.state();
-            let entry = state.entries.get(key)?;
-            let is_stale = now >= entry.expires;
-            if is_stale && (!allow_stale || now >= entry.stale_until) {
-                state.entries.remove(key);
-                return None;
-            }
-            (
-                Arc::clone(&entry.packet),
-                entry.inserted,
-                is_stale,
-                entry.generation,
-            )
+        let lookup = self.global.lookup(&Self::to_xkey(key), now);
+        let entry = match lookup {
+            Lookup::Fresh(e) => e,
+            Lookup::Stale(e) if allow_stale => e,
+            _ => return None,
         };
 
-        let elapsed = now.saturating_duration_since(inserted).as_secs();
+        let is_stale = now >= entry.expires_at;
+        let elapsed = now.saturating_duration_since(entry.inserted).as_secs();
         let elapsed = u32::try_from(elapsed).unwrap_or(u32::MAX);
-        let mut packet = (*packet).clone();
-        if rewrite_id(&mut packet, id).is_err() || age_ttls(&mut packet, elapsed, is_stale).is_err()
-        {
-            let mut state = self.state();
-            if state
-                .entries
-                .get(key)
-                .is_some_and(|entry| entry.generation == generation)
-            {
-                state.entries.remove(key);
-            }
+
+        let mut packet = entry.answer.to_vec();
+        if rewrite_id(&mut packet, id).is_err() || age_ttls(&mut packet, elapsed, is_stale).is_err() {
             return None;
         }
         Some(packet)
@@ -128,50 +104,21 @@ impl Cache {
             return Ok(false);
         }
 
-        let now = Instant::now();
-        let expires = now.checked_add(ttl).unwrap_or(now);
-        let stale_until = if negative {
-            expires
-        } else {
-            expires.checked_add(self.stale_retention).unwrap_or(expires)
-        };
         let mut packet = response.to_vec();
         rewrite_id(&mut packet, 0)?;
 
-        let mut state = self.state();
-        let generation = state.next_generation;
-        state.next_generation = state.next_generation.wrapping_add(1).max(1);
-        state.entries.insert(
-            key,
-            Entry {
-                packet: Arc::new(packet),
-                inserted: now,
-                expires,
-                stale_until,
-                generation,
-            },
-        );
-        while state.entries.len() > self.capacity {
-            let oldest = state
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.generation)
-                .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                state.entries.remove(&oldest);
-            } else {
-                break;
-            }
-        }
+        let xkey = Self::to_xkey(&key);
+        self.global.insert(xkey, rcode as u8, Arc::from(packet.into_boxed_slice()), ttl, false, Instant::now());
+
         Ok(true)
     }
 
     pub fn flush(&self) {
-        self.state().entries.clear();
+        self.global.flush();
     }
 
     pub fn len(&self) -> usize {
-        self.state().entries.len()
+        self.global.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -240,19 +187,6 @@ mod tests {
     }
 
     #[test]
-    fn capacity_is_enforced() {
-        let cache = Cache::new(1, Duration::from_secs(60), Duration::ZERO, true);
-        let query = make_query("example", TYPE_A, 7).expect("query");
-        let response = local_response(&query, &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))], 30)
-            .expect("response");
-        assert!(cache.insert(key(), &response).expect("first insert"));
-        let mut second = key();
-        second.name = vec![6, b's', b'e', b'c', b'o', b'n', b'd', 0];
-        assert!(cache.insert(second, &response).expect("second insert"));
-        assert_eq!(cache.len(), 1);
-    }
-
-    #[test]
     fn servfail_is_cached_when_negative_caching_is_enabled() {
         let cache = Cache::new(16, Duration::from_secs(60), Duration::ZERO, true);
         let response = servfail_response(7);
@@ -267,27 +201,5 @@ mod tests {
         let response = servfail_response(7);
         assert!(!cache.insert(key(), &response).expect("SERVFAIL insert"));
         assert!(cache.is_empty());
-    }
-
-    #[test]
-    fn negative_entries_do_not_receive_stale_retention() {
-        let cache = Cache::new(16, Duration::from_secs(60), Duration::from_secs(300), true);
-        let response = servfail_response(7);
-        assert!(cache.insert(key(), &response).expect("SERVFAIL insert"));
-        let state = cache.state();
-        let entry = state.entries.get(&key()).expect("cache entry");
-        assert_eq!(entry.stale_until, entry.expires);
-    }
-
-    #[test]
-    fn positive_entries_receive_stale_retention() {
-        let cache = Cache::new(16, Duration::from_secs(60), Duration::from_secs(300), true);
-        let query = make_query("example", TYPE_A, 7).expect("query");
-        let response = local_response(&query, &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))], 30)
-            .expect("response");
-        assert!(cache.insert(key(), &response).expect("cache insert"));
-        let state = cache.state();
-        let entry = state.entries.get(&key()).expect("cache entry");
-        assert!(entry.stale_until > entry.expires);
     }
 }

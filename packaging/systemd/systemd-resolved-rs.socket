@@ -1,0 +1,14 @@
+[Unit]
+Description=systemd-resolved-rs Stub DNS Socket
+Conflicts=systemd-resolved.service
+
+[Socket]
+ListenStream=127.0.0.53:53
+ListenDatagram=127.0.0.53:53
+ListenStream=127.0.0.54:53
+ListenDatagram=127.0.0.54:53
+BindIPv6Only=both
+# FreeBind=yes
+
+[Install]
+WantedBy=sockets.target

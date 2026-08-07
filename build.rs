@@ -47,6 +47,8 @@ fn main() {
     println!("cargo:rerun-if-changed=ffi/networkd.c");
     println!("cargo:rerun-if-changed=ffi/native.h");
     println!("cargo:rerun-if-changed=ffi/routing.f90");
+    println!("cargo:rerun-if-changed=ffi/iouring_dns.c");
+    println!("cargo:rerun-if-changed=ffi/routing_score.f90");
 
     let target = env::var("CARGO_CFG_TARGET_OS").expect("target OS is set by cargo");
     assert!(
@@ -65,12 +67,18 @@ fn main() {
     let dnssec_obj = object(&out_dir, "resolved_dnssec");
     let netlink_obj = object(&out_dir, "resolved_netlink");
     let networkd_obj = object(&out_dir, "resolved_networkd");
+    let iouring_dns_obj = object(&out_dir, "resolved_iouring_dns");
+    let llmnr_mcast_obj = object(&out_dir, "resolved_llmnr_mcast");
+    let nss_resolve_shm_obj = object(&out_dir, "resolved_nss_resolve_shm");
     compile_c(&cc, "ffi/native.c", &native_obj);
     compile_c(&cc, "ffi/interface.c", &interface_obj);
     compile_c(&cc, "ffi/tls.c", &tls_obj);
     compile_c(&cc, "ffi/dnssec.c", &dnssec_obj);
     compile_c(&cc, "ffi/netlink.c", &netlink_obj);
     compile_c(&cc, "ffi/networkd.c", &networkd_obj);
+    compile_c(&cc, "ffi/iouring_dns.c", &iouring_dns_obj);
+    compile_c(&cc, "ffi/llmnr_mcast.c", &llmnr_mcast_obj);
+    compile_c(&cc, "nss/nss_resolve_shm.c", &nss_resolve_shm_obj);
 
     let mut objects = vec![
         native_obj,
@@ -79,11 +87,44 @@ fn main() {
         dnssec_obj,
         netlink_obj,
         networkd_obj,
+        iouring_dns_obj,
+        llmnr_mcast_obj,
+        nss_resolve_shm_obj,
     ];
+
+    println!("cargo:rerun-if-changed=nss/nss_resolve_shm.c");
+    println!("cargo:rerun-if-changed=src/supremacy/");
+
+    if env::var_os("CARGO_FEATURE_BEAST_WIRE").is_some() {
+        let beast_wire_obj = object(&out_dir, "resolved_beast_wire");
+        command(
+            &cc,
+            &[
+                OsString::from("-c"),
+                OsString::from("-std=c17"),
+                OsString::from("-O3"),
+                OsString::from("-march=native"),
+                OsString::from("-fPIC"),
+                OsString::from("-fstack-protector-strong"),
+                OsString::from("-D_FORTIFY_SOURCE=3"),
+                OsString::from("-Wall"),
+                OsString::from("-Wextra"),
+                OsString::from("-Werror"),
+                OsString::from("-Iffi"),
+                OsString::from("ffi/beast_wire.c"),
+                OsString::from("-o"),
+                beast_wire_obj.clone().into_os_string(),
+            ],
+        );
+        objects.push(beast_wire_obj);
+        println!("cargo:rerun-if-changed=ffi/beast_wire.c");
+    }
+
     let fortran_enabled = env::var_os("CARGO_FEATURE_FORTRAN_ROUTING").is_some();
     if fortran_enabled {
         let fc = env::var_os("FC").unwrap_or_else(|| OsString::from("gfortran"));
         let fortran_obj = object(&out_dir, "resolved_routing");
+        let fortran_score_obj = object(&out_dir, "resolved_routing_score");
         command(
             &fc,
             &[
@@ -101,7 +142,43 @@ fn main() {
                 fortran_obj.clone().into_os_string(),
             ],
         );
+        command(
+            &fc,
+            &[
+                OsString::from("-c"),
+                OsString::from("-O3"),
+                OsString::from("-march=native"),
+                OsString::from("-fPIC"),
+                OsString::from("-J"),
+                OsString::from(out_dir.display().to_string()),
+                OsString::from("ffi/routing_score.f90"),
+                OsString::from("-o"),
+                fortran_score_obj.clone().into_os_string(),
+            ],
+        );
         objects.push(fortran_obj);
+        objects.push(fortran_score_obj);
+    }
+
+    if env::var_os("CARGO_FEATURE_KALMAN").is_some() {
+        let fc = env::var_os("FC").unwrap_or_else(|| OsString::from("gfortran"));
+        let kalman_obj = object(&out_dir, "resolved_kalman_upstream");
+        command(
+            &fc,
+            &[
+                OsString::from("-c"),
+                OsString::from("-O3"),
+                OsString::from("-march=native"),
+                OsString::from("-fPIC"),
+                OsString::from("-J"),
+                OsString::from(out_dir.display().to_string()),
+                OsString::from("ffi/kalman_upstream.f90"),
+                OsString::from("-o"),
+                kalman_obj.clone().into_os_string(),
+            ],
+        );
+        objects.push(kalman_obj);
+        println!("cargo:rerun-if-changed=ffi/kalman_upstream.f90");
     }
 
     let archive = out_dir.join("libresolved_native.a");
@@ -113,7 +190,8 @@ fn main() {
     println!("cargo:rustc-link-lib=static=resolved_native");
     println!("cargo:rustc-link-lib=ssl");
     println!("cargo:rustc-link-lib=crypto");
-    if fortran_enabled {
+    println!("cargo:rustc-link-lib=uring");
+    if fortran_enabled || env::var_os("CARGO_FEATURE_KALMAN").is_some() {
         println!("cargo:rustc-link-lib=gfortran");
     }
 }
