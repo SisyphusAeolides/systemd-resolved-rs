@@ -21,6 +21,7 @@ impl Resolver {
             global_servers,
             fallback_servers,
             states: Mutex::new(states),
+            udp_sockets: Mutex::new(HashMap::new()),
             routing: RwLock::new(RoutingTable::default()),
             routing_generation: AtomicU64::new(1),
             inflight: Inflight::default(),
@@ -144,5 +145,4 @@ impl Resolver {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-
 }
