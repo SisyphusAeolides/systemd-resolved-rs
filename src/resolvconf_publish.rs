@@ -16,10 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
 const SYSTEM_RESOLV_CONF: &str = "/etc/resolv.conf";
-const STATIC_RESOLV_CONF_PATHS: [&str; 2] = [
-    "/usr/lib/systemd/resolv.conf",
-    "/lib/systemd/resolv.conf",
-];
+const STATIC_RESOLV_CONF_PATHS: [&str; 2] =
+    ["/usr/lib/systemd/resolv.conf", "/lib/systemd/resolv.conf"];
 
 /// How `/etc/resolv.conf` is currently managed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
