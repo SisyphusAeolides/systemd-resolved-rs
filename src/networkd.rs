@@ -46,7 +46,10 @@ impl OperationalState {
     }
 
     pub const fn resolver_relevant(self) -> bool {
-        matches!(self, Self::DegradedCarrier | Self::Degraded | Self::Routable)
+        matches!(
+            self,
+            Self::DegradedCarrier | Self::Degraded | Self::Routable
+        )
     }
 }
 
@@ -233,7 +236,10 @@ fn normalize_name(value: &str) -> io::Result<String> {
     if matches!(value, "." | "~" | "~.") {
         return Ok(".".to_owned());
     }
-    let value = value.strip_prefix('~').unwrap_or(value).trim_end_matches('.');
+    let value = value
+        .strip_prefix('~')
+        .unwrap_or(value)
+        .trim_end_matches('.');
     if value.is_empty()
         || !value.is_ascii()
         || value.len() > 253
