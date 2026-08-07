@@ -91,16 +91,25 @@ pub enum QueryMode {
 struct ServerKey {
     scope: i32,
     server: SocketAddr,
+    slot: usize,
 }
 
 impl ServerKey {
     const fn new(scope: ScopeKind, server: SocketAddr) -> Self {
+        Self::with_slot(scope, server, 0)
+    }
+
+    const fn with_slot(scope: ScopeKind, server: SocketAddr, slot: usize) -> Self {
         let scope = match scope {
             ScopeKind::Global => 0,
             ScopeKind::Fallback => -1,
             ScopeKind::Link(ifindex) => ifindex,
         };
-        Self { scope, server }
+        Self {
+            scope,
+            server,
+            slot,
+        }
     }
 
     const fn server(self) -> SocketAddr {
