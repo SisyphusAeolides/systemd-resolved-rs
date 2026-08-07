@@ -5,6 +5,9 @@
         if let Some(ifindex) = ifindex.filter(|value| *value < 0) {
             return Err(LinkError::InvalidIfindex(ifindex).into());
         }
+        if self.config.refuse_record_types.contains(&question.rr_type) {
+            return Ok(wire::refused_for(query)?);
+        }
         self.counters.transactions.fetch_add(1, Ordering::Relaxed);
 
         if mode == QueryMode::Full {
