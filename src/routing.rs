@@ -4,7 +4,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 const IFF_UP: u32 = 0x0001;
 const IFF_LOOPBACK: u32 = 0x0008;
@@ -27,6 +27,7 @@ pub struct RouteScope {
     pub servers: Vec<SocketAddr>,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KernelLinkState {
     pub ifindex: i32,
@@ -66,7 +67,7 @@ impl KernelLinkState {
         });
         let allow_ipv6_link_local = servers.iter().any(|server| match server.ip() {
             IpAddr::V4(_) => false,
-            IpAddr::V6(address) => address.is_unicast_link_local(),
+            IpAddr::V6(address) => ipv6_is_link_local(address),
         });
 
         self.has_ipv4_global
@@ -427,6 +428,10 @@ fn ipv4_is_link_local(address: Ipv4Addr) -> bool {
     octets[0] == 169 && octets[1] == 254
 }
 
+fn ipv6_is_link_local(address: Ipv6Addr) -> bool {
+    address.segments()[0] & 0xffc0 == 0xfe80
+}
+
 fn normalize_server(ifindex: i32, server: SocketAddr) -> SocketAddr {
     let SocketAddr::V6(server) = server else {
         return server;
@@ -516,7 +521,6 @@ impl Error for LinkError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv6Addr;
 
     fn server(octet: u8) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet)), 53)
