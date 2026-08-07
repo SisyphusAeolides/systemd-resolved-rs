@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
+mod resolvectl_dbus;
+
 use resolved::json::{self, Value};
 use std::collections::BTreeMap;
 use std::env;
@@ -42,6 +44,9 @@ fn execute() -> Result<(), Box<dyn Error>> {
         "reset-statistics" => control(&options.socket, "io.systemd.Resolve.ResetStatistics"),
         "reset-server-features" => {
             control(&options.socket, "io.systemd.Resolve.ResetServerFeatures")
+        }
+        command if resolvectl_dbus::is_command(command) => {
+            resolvectl_dbus::execute(command, &options.arguments)
         }
         command => Err(format!("unknown command: {command}").into()),
     }
@@ -331,7 +336,16 @@ fn print_help() {
            statistics\n\
            flush-caches\n\
            reset-statistics\n\
-           reset-server-features",
+           reset-server-features\n\
+           dns LINK [SERVER...]\n\
+           domain LINK [DOMAIN...]\n\
+           default-route LINK BOOL\n\
+           llmnr LINK MODE\n\
+           mdns LINK MODE\n\
+           dnsovertls LINK MODE\n\
+           dnssec LINK MODE\n\
+           nta LINK [DOMAIN...]\n\
+           revert LINK",
         resolved::VERSION
     );
 }
