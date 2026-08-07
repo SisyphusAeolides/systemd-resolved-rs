@@ -231,9 +231,10 @@ pub fn link_snapshot() -> io::Result<Vec<LinkInfo>> {
     for _ in 0..LINK_SNAPSHOT_RETRIES {
         let mut entries = vec![NativeLinkSnapshot::default(); capacity.max(1)];
         // SAFETY: entries points to `entries.len()` writable, correctly aligned ABI records.
-        let count = signed_result(unsafe { resolved_link_snapshot(entries.as_mut_ptr(), entries.len()) })?;
-        let count = usize::try_from(count)
-            .map_err(|_| io::Error::from_raw_os_error(libc_einval()))?;
+        let count =
+            signed_result(unsafe { resolved_link_snapshot(entries.as_mut_ptr(), entries.len()) })?;
+        let count =
+            usize::try_from(count).map_err(|_| io::Error::from_raw_os_error(libc_einval()))?;
         if count > entries.len() {
             capacity = count;
             continue;
@@ -287,8 +288,12 @@ fn link_info(snapshot: NativeLinkSnapshot) -> io::Result<LinkInfo> {
         .iter()
         .map(|byte| *byte as u8)
         .collect::<Vec<_>>();
-    let ifname = String::from_utf8(bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "kernel interface name is not UTF-8"))?;
+    let ifname = String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kernel interface name is not UTF-8",
+        )
+    })?;
     if snapshot.ifindex <= 0 || ifname.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -340,13 +345,15 @@ const fn libc_einval() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     #[test]
     fn kernel_link_snapshot_contains_named_links() {
         let links = link_snapshot().expect("kernel link snapshot");
         assert!(!links.is_empty());
-        assert!(links.iter().all(|link| link.ifindex > 0 && !link.ifname.is_empty()));
+        assert!(links
+            .iter()
+            .all(|link| link.ifindex > 0 && !link.ifname.is_empty()));
     }
 
     #[test]
