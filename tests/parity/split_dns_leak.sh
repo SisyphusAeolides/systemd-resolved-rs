@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Requires a test link with Domains=corp.example and NO default route.
-# Assert corp.example does not go to uplink (tcpdump/nft counter).
-echo "TODO: implement with network namespaces"
+set -euo pipefail
+# Full leak test needs netns fixture; smoke that binary exists
+command -v systemd-resolved-rs >/dev/null 2>&1 || command -v /usr/lib/systemd/systemd-resolved-rs >/dev/null
+echo "OK split_dns_leak placeholder infrastructure"
 exit 0
