@@ -27,6 +27,15 @@ mod tests {
     }
 
     #[test]
+    fn default_cache_matches_upstream_policy() {
+        let config = Config::default();
+        assert!(config.cache);
+        assert!(config.cache_negative);
+        assert_eq!(config.cache_size, 4096);
+        assert_eq!(config.cache_max_ttl, Duration::from_secs(2 * 60 * 60));
+    }
+
+    #[test]
     fn parses_core_resolved_settings() {
         let mut config = Config::default();
         config
@@ -43,9 +52,28 @@ mod tests {
         assert_eq!(config.upstreams.len(), 2);
         assert_eq!(config.domains.len(), 2);
         assert!(!config.cache);
+        assert!(!config.cache_negative);
         assert_eq!(config.cache_size, 128);
         assert!(!config.read_etc_hosts);
         assert!(!config.read_static_records);
+    }
+
+    #[test]
+    fn parses_no_negative_cache_mode() {
+        let mut config = Config::default();
+        config
+            .apply_text("[Resolve]\nCache=no-negative\n")
+            .expect("configuration");
+        assert!(config.cache);
+        assert!(!config.cache_negative);
+    }
+
+    #[test]
+    fn rejects_oversized_dns_cache() {
+        let mut config = Config::default();
+        assert!(config
+            .apply_text("[Resolve]\nDNSCacheSize=16777217\n")
+            .is_err());
     }
 
     #[test]
