@@ -169,7 +169,11 @@ impl Resolver {
                 link.dnssec_negative_trust_anchors.clone(),
             )?;
             if let Some(state) = routing.link(link.ifindex) {
-                managed_identities.push((link.ifindex, state.dns_servers));
+                managed_identities.push((
+                    link.ifindex,
+                    state.dns_servers,
+                    link.dns_server_specs.clone(),
+                ));
             }
         }
 
@@ -181,15 +185,19 @@ impl Resolver {
         for ifindex in removed_identities {
             identity_changed |= self.remove_link_server_specs(ifindex);
         }
-        for (ifindex, servers) in managed_identities {
-            let specs = servers
-                .into_iter()
-                .map(|address| DnsServerSpec {
-                    address,
-                    interface: None,
-                    server_name: None,
-                })
-                .collect();
+        for (ifindex, servers, specs) in managed_identities {
+            let specs = if specs.is_empty() {
+                servers
+                    .into_iter()
+                    .map(|address| DnsServerSpec {
+                        address,
+                        interface: None,
+                        server_name: None,
+                    })
+                    .collect()
+            } else {
+                normalize_link_specs(&servers, specs)
+            };
             identity_changed |= self.replace_link_server_specs(ifindex, specs);
         }
         self.finish_routing_change(changed || identity_changed);
