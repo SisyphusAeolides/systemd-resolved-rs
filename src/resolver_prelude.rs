@@ -5,10 +5,8 @@ use crate::edns::{self, FeatureLevel, ServerFeatureState};
 use crate::hosts::Hosts;
 use crate::native;
 use crate::policy::{choose_server, update_rtt, ServerMetric};
-use crate::routing::{LinkError, LinkState, RouteScope, RoutingTable};
-use crate::transport::{
-    ServerTransportState, TransportMode, TRANSPORT_RETRY_ATTEMPTS,
-};
+use crate::routing::{LinkError, LinkState, RouteScope, RoutingTable, ScopeKind};
+use crate::transport::{ServerTransportState, TransportMode, TRANSPORT_RETRY_ATTEMPTS};
 use crate::wire::{
     self, extract_address_records, extract_ptr_names, first_question, local_response, make_query,
     make_query_with_class, response_matches, reverse_name, servfail_for, validate, Header,
@@ -22,9 +20,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{
-    Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
-};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -86,6 +82,35 @@ impl DnsAttemptBudget {
 pub enum QueryMode {
     Full,
     Proxy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ServerKey {
+    scope: i32,
+    server: SocketAddr,
+}
+
+impl ServerKey {
+    const fn new(scope: ScopeKind, server: SocketAddr) -> Self {
+        let scope = match scope {
+            ScopeKind::Global => 0,
+            ScopeKind::Fallback => -1,
+            ScopeKind::Link(ifindex) => ifindex,
+        };
+        Self { scope, server }
+    }
+
+    const fn server(self) -> SocketAddr {
+        self.server
+    }
+
+    const fn ifindex(self) -> Option<i32> {
+        if self.scope > 0 {
+            Some(self.scope)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -247,9 +272,9 @@ pub struct Resolver {
     config: Config,
     global_servers: Vec<SocketAddr>,
     fallback_servers: Vec<SocketAddr>,
-    states: Mutex<HashMap<SocketAddr, ServerState>>,
-    udp_sockets: Mutex<HashMap<SocketAddr, Vec<UdpSocket>>>,
-    tcp_streams: Mutex<HashMap<SocketAddr, Vec<TcpStream>>>,
+    states: Mutex<HashMap<ServerKey, ServerState>>,
+    udp_sockets: Mutex<HashMap<ServerKey, Vec<UdpSocket>>>,
+    tcp_streams: Mutex<HashMap<ServerKey, Vec<TcpStream>>>,
     routing: RwLock<RoutingTable>,
     routing_generation: AtomicU64,
     inflight: Inflight,
