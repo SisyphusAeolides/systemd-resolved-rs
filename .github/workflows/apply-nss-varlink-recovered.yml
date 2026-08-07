@@ -1,5 +1,5 @@
 name: Apply tested NSS Varlink integration
-# Retry after repairing shared-memory test diagnostics.
+# Retry on the repaired shared-memory ABI.
 
 on:
   push:
