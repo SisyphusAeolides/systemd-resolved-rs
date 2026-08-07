@@ -159,6 +159,11 @@ impl Resolver {
         let mut response = vec![0; length];
         stream.read_exact(&mut response)?;
         response_matches(query, &response)?;
+        if Header::parse(&response)?.truncated() {
+            return Err(ResolveError::Protocol(
+                "truncated DNS-over-TCP response",
+            ));
+        }
         Ok(response)
     }
 
