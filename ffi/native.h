@@ -25,6 +25,7 @@ int resolved_install_signal_handlers(void);
 int resolved_take_reload(void);
 int resolved_should_stop(void);
 int resolved_peer_credentials(int fd, uint32_t *pid, uint32_t *uid, uint32_t *gid);
+int resolved_ifindex_from_name(const char *name);
 
 int resolved_udp_connect(const char *address, uint16_t port, uint32_t scope_id, int ifindex);
 int resolved_tcp_connect(
