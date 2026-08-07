@@ -33,6 +33,7 @@ impl Resolver {
             tcp_streams: Mutex::new(HashMap::new()),
             routing: RwLock::new(RoutingTable::default()),
             networkd_links: RwLock::new(HashMap::new()),
+            link_server_specs: RwLock::new(HashMap::new()),
             routing_generation: AtomicU64::new(1),
             inflight: Inflight::default(),
             hosts: RwLock::new(hosts),
