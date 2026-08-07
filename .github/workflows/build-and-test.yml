@@ -67,6 +67,10 @@ jobs:
       - name: Check replacement packaging
         run: make check-packaging
 
+      - name: Check NSS integration
+        if: ${{ matrix.toolchain == 'stable' }}
+        run: make check-nss
+
       - name: Canonicalize Rust source
         run: cargo fmt --all
 
