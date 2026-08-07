@@ -19,11 +19,17 @@ mod test_21_networkd_link_state {
     }
 
     fn networkd_link(ifindex: i32, operstate: OperationalState) -> NetworkdLinkState {
+        let address = "192.0.2.53:53".parse().expect("DNS server");
         NetworkdLinkState {
             ifindex,
             managed: true,
             operstate,
-            dns_servers: vec!["192.0.2.53:53".parse().expect("DNS server")],
+            dns_servers: vec![address],
+            dns_server_specs: vec![DnsServerSpec {
+                address,
+                interface: Some(format!("test{ifindex}")),
+                server_name: Some("resolver.example".to_owned()),
+            }],
             domains: vec![Domain {
                 name: "corp.example".to_owned(),
                 route_only: true,
@@ -59,6 +65,10 @@ mod test_21_networkd_link_state {
             link.dnssec_negative_trust_anchors,
             vec!["private.example".to_owned()]
         );
+        let specs = resolver.link_dns_specs(7);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].interface.as_deref(), Some("test7"));
+        assert_eq!(specs[0].server_name.as_deref(), Some("resolver.example"));
         assert!(resolver.link_is_managed(7));
         assert_eq!(
             resolver.set_link_dns(7, vec!["198.51.100.53:53".parse().expect("DNS server")]),
@@ -96,6 +106,7 @@ mod test_21_networkd_link_state {
         let mut unmanaged = networkd_link(7, OperationalState::Routable);
         unmanaged.managed = false;
         unmanaged.dns_servers.clear();
+        unmanaged.dns_server_specs.clear();
         unmanaged.domains.clear();
         resolver
             .sync_networkd_links(vec![unmanaged])
@@ -104,6 +115,7 @@ mod test_21_networkd_link_state {
         let link = resolver.link(7).expect("kernel link survives");
         assert!(!resolver.link_is_managed(7));
         assert!(link.dns_servers.is_empty());
+        assert!(resolver.link_dns_specs(7).is_empty());
         assert!(link.domains.is_empty());
         assert!(link.kernel.is_some());
     }
