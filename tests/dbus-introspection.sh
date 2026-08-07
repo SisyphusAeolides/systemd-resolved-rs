@@ -11,7 +11,7 @@ for command in busctl dbus-run-session python3; do
     command -v "$command" >/dev/null
 done
 
-dbus-run-session -- bash -euo pipefail <<'ENDSCRIPT'
+dbus-run-session --config-file="$ROOT/tests/dbus-test-session.conf" -- bash -euo pipefail <<'ENDSCRIPT'
 BINARY="$BINARY"
 WORK="$WORK"
 ROOT="$ROOT"
