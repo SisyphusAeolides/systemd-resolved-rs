@@ -160,6 +160,11 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --all-features --locked
 
+      - name: Check live DNS and Varlink path
+        if: ${{ matrix.toolchain == 'stable' }}
+        shell: bash
+        run: python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+
       - name: Check live D-Bus contracts
         if: ${{ matrix.toolchain == 'stable' }}
         shell: bash
