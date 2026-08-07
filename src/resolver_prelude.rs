@@ -28,6 +28,8 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+const UDP_POOL_PER_SERVER_MAX: usize = 8;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryMode {
     Full,
@@ -194,6 +196,7 @@ pub struct Resolver {
     global_servers: Vec<SocketAddr>,
     fallback_servers: Vec<SocketAddr>,
     states: Mutex<HashMap<SocketAddr, ServerState>>,
+    udp_sockets: Mutex<HashMap<SocketAddr, Vec<UdpSocket>>>,
     routing: RwLock<RoutingTable>,
     routing_generation: AtomicU64,
     inflight: Inflight,
