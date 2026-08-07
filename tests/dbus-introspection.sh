@@ -36,7 +36,7 @@ cleanup() {
 trap cleanup EXIT
 
 ready=false
-for _ in $(seq 1 100); do
+for i in {1..100}; do
     if busctl --address="$DBUS_SYSTEM_BUS_ADDRESS" --no-pager --xml-interface introspect org.freedesktop.resolve1 /org/freedesktop/resolve1 org.freedesktop.resolve1.Manager >"$WORK/manager.xml" 2>/dev/null; then
         ready=true
         break
@@ -54,7 +54,7 @@ python3 "$ROOT/tests/compare-dbus-introspection.py" "$ROOT/compat/org.freedeskto
 busctl --address="$DBUS_SYSTEM_BUS_ADDRESS" call org.freedesktop.resolve1 /org/freedesktop/resolve1 org.freedesktop.resolve1.Manager SetLinkDomains 'ia(sb)' 1 1 example.test false >/dev/null
 
 ready=false
-for _ in $(seq 1 100); do
+for i in {1..100}; do
     if busctl --address="$DBUS_SYSTEM_BUS_ADDRESS" --no-pager --xml-interface introspect org.freedesktop.resolve1 /org/freedesktop/resolve1/link/_31 org.freedesktop.resolve1.Link >"$WORK/link.xml" 2>/dev/null; then
         ready=true
         break
