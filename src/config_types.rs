@@ -125,7 +125,7 @@ impl Default for Config {
             cache_max_ttl: Duration::from_secs(7 * 24 * 60 * 60),
             stale_retention: Duration::ZERO,
             query_timeout: Duration::from_secs(5),
-            attempts: 3,
+            attempts: 24,
             workers: 4,
             read_etc_hosts: true,
             read_static_records: true,
@@ -137,4 +137,3 @@ impl Default for Config {
         }
     }
 }
-
