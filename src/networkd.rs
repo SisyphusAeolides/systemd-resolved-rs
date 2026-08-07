@@ -46,7 +46,10 @@ impl OperationalState {
     }
 
     pub const fn resolver_relevant(self) -> bool {
-        matches!(Self::DegradedCarrier | Self::Degraded | Self::Routable, self)
+        matches!(
+            Self::DegradedCarrier | Self::Degraded | Self::Routable,
+            self
+        )
     }
 }
 
@@ -106,7 +109,10 @@ fn read_directory(directory: &Path) -> io::Result<Vec<LinkState>> {
 fn parse_link_state(ifindex: i32, text: &str) -> io::Result<LinkState> {
     let values = parse_environment(text);
     let admin_state = values.get("ADMIN_STATE").map(String::as_str);
-    let managed = !matches!(admin_state, None | Some("pending" | "initialized" | "unmanaged"));
+    let managed = !matches!(
+        admin_state,
+        None | Some("pending" | "initialized" | "unmanaged")
+    );
     let operstate = OperationalState::parse(values.get("OPER_STATE").map(String::as_str));
 
     if !managed {
@@ -127,10 +133,7 @@ fn parse_link_state(ifindex: i32, text: &str) -> io::Result<LinkState> {
 
     let dns_servers = parse_dns(values.get("DNS").map_or("", String::as_str))?;
     let mut domains = parse_domains(values.get("DOMAINS").map_or("", String::as_str), false)?;
-    for domain in parse_domains(
-        values.get("ROUTE_DOMAINS").map_or("", String::as_str),
-        true,
-    )? {
+    for domain in parse_domains(values.get("ROUTE_DOMAINS").map_or("", String::as_str), true)? {
         if !domains.contains(&domain) {
             domains.push(domain);
         }
@@ -325,7 +328,9 @@ fn monitor(resolver: &Resolver) {
             match native::networkd_wait(fd.as_raw_fd(), NETWORKD_POLL_INTERVAL) {
                 Ok(true) => {
                     if let Err(error) = synchronize(resolver) {
-                        eprintln!("systemd-resolved: failed to refresh networkd DNS state: {error}");
+                        eprintln!(
+                            "systemd-resolved: failed to refresh networkd DNS state: {error}"
+                        );
                     }
                     break;
                 }
@@ -414,7 +419,10 @@ mod tests {
     #[test]
     fn quoted_environment_values_are_unwrapped() {
         let values = parse_environment("ADMIN_STATE=\"configured\"\nDNS='192.0.2.53'\n");
-        assert_eq!(values.get("ADMIN_STATE").map(String::as_str), Some("configured"));
+        assert_eq!(
+            values.get("ADMIN_STATE").map(String::as_str),
+            Some("configured")
+        );
         assert_eq!(values.get("DNS").map(String::as_str), Some("192.0.2.53"));
     }
 }
