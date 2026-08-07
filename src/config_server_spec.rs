@@ -36,6 +36,52 @@ pub fn parse_server_spec(value: &str) -> Result<DnsServerSpec, ConfigError> {
     })
 }
 
+fn apply_server_spec_assignment(
+    addresses: &mut Vec<SocketAddr>,
+    specs: &mut Vec<DnsServerSpec>,
+    value: &str,
+) -> Result<(), ConfigError> {
+    if value.is_empty() {
+        addresses.clear();
+        specs.clear();
+        return Ok(());
+    }
+    for token in value.split_whitespace() {
+        let spec = parse_server_spec(token)?;
+        if !addresses.contains(&spec.address) {
+            addresses.push(spec.address);
+        }
+        if !specs.contains(&spec) {
+            specs.push(spec);
+        }
+    }
+    Ok(())
+}
+
+fn filtered_server_specs(
+    addresses: &[SocketAddr],
+    specs: &[DnsServerSpec],
+) -> Vec<DnsServerSpec> {
+    if specs.is_empty() {
+        return filtered_servers(addresses)
+            .into_iter()
+            .map(|address| DnsServerSpec {
+                address,
+                interface: None,
+                server_name: None,
+            })
+            .collect();
+    }
+
+    let mut output = Vec::new();
+    for spec in specs {
+        if !is_local_stub(spec.address) && !output.contains(spec) {
+            output.push(spec.clone());
+        }
+    }
+    output
+}
+
 fn valid_interface(value: &str) -> bool {
     !value.is_empty()
         && value.is_ascii()
@@ -90,6 +136,31 @@ mod server_spec_tests {
         );
         assert_eq!(ipv6.interface.as_deref(), Some("7"));
         assert_eq!(ipv6.server_name.as_deref(), Some("resolver.example"));
+    }
+
+    #[test]
+    fn server_spec_assignment_preserves_same_address_metadata() {
+        let mut addresses = Vec::new();
+        let mut specs = Vec::new();
+        apply_server_spec_assignment(
+            &mut addresses,
+            &mut specs,
+            "1.1.1.1#one.example 1.1.1.1#two.example",
+        )
+        .expect("server specs");
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].server_name.as_deref(), Some("one.example"));
+        assert_eq!(specs[1].server_name.as_deref(), Some("two.example"));
+    }
+
+    #[test]
+    fn server_spec_assignment_clears_both_views() {
+        let mut addresses = vec!["192.0.2.53:53".parse().expect("address")];
+        let mut specs = vec![parse_server_spec("192.0.2.53#resolver.example").expect("spec")];
+        apply_server_spec_assignment(&mut addresses, &mut specs, "").expect("clear specs");
+        assert!(addresses.is_empty());
+        assert!(specs.is_empty());
     }
 
     #[test]
