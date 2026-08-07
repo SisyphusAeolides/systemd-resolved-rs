@@ -15,7 +15,7 @@ impl Resolver {
         timeout.min(remaining)
     }
 
-    fn take_udp_socket(&self, server: SocketAddr) -> Result<UdpSocket, ResolveError> {
+    fn take_udp_socket(&self, server: ServerKey) -> Result<UdpSocket, ResolveError> {
         let pooled = {
             let mut sockets = self
                 .udp_sockets
@@ -28,18 +28,19 @@ impl Resolver {
             return Ok(socket);
         }
 
-        let bind_address = if server.is_ipv4() {
+        let address = server.server();
+        let bind_address = if address.is_ipv4() {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
         } else {
             SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
         };
         let socket = UdpSocket::bind(bind_address)?;
-        socket.connect(server)?;
-        let _ = native::enable_udp_fragment_size(socket.as_raw_fd(), server.is_ipv6());
+        socket.connect(address)?;
+        let _ = native::enable_udp_fragment_size(socket.as_raw_fd(), address.is_ipv6());
         Ok(socket)
     }
 
-    fn recycle_udp_socket(&self, server: SocketAddr, socket: UdpSocket) {
+    fn recycle_udp_socket(&self, server: ServerKey, socket: UdpSocket) {
         let mut sockets = self
             .udp_sockets
             .lock()
@@ -52,7 +53,7 @@ impl Resolver {
 
     fn exchange_udp(
         &self,
-        server: SocketAddr,
+        server: ServerKey,
         query: &[u8],
         remaining: Duration,
     ) -> Result<(Vec<u8>, u32), ResolveError> {
@@ -94,9 +95,10 @@ impl Resolver {
         result
     }
 
-    fn udp_path_mtu(&self, server: SocketAddr) -> Option<u32> {
+    fn udp_path_mtu(&self, server: ServerKey) -> Option<u32> {
         let socket = self.take_udp_socket(server).ok()?;
-        let result = native::udp_path_mtu(socket.as_raw_fd(), server.is_ipv6()).ok();
+        let address = server.server();
+        let result = native::udp_path_mtu(socket.as_raw_fd(), address.is_ipv6()).ok();
         self.recycle_udp_socket(server, socket);
         result
     }
@@ -110,7 +112,7 @@ impl Resolver {
 
     fn take_tcp_stream(
         &self,
-        server: SocketAddr,
+        server: ServerKey,
         timeout: Duration,
     ) -> Result<(TcpStream, bool), ResolveError> {
         let pooled = {
@@ -123,14 +125,14 @@ impl Resolver {
         let reused = pooled.is_some();
         let stream = match pooled {
             Some(stream) => stream,
-            None => Self::new_tcp_stream(server, timeout)?,
+            None => Self::new_tcp_stream(server.server(), timeout)?,
         };
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         Ok((stream, reused))
     }
 
-    fn recycle_tcp_stream(&self, server: SocketAddr, stream: TcpStream) {
+    fn recycle_tcp_stream(&self, server: ServerKey, stream: TcpStream) {
         let mut streams = self
             .tcp_streams
             .lock()
@@ -169,7 +171,7 @@ impl Resolver {
 
     fn exchange_tcp(
         &self,
-        server: SocketAddr,
+        server: ServerKey,
         query: &[u8],
         remaining: Duration,
     ) -> Result<Vec<u8>, ResolveError> {
@@ -191,7 +193,7 @@ impl Resolver {
         if timeout.is_zero() {
             return result;
         }
-        let mut fresh = Self::new_tcp_stream(server, timeout)?;
+        let mut fresh = Self::new_tcp_stream(server.server(), timeout)?;
         let result = Self::exchange_tcp_stream(&mut fresh, query);
         if result.is_ok() {
             self.recycle_tcp_stream(server, fresh);
