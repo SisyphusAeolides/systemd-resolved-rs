@@ -166,7 +166,9 @@ impl ConfigAssignments {
 #[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     pub upstreams: Vec<SocketAddr>,
+    pub upstream_specs: Vec<DnsServerSpec>,
     pub fallback_upstreams: Vec<SocketAddr>,
+    pub fallback_upstream_specs: Vec<DnsServerSpec>,
     pub listeners: Vec<SocketAddr>,
     pub proxy_listeners: Vec<SocketAddr>,
     pub dns_stub_listener: DnsStubListenerMode,
@@ -198,6 +200,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             upstreams: Vec::new(),
+            upstream_specs: Vec::new(),
             fallback_upstreams: vec![
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53),
@@ -230,6 +233,7 @@ impl Default for Config {
                     53,
                 ),
             ],
+            fallback_upstream_specs: Vec::new(),
             listeners: vec![SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::new(127, 0, 0, 53)),
                 53,
