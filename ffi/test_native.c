@@ -34,6 +34,10 @@ int main(void) {
     assert(resolved_route_score(name, strlen(name), "", 0, 0, 0, 0) == 0);
     assert(resolved_notify(NULL) < 0);
 
+    assert(resolved_ifindex_from_name(NULL) < 0);
+    assert(resolved_ifindex_from_name("") < 0);
+    assert(resolved_ifindex_from_name("lo") > 0);
+
     assert(resolved_udp_connect(NULL, 53, 0, 0) < 0);
     assert(resolved_tcp_connect(NULL, 53, 0, 0, 100) < 0);
     fd = resolved_udp_connect("127.0.0.1", 53, 0, INT_MAX);
