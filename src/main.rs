@@ -115,6 +115,7 @@ fn run_resolver(config: &Config, options: &Options) -> Result<(), Box<dyn Error>
 
     let resolver = Arc::new(Resolver::new(config.clone()));
     let netlink_thread = resolved::netlink::spawn(Arc::clone(&resolver))?;
+    let networkd_thread = resolved::networkd::spawn(Arc::clone(&resolver))?;
     if config.effective_upstreams().is_empty() {
         eprintln!("systemd-resolved: warning: no upstream DNS servers are configured");
     }
@@ -131,6 +132,7 @@ fn run_resolver(config: &Config, options: &Options) -> Result<(), Box<dyn Error>
     if let Some(thread) = dbus_thread {
         let _ = thread.join();
     }
+    let _ = networkd_thread.join();
     let _ = netlink_thread.join();
     result?;
     Ok(())
