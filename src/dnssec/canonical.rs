@@ -100,15 +100,21 @@ fn label_offsets(name: &[u8]) -> Result<Vec<usize>, WireError> {
     let mut offsets = Vec::new();
     let mut offset = 0usize;
     loop {
-        let length = usize::from(*name.get(offset).ok_or(WireError::InvalidName)?);
+        let length = usize::from(*name.get(offset).ok_or_else(|| {
+            WireError::InvalidName("truncated canonical DNS name".to_owned())
+        })?);
         if length == 0 {
             if offset + 1 != name.len() {
-                return Err(WireError::InvalidName);
+                return Err(WireError::InvalidName(
+                    "canonical DNS name has trailing data".to_owned(),
+                ));
             }
             return Ok(offsets);
         }
         if length > 63 || offset + 1 + length >= name.len() {
-            return Err(WireError::InvalidName);
+            return Err(WireError::InvalidName(
+                "invalid canonical DNS label".to_owned(),
+            ));
         }
         offsets.push(offset);
         offset += 1 + length;
@@ -180,8 +186,8 @@ fn canonical_two_names(
 }
 
 fn canonical_soa(packet: &[u8], record: &ResourceRecord) -> Result<Vec<u8>, WireError> {
-    let (mname, rname_offset) = read_name(packet, record.rdata_offset)?;
-    let (rname, integers_offset) = read_name(packet, rname_offset)?;
+    let (primary_name, mailbox_offset) = read_name(packet, record.rdata_offset)?;
+    let (mailbox_name, integers_offset) = read_name(packet, mailbox_offset)?;
     let integers = packet
         .get(integers_offset..record.next_offset)
         .ok_or(WireError::InvalidRecord)?;
@@ -189,8 +195,8 @@ fn canonical_soa(packet: &[u8], record: &ResourceRecord) -> Result<Vec<u8>, Wire
         return Err(WireError::InvalidRecord);
     }
     let mut output = Vec::new();
-    output.extend_from_slice(mname.canonical_wire());
-    output.extend_from_slice(rname.canonical_wire());
+    output.extend_from_slice(primary_name.canonical_wire());
+    output.extend_from_slice(mailbox_name.canonical_wire());
     output.extend_from_slice(integers);
     Ok(output)
 }
@@ -301,6 +307,9 @@ mod tests {
 
     #[test]
     fn signature_time_allows_one_hour_clock_skew() {
+        let signer_wire = encode_name("example.").expect("signer wire");
+        let (signer, signer_end) = read_name(&signer_wire, 0).expect("signer");
+        assert_eq!(signer_end, signer_wire.len());
         let signature = RrsigRecord {
             type_covered: TYPE_A,
             algorithm: 15,
@@ -309,7 +318,7 @@ mod tests {
             expiration: 10_600,
             inception: 9_400,
             key_tag: 1,
-            signer: crate::wire::DnsName::from_text("example.").expect("signer"),
+            signer,
             signature: vec![1],
         };
         assert!(rrsig_time_valid(
