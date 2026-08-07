@@ -79,6 +79,9 @@ jobs:
       - name: Check native ABI
         run: make check-native
 
+      - name: Check replacement packaging
+        run: make check-packaging
+
       - name: Canonicalize Rust source
         run: cargo fmt --all
 
