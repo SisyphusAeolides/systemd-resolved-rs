@@ -9,11 +9,18 @@
 #include <unistd.h>
 
 int main(void) {
+    static const uint8_t sha256_abc[32] = {
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
+        0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+        0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+    };
     const char *name = "api.eu.example.com";
     const char *parent = "example.com";
     const char *child = "eu.example.com";
     const char *miss = "example.net";
     resolved_link_info *links;
+    uint8_t digest[48];
     int64_t link_count;
     int64_t filled;
     int64_t parent_score;
@@ -56,6 +63,11 @@ int main(void) {
     assert(resolved_dns_udp_payload_size(40, 1, 0, 0, 0) == 512);
     assert(resolved_dns_udp_payload_size(0, 0, 1, 0, 0) == 65508);
     assert(resolved_dns_udp_payload_size(0, 1, 1, 0, 0) == 65488);
+
+    assert(resolved_dnssec_digest(2, "abc", 3, digest, sizeof(digest)) == 32);
+    assert(memcmp(digest, sha256_abc, sizeof(sha256_abc)) == 0);
+    assert(resolved_dnssec_digest(3, "abc", 3, digest, sizeof(digest)) < 0);
+    assert(resolved_dnssec_digest(2, "abc", 3, digest, 1) < 0);
 
     assert(resolved_link_snapshot(NULL, 1) < 0);
     link_count = resolved_link_snapshot(NULL, 0);
