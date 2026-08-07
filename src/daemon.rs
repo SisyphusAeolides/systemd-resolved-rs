@@ -77,15 +77,20 @@ pub fn install_signal_handlers() -> io::Result<()> {
 pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
     let mut udp_endpoints = Vec::new();
     let mut tcp_endpoints = Vec::new();
+    let stub_mode = resolver.config().dns_stub_listener;
     bind_endpoints(
         &resolver.config().listeners,
         QueryMode::Full,
+        stub_mode.udp_enabled(),
+        stub_mode.tcp_enabled(),
         &mut udp_endpoints,
         &mut tcp_endpoints,
     )?;
     bind_endpoints(
         &resolver.config().proxy_listeners,
         QueryMode::Proxy,
+        stub_mode.udp_enabled(),
+        stub_mode.tcp_enabled(),
         &mut udp_endpoints,
         &mut tcp_endpoints,
     )?;
@@ -148,23 +153,29 @@ pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
 fn bind_endpoints(
     addresses: &[SocketAddr],
     mode: QueryMode,
+    udp_enabled: bool,
+    tcp_enabled: bool,
     udp_endpoints: &mut Vec<UdpEndpoint>,
     tcp_endpoints: &mut Vec<TcpEndpoint>,
 ) -> io::Result<()> {
     for &address in addresses {
-        let udp = UdpSocket::bind(address)?;
-        udp.set_read_timeout(Some(Duration::from_millis(250)))?;
-        udp_endpoints.push(UdpEndpoint {
-            socket: Arc::new(udp),
-            mode,
-        });
+        if udp_enabled {
+            let udp = UdpSocket::bind(address)?;
+            udp.set_read_timeout(Some(Duration::from_millis(250)))?;
+            udp_endpoints.push(UdpEndpoint {
+                socket: Arc::new(udp),
+                mode,
+            });
+        }
 
-        let tcp = TcpListener::bind(address)?;
-        tcp.set_nonblocking(true)?;
-        tcp_endpoints.push(TcpEndpoint {
-            listener: tcp,
-            mode,
-        });
+        if tcp_enabled {
+            let tcp = TcpListener::bind(address)?;
+            tcp.set_nonblocking(true)?;
+            tcp_endpoints.push(TcpEndpoint {
+                listener: tcp,
+                mode,
+            });
+        }
     }
     Ok(())
 }
