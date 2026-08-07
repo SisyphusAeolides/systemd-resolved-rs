@@ -6,6 +6,39 @@ use std::os::fd::RawFd;
 use std::os::raw::{c_char, c_int, c_void};
 use std::time::Duration;
 
+const IFNAME_MAX: usize = 16;
+const LINK_SNAPSHOT_RETRIES: usize = 4;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct NativeLinkSnapshot {
+    ifindex: i32,
+    flags: u32,
+    mtu: u32,
+    operstate: u8,
+    has_ipv4_global: u8,
+    has_ipv4_link_local: u8,
+    has_ipv6_global: u8,
+    has_ipv6_link_local: u8,
+    ifname: [c_char; IFNAME_MAX],
+}
+
+impl Default for NativeLinkSnapshot {
+    fn default() -> Self {
+        Self {
+            ifindex: 0,
+            flags: 0,
+            mtu: 0,
+            operstate: 0,
+            has_ipv4_global: 0,
+            has_ipv4_link_local: 0,
+            has_ipv6_global: 0,
+            has_ipv6_link_local: 0,
+            ifname: [0; IFNAME_MAX],
+        }
+    }
+}
+
 extern "C" {
     fn resolved_notify(state: *const c_char) -> c_int;
     fn resolved_listen_fds() -> c_int;
@@ -41,6 +74,9 @@ extern "C" {
         fragmented: c_int,
         received_udp_fragment_max: u32,
     ) -> u16;
+    fn resolved_link_snapshot(entries: *mut NativeLinkSnapshot, capacity: usize) -> i64;
+    fn resolved_rtnl_open() -> c_int;
+    fn resolved_rtnl_wait(fd: c_int, timeout_msec: u32) -> c_int;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +84,19 @@ pub struct PeerCredentials {
     pub pid: u32,
     pub uid: u32,
     pub gid: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkInfo {
+    pub ifindex: i32,
+    pub ifname: String,
+    pub flags: u32,
+    pub mtu: u32,
+    pub operstate: u8,
+    pub has_ipv4_global: bool,
+    pub has_ipv4_link_local: bool,
+    pub has_ipv6_global: bool,
+    pub has_ipv6_link_local: bool,
 }
 
 pub fn install_signal_handlers() -> io::Result<()> {
@@ -177,6 +226,38 @@ pub fn dns_udp_payload_size(
     }
 }
 
+pub fn link_snapshot() -> io::Result<Vec<LinkInfo>> {
+    let mut capacity = snapshot_count()?;
+    for _ in 0..LINK_SNAPSHOT_RETRIES {
+        let mut entries = vec![NativeLinkSnapshot::default(); capacity.max(1)];
+        // SAFETY: entries points to `entries.len()` writable, correctly aligned ABI records.
+        let count = signed_result(unsafe { resolved_link_snapshot(entries.as_mut_ptr(), entries.len()) })?;
+        let count = usize::try_from(count)
+            .map_err(|_| io::Error::from_raw_os_error(libc_einval()))?;
+        if count > entries.len() {
+            capacity = count;
+            continue;
+        }
+        entries.truncate(count);
+        return entries.into_iter().map(link_info).collect();
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        "kernel link set changed repeatedly during snapshot",
+    ))
+}
+
+pub fn rtnl_open() -> io::Result<RawFd> {
+    // SAFETY: the function takes no pointers and returns an owned descriptor or negative errno.
+    result(unsafe { resolved_rtnl_open() })
+}
+
+pub fn rtnl_wait(fd: RawFd, timeout: Duration) -> io::Result<bool> {
+    let timeout_msec = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+    // SAFETY: the descriptor is borrowed for the duration of poll/recv draining.
+    result(unsafe { resolved_rtnl_wait(fd, timeout_msec) }).map(|value| value != 0)
+}
+
 pub fn peer_credentials(fd: c_int) -> io::Result<PeerCredentials> {
     let mut process_id = 0;
     let mut user_id = 0;
@@ -188,6 +269,52 @@ pub fn peer_credentials(fd: c_int) -> io::Result<PeerCredentials> {
         uid: user_id,
         gid: group_id,
     })
+}
+
+fn snapshot_count() -> io::Result<usize> {
+    // SAFETY: a null pointer with zero capacity requests the required record count.
+    let count = signed_result(unsafe { resolved_link_snapshot(std::ptr::null_mut(), 0) })?;
+    usize::try_from(count).map_err(|_| io::Error::from_raw_os_error(libc_einval()))
+}
+
+fn link_info(snapshot: NativeLinkSnapshot) -> io::Result<LinkInfo> {
+    let end = snapshot
+        .ifname
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(snapshot.ifname.len());
+    let bytes = snapshot.ifname[..end]
+        .iter()
+        .map(|byte| *byte as u8)
+        .collect::<Vec<_>>();
+    let ifname = String::from_utf8(bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "kernel interface name is not UTF-8"))?;
+    if snapshot.ifindex <= 0 || ifname.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kernel returned an invalid interface snapshot",
+        ));
+    }
+    Ok(LinkInfo {
+        ifindex: snapshot.ifindex,
+        ifname,
+        flags: snapshot.flags,
+        mtu: snapshot.mtu,
+        operstate: snapshot.operstate,
+        has_ipv4_global: snapshot.has_ipv4_global != 0,
+        has_ipv4_link_local: snapshot.has_ipv4_link_local != 0,
+        has_ipv6_global: snapshot.has_ipv6_global != 0,
+        has_ipv6_link_local: snapshot.has_ipv6_link_local != 0,
+    })
+}
+
+fn signed_result(value: i64) -> io::Result<i64> {
+    if value < 0 {
+        let errno = i32::try_from(-value).unwrap_or(libc_einval());
+        Err(io::Error::from_raw_os_error(errno))
+    } else {
+        Ok(value)
+    }
 }
 
 fn result(value: c_int) -> io::Result<c_int> {
@@ -208,4 +335,25 @@ const fn bool_to_c_int(value: bool) -> c_int {
 
 const fn libc_einval() -> i32 {
     22
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    #[test]
+    fn kernel_link_snapshot_contains_named_links() {
+        let links = link_snapshot().expect("kernel link snapshot");
+        assert!(!links.is_empty());
+        assert!(links.iter().all(|link| link.ifindex > 0 && !link.ifname.is_empty()));
+    }
+
+    #[test]
+    fn rtnl_monitor_socket_opens() {
+        let fd = rtnl_open().expect("RTNL socket");
+        // SAFETY: rtnl_open returns a new owned descriptor.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        assert!(!rtnl_wait(owned.as_raw_fd(), Duration::ZERO).expect("RTNL poll"));
+    }
 }
