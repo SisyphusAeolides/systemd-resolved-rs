@@ -370,6 +370,10 @@ impl ManagerObject {
 
     #[dbus_interface(property, name = "ResolvConfMode")]
     fn resolv_conf_mode(&self) -> String {
-        "stub".to_owned()
+        let config = self.resolver.config();
+        crate::resolvconf_publish::system_resolv_conf_mode(&config.runtime_directory)
+            .unwrap_or(crate::resolvconf_publish::ResolvConfMode::Foreign)
+            .as_str()
+            .to_owned()
     }
 }
