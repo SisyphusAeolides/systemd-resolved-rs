@@ -36,9 +36,9 @@ record Policy where
 
 public export
 isSingleLabel : DNSName labels -> Bool
-isSingleLabel {labels = Z} _ = False
-isSingleLabel {labels = S Z} _ = True
-isSingleLabel {labels = S (S _)} _ = False
+isSingleLabel (MkDNSName []) = False
+isSingleLabel (MkDNSName [_]) = True
+isSingleLabel (MkDNSName (_ :: _ :: _)) = False
 
 public export
 routeName : Policy -> DNSName labels -> ResolutionPath
