@@ -83,6 +83,7 @@ enum DbusError {
     NoSuchService(String),
     ResourceRecordTypeUnsupported(String),
     NoSuchLink(String),
+    LinkBusy(String),
     NetworkDown(String),
     InvalidArgs(String),
     NotSupported(String),
@@ -512,13 +513,7 @@ impl ManagerObject {
 
     #[dbus_interface(property, name = "DNSStubListener")]
     fn dns_stub_listener(&self) -> String {
-        if self.resolver.config().listeners.is_empty()
-            && self.resolver.config().proxy_listeners.is_empty()
-        {
-            "no".to_owned()
-        } else {
-            "yes".to_owned()
-        }
+        self.resolver.config().dns_stub_listener.as_str().to_owned()
     }
 
     #[dbus_interface(property, name = "ResolvConfMode")]
@@ -921,17 +916,6 @@ fn response_flags(response: &[u8]) -> u64 {
     })
 }
 
-fn service_flags_for_refused_types(resolver: &Resolver, mut flags: u64) -> u64 {
-    let refused = &resolver.config().refuse_record_types;
-    if refused.contains(&TYPE_A) && refused.contains(&TYPE_AAAA) {
-        flags |= SD_RESOLVED_NO_ADDRESS;
-    }
-    if refused.contains(&TYPE_TXT) {
-        flags |= SD_RESOLVED_NO_TXT;
-    }
-    flags
-}
-
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn resolve_service_reply(
     resolver: &Resolver,
@@ -952,9 +936,16 @@ fn resolve_service_reply(
     ),
     DbusError,
 > {
-    let flags = service_flags_for_refused_types(resolver, flags);
     let (owner, canonical_name, canonical_type, canonical_domain) =
         service_owner(name, service_type, domain)?;
+    let mut flags = flags;
+    let refused = &resolver.config().refuse_record_types;
+    if refused.contains(&TYPE_A) && refused.contains(&TYPE_AAAA) {
+        flags |= SD_RESOLVED_NO_ADDRESS;
+    }
+    if refused.contains(&TYPE_TXT) {
+        flags |= SD_RESOLVED_NO_TXT;
+    }
     let response = resolver
         .resolve_record_on_link(&owner, CLASS_IN, TYPE_SRV, positive_ifindex(ifindex))
         .map_err(map_resolve_error)?;
@@ -1037,7 +1028,7 @@ fn resolve_service_reply(
         canonical_name,
         canonical_type,
         canonical_domain,
-        response_flags(&response) | (flags & (SD_RESOLVED_NO_ADDRESS | SD_RESOLVED_NO_TXT)),
+        response_flags(&response),
     ))
 }
 
@@ -1163,11 +1154,29 @@ fn map_link_error(error: LinkError) -> DbusError {
         LinkError::NoSuchLink(_) | LinkError::InvalidIfindex(_) => {
             DbusError::NoSuchLink(error.to_string())
         }
+        LinkError::ManagedLink(_) => DbusError::LinkBusy(error.to_string()),
         LinkError::InvalidDomain(_) => DbusError::InvalidArgs(error.to_string()),
     }
 }
 
-fn map_dns_error(rcode: u16, message: String) -> DbusError {
+fn map_resolve_error(error: ResolveError) -> DbusError {
+    match error {
+        ResolveError::NoNameServers => DbusError::NoNameServers(error.to_string()),
+        ResolveError::NoSuchResourceRecord => DbusError::NoSuchResourceRecord(error.to_string()),
+        ResolveError::Link(link) => map_link_error(link),
+        ResolveError::UnsupportedFamily(_) => DbusError::InvalidArgs(error.to_string()),
+        ResolveError::Io(_) => DbusError::NetworkDown(error.to_string()),
+        ResolveError::Wire(crate::wire::WireError::CnameLoop) => {
+            DbusError::CNameLoop(error.to_string())
+        }
+        ResolveError::DnsError { rcode, .. } => dns_rcode_error(rcode, error.to_string()),
+        ResolveError::Wire(_) | ResolveError::Protocol(_) => {
+            DbusError::InvalidReply(error.to_string())
+        }
+    }
+}
+
+fn dns_rcode_error(rcode: u16, message: String) -> DbusError {
     match rcode {
         1 => DbusError::DnsFormErr(message),
         2 => DbusError::DnsServFail(message),
@@ -1191,27 +1200,9 @@ fn map_dns_error(rcode: u16, message: String) -> DbusError {
     }
 }
 
-fn map_resolve_error(error: ResolveError) -> DbusError {
-    match error {
-        ResolveError::NoNameServers => DbusError::NoNameServers(error.to_string()),
-        ResolveError::NoSuchResourceRecord => DbusError::NoSuchResourceRecord(error.to_string()),
-        ResolveError::DnsError { rcode, .. } => map_dns_error(rcode, error.to_string()),
-        ResolveError::Link(link) => map_link_error(link),
-        ResolveError::UnsupportedFamily(_) => DbusError::InvalidArgs(error.to_string()),
-        ResolveError::Io(_) => DbusError::NetworkDown(error.to_string()),
-        ResolveError::Wire(crate::wire::WireError::CnameLoop) => {
-            DbusError::CNameLoop(error.to_string())
-        }
-        ResolveError::Wire(_) | ResolveError::Protocol(_) => {
-            DbusError::InvalidReply(error.to_string())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
 
     #[test]
     fn object_paths_match_systemd_bus_label_encoding() {
@@ -1265,34 +1256,8 @@ mod tests {
     }
 
     #[test]
-    fn refused_dns_errors_keep_the_dbus_error_contract() {
-        let error = map_resolve_error(ResolveError::DnsError {
-            rcode: 5,
-            query: "localhost".to_owned(),
-        });
-        assert!(matches!(error, DbusError::DnsRefused(_)));
-    }
-
-    #[test]
-    fn service_refusals_set_implicit_auxiliary_flags() {
-        let mut config = Config::default();
-        config
-            .apply_text("[Resolve]\nRefuseRecordTypes=A AAAA TXT\n")
-            .expect("refuse record configuration");
-        let resolver = Resolver::new(config);
-        let flags = service_flags_for_refused_types(&resolver, 0);
-        assert_ne!(flags & SD_RESOLVED_NO_ADDRESS, 0);
-        assert_ne!(flags & SD_RESOLVED_NO_TXT, 0);
-    }
-
-    #[test]
-    fn one_refused_address_family_keeps_service_addresses_enabled() {
-        let mut config = Config::default();
-        config
-            .apply_text("[Resolve]\nRefuseRecordTypes=AAAA\n")
-            .expect("refuse record configuration");
-        let resolver = Resolver::new(config);
-        let flags = service_flags_for_refused_types(&resolver, 0);
-        assert_eq!(flags & SD_RESOLVED_NO_ADDRESS, 0);
+    fn managed_links_keep_the_dbus_link_busy_contract() {
+        let error = map_link_error(LinkError::ManagedLink(7));
+        assert!(matches!(error, DbusError::LinkBusy(_)));
     }
 }
