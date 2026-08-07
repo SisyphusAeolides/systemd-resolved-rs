@@ -108,13 +108,12 @@ impl LinkObject {
     }
 
     #[dbus_interface(property, name = "DNSEx")]
-    fn dns_ex(&self) -> Result<Vec<(i32, Vec<u8>, u16, String)>, zbus::fdo::Error> {
-        Ok(self
-            .resolver
+    fn dns_ex(&self) -> Vec<(i32, Vec<u8>, u16, String)> {
+        self.resolver
             .link_dns_specs(self.ifindex)
             .into_iter()
             .map(link_dns_ex_entry)
-            .collect())
+            .collect()
     }
 
     #[dbus_interface(property, name = "CurrentDNSServer")]
@@ -128,13 +127,12 @@ impl LinkObject {
     }
 
     #[dbus_interface(property, name = "CurrentDNSServerEx")]
-    fn current_dns_server_ex(&self) -> Result<(i32, Vec<u8>, u16, String), zbus::fdo::Error> {
-        Ok(self
-            .resolver
+    fn current_dns_server_ex(&self) -> (i32, Vec<u8>, u16, String) {
+        self.resolver
             .link_dns_specs(self.ifindex)
             .into_iter()
             .next()
-            .map_or((AF_UNSPEC, Vec::new(), 0, String::new()), link_dns_ex_entry))
+            .map_or((AF_UNSPEC, Vec::new(), 0, String::new()), link_dns_ex_entry)
     }
 
     #[dbus_interface(property, name = "Domains")]
