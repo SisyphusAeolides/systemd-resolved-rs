@@ -27,7 +27,8 @@ extern "C" {
         ret: *mut *mut NativeTlsStream,
     ) -> c_int;
     fn resolved_tls_set_timeout(stream: *mut NativeTlsStream, timeout_msec: u32) -> c_int;
-    fn resolved_tls_read(stream: *mut NativeTlsStream, buffer: *mut c_void, capacity: usize) -> i64;
+    fn resolved_tls_read(stream: *mut NativeTlsStream, buffer: *mut c_void, capacity: usize)
+        -> i64;
     fn resolved_tls_write(
         stream: *mut NativeTlsStream,
         buffer: *const c_void,
@@ -60,8 +61,9 @@ impl TlsStream {
         strict: bool,
         timeout: Duration,
     ) -> io::Result<Self> {
-        let address = CString::new(server.ip().to_string())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid DNS server address"))?;
+        let address = CString::new(server.ip().to_string()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid DNS server address")
+        })?;
         let server_name = server_name
             .map(CString::new)
             .transpose()
@@ -97,7 +99,8 @@ impl TlsStream {
 
     pub fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> {
         // SAFETY: raw is a live exclusively owned native TLS stream.
-        let result = unsafe { resolved_tls_set_timeout(self.raw.as_ptr(), duration_milliseconds(timeout)) };
+        let result =
+            unsafe { resolved_tls_set_timeout(self.raw.as_ptr(), duration_milliseconds(timeout)) };
         native_result(result).map(|_| ())
     }
 
@@ -113,7 +116,10 @@ impl TlsStream {
             };
             let written = signed_result(written)?;
             if written == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "TLS stream closed"));
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "TLS stream closed",
+                ));
             }
             buffer = &buffer[written..];
         }
@@ -208,7 +214,9 @@ impl TlsCapability {
 }
 
 fn duration_milliseconds(duration: Duration) -> u32 {
-    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX).max(1)
+    u32::try_from(duration.as_millis())
+        .unwrap_or(u32::MAX)
+        .max(1)
 }
 
 fn native_result(result: c_int) -> io::Result<c_int> {
