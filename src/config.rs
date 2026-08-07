@@ -15,3 +15,4 @@ include!("config_helpers.rs");
 include!("config_server_spec.rs");
 include!("config_tests.rs");
 include!("config_stub_tests.rs");
+include!("config_server_spec_tests.rs");
