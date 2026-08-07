@@ -105,14 +105,7 @@ impl Config {
             "ResolveUnicastSingleLabel" => {
                 self.resolve_unicast_single_label = parse_bool(value)?;
             }
-            "DNSStubListener" => match value.to_ascii_lowercase().as_str() {
-                "no" | "false" | "off" | "0" => {
-                    self.listeners.clear();
-                    self.proxy_listeners.clear();
-                }
-                "yes" | "true" | "on" | "1" | "udp" | "tcp" => {}
-                _ => return Err(ConfigError::InvalidValue(value.to_owned())),
-            },
+            "DNSStubListener" => self.dns_stub_listener = DnsStubListenerMode::parse(value)?,
             _ => {}
         }
         Ok(())
