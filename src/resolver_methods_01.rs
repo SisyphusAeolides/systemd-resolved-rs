@@ -31,6 +31,7 @@ impl Resolver {
             states: Mutex::new(states),
             udp_sockets: Mutex::new(HashMap::new()),
             tcp_streams: Mutex::new(HashMap::new()),
+            tls_streams: Mutex::new(HashMap::new()),
             routing: RwLock::new(RoutingTable::default()),
             networkd_links: RwLock::new(HashMap::new()),
             link_server_specs: RwLock::new(HashMap::new()),
