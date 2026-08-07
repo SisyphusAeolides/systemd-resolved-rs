@@ -9,8 +9,8 @@ const MAX_FEATURE_RETRIES: usize = 2;
 const MAX_TRANSPORT_RETRIES: usize = 2;
 
 impl Resolver {
-    fn preferred_feature_level(&self) -> FeatureLevel {
-        if self.config.dnssec == ValidationMode::No {
+    fn preferred_feature_level(dnssec_mode: ValidationMode) -> FeatureLevel {
+        if dnssec_mode == ValidationMode::No {
             FeatureLevel::Edns0
         } else {
             FeatureLevel::DnssecOk
@@ -24,7 +24,8 @@ impl Resolver {
         query: &[u8],
         budget: &mut DnsAttemptBudget,
     ) -> Result<Vec<u8>, ResolveError> {
-        let configured_best_level = self.preferred_feature_level();
+        let dnssec_mode = self.server_dnssec_mode(server);
+        let configured_best_level = Self::preferred_feature_level(dnssec_mode);
         let tls_mode = self.server_dns_over_tls_mode(server);
         let strict_tls = tls_mode == TlsMode::Yes;
         let mut forced_level = None;
@@ -45,7 +46,7 @@ impl Resolver {
                 let mut states = self.states();
                 let state = states.entry(server).or_default();
                 let best_level = if state.missing_root_rrsig
-                    && self.config.dnssec != ValidationMode::Yes
+                    && dnssec_mode != ValidationMode::Yes
                 {
                     FeatureLevel::Edns0
                 } else {
@@ -109,7 +110,7 @@ impl Resolver {
                                                 .record_transport_failure(server, TransportMode::Tcp);
                                             if failures >= TRANSPORT_RETRY_ATTEMPTS
                                                 && level > FeatureLevel::Udp
-                                                && self.config.dnssec != ValidationMode::Yes
+                                                && dnssec_mode != ValidationMode::Yes
                                                 && feature_retries < MAX_FEATURE_RETRIES
                                             {
                                                 let lower = level.lower();
@@ -128,7 +129,7 @@ impl Resolver {
                             }
                             Err(error) => {
                                 let lower = if outbound.managed_opt
-                                    && self.config.dnssec != ValidationMode::Yes
+                                    && dnssec_mode != ValidationMode::Yes
                                 {
                                     let mut states = self.states();
                                     states
@@ -150,9 +151,9 @@ impl Resolver {
 
                                 if level == FeatureLevel::Udp {
                                     let (switched, _) =
-                                        self.record_transport_failure(server, TransportMode::Udp);
+                                      self.record_transport_failure(server, TransportMode::Udp);
                                     if switched == Some(TransportMode::Tcp)
-                                        && transport_retries < MAX_TRANSPORT_RETRIES
+                                    && transport_retries < MAX_TRANSPORT_RETRIES
                                     {
                                         transport_retries += 1;
                                         continue;
@@ -161,7 +162,6 @@ impl Resolver {
                                 return Err(error);
                             }
                         }
-                    }
                     TransportMode::Tcp => {
                         match self.exchange_tcp(server, &outbound.packet, remaining) {
                             Ok(response) => {
@@ -190,7 +190,7 @@ impl Resolver {
 
             if outbound.managed_opt && outbound.sent_edns {
                 let Some(opt) = opt.as_ref() else {
-                    if self.config.dnssec == ValidationMode::Yes {
+                    if dnssec_mode == ValidationMode::Yes {
                         return Err(ResolveError::Protocol(
                             "DNS server omitted a required EDNS response",
                         ));
@@ -212,10 +212,10 @@ impl Resolver {
                 };
 
                 if opt.version != 0 || rcode == RCODE_BADVERS {
-                    if self.config.dnssec == ValidationMode::Yes {
+                    if dnssec_mode == ValidationMode::Yes {
                         return Err(ResolveError::Protocol(
                             "DNS server does not support the required EDNS version",
-                        ));
+                            ));
                     }
                     let lower = self.record_bad_opt(server, level);
                     if feature_retries < MAX_FEATURE_RETRIES {
@@ -228,7 +228,7 @@ impl Resolver {
                 }
 
                 if level.dnssec_ok() && !opt.dnssec_ok() {
-                    if self.config.dnssec == ValidationMode::Yes {
+                    if dnssec_mode == ValidationMode::Yes {
                         return Err(ResolveError::Protocol(
                             "DNS server did not echo the EDNS DO flag",
                         ));
@@ -248,7 +248,7 @@ impl Resolver {
                 && level.dnssec_ok()
                 && wire::root_rrsig_missing(&response)?
             {
-                let allow_downgrade = self.config.dnssec != ValidationMode::Yes;
+                let allow_downgrade = dnssec_mode != ValidationMode::Yes;
                 let lower = self.record_missing_root_rrsig(server, allow_downgrade);
                 if !allow_downgrade {
                     return Err(ResolveError::Protocol(
@@ -276,7 +276,7 @@ impl Resolver {
                 }
 
                 if level > FeatureLevel::Udp
-                    && self.config.dnssec != ValidationMode::Yes
+                    && dnssec_mode != ValidationMode::Yes
                     && !servfail_retried
                 {
                     servfail_retried = true;
@@ -287,7 +287,7 @@ impl Resolver {
 
             if rcode_requests_feature_downgrade(rcode)
                 && level > FeatureLevel::Udp
-                && self.config.dnssec != ValidationMode::Yes
+                && dnssec_mode != ValidationMode::Yes
                 && feature_retries < MAX_FEATURE_RETRIES
             {
                 feature_retries += 1;
