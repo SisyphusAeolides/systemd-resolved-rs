@@ -82,7 +82,10 @@ pub struct ResolvedService {
 #[derive(Clone, Debug)]
 pub enum BrowseEvent {
     Added(ServiceInstance),
-    Removed { instance: String, service: ServiceType },
+    Removed {
+        instance: String,
+        service: ServiceType,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -134,7 +137,10 @@ impl MdnsEngine {
 
     pub fn unregister_service(&self, fqsn: &str, ifindex: i32) {
         let mut g = self.zone_services.write();
-        if let Some(pos) = g.iter().position(|s| s.fqsn() == fqsn && s.ifindex == ifindex) {
+        if let Some(pos) = g
+            .iter()
+            .position(|s| s.fqsn() == fqsn && s.ifindex == ifindex)
+        {
             let s = g.remove(pos);
             let _ = self.browse_tx.send(BrowseEvent::Removed {
                 instance: s.instance,
@@ -168,12 +174,8 @@ impl MdnsEngine {
                 }
             }
             s.service.domain.eq_ignore_ascii_case(&domain)
-                && (stype.is_none()
-                    || s.service
-                        .kind
-                        .eq_ignore_ascii_case(stype.unwrap_or("")))
-                && (s.instance.eq_ignore_ascii_case(name)
-                    || s.fqsn().eq_ignore_ascii_case(name))
+                && (stype.is_none() || s.service.kind.eq_ignore_ascii_case(stype.unwrap_or("")))
+                && (s.instance.eq_ignore_ascii_case(name) || s.fqsn().eq_ignore_ascii_case(name))
         })?;
         let host = found.target_host.to_ascii_lowercase();
         let addrs = self
@@ -329,7 +331,7 @@ fn build_service_response(query: &[u8], svc: &ServiceInstance) -> Option<Vec<u8>
     r[2] = 0x84;
     r[6] = 0;
     r[7] = 2; // 2 answers simplified
-    // SRV
+              // SRV
     r.extend_from_slice(&[0xC0, 0x0C]);
     r.extend_from_slice(&33u16.to_be_bytes()); // SRV
     r.extend_from_slice(&1u16.to_be_bytes());

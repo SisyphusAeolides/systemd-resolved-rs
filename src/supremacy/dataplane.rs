@@ -108,8 +108,13 @@ impl Dataplane {
         if budget.expired() {
             return Err(());
         }
-        let name = crate::nss_backend::wire_to_presentation(&key.owner).unwrap_or_else(|_| ".".into());
-        match self.resolver.resolve_name(&name, key.qtype, key.qclass, QueryClass::Interactive).await {
+        let name =
+            crate::nss_backend::wire_to_presentation(&key.owner).unwrap_or_else(|_| ".".into());
+        match self
+            .resolver
+            .resolve_name(&name, key.qtype, key.qclass, QueryClass::Interactive)
+            .await
+        {
             Ok(val) => Ok(rewrite_id(&val.answer, id)),
             Err(_) => Err(()),
         }

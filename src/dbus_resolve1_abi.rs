@@ -216,11 +216,8 @@ pub trait Resolve1Manager: Send + Sync {
         ifindex: i32,
         domains: Vec<LinkDomain>,
     ) -> Result<(), Resolve1Error>;
-    async fn set_link_default_route(
-        &self,
-        ifindex: i32,
-        enable: bool,
-    ) -> Result<(), Resolve1Error>;
+    async fn set_link_default_route(&self, ifindex: i32, enable: bool)
+        -> Result<(), Resolve1Error>;
     async fn set_link_llmnr(&self, ifindex: i32, mode: &str) -> Result<(), Resolve1Error>;
     async fn set_link_mdns(&self, ifindex: i32, mode: &str) -> Result<(), Resolve1Error>;
     async fn set_link_dot(&self, ifindex: i32, mode: &str) -> Result<(), Resolve1Error>;

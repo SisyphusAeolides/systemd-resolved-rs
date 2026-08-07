@@ -39,8 +39,12 @@ impl HostsTable {
             }
             let mut parts = line.split_whitespace();
             let Some(ip_s) = parts.next() else { continue };
-            let Ok(ip) = IpAddr::from_str(ip_s) else { continue };
-            let names: Vec<String> = parts.map(|n| n.trim_end_matches('.').to_ascii_lowercase()).collect();
+            let Ok(ip) = IpAddr::from_str(ip_s) else {
+                continue;
+            };
+            let names: Vec<String> = parts
+                .map(|n| n.trim_end_matches('.').to_ascii_lowercase())
+                .collect();
             if names.is_empty() {
                 continue;
             }
@@ -188,9 +192,7 @@ pub fn lookup_synthetic_ptr(ctx: &SynthContext<'_>, addr: IpAddr) -> Option<Synt
         }
     }
     match addr {
-        IpAddr::V4(v) if v.octets()[0] == 127 => {
-            Some(SynthAnswer::Names(vec!["localhost".into()]))
-        }
+        IpAddr::V4(v) if v.octets()[0] == 127 => Some(SynthAnswer::Names(vec!["localhost".into()])),
         IpAddr::V6(v) if v.is_loopback() => Some(SynthAnswer::Names(vec!["localhost".into()])),
         _ => {
             // if addr is one of ours, return hostname
@@ -214,7 +216,9 @@ pub fn parse_in_addr_arpa(name: &str) -> Option<IpAddr> {
             return None;
         }
         octs.reverse();
-        return Some(IpAddr::V4(Ipv4Addr::new(octs[0], octs[1], octs[2], octs[3])));
+        return Some(IpAddr::V4(Ipv4Addr::new(
+            octs[0], octs[1], octs[2], octs[3],
+        )));
     }
     // ip6.arpa nibble-reversed — full parse omitted for brevity in PTR synthesis callers
     None

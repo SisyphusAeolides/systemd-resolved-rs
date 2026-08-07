@@ -99,11 +99,7 @@ impl FeatureTable {
     }
 
     pub fn get(&self, id: &ServerId) -> ServerFeatures {
-        self.map
-            .read()
-            .get(id)
-            .cloned()
-            .unwrap_or_default()
+        self.map.read().get(id).cloned().unwrap_or_default()
     }
 
     pub fn set(&self, id: ServerId, f: ServerFeatures) {

@@ -135,8 +135,7 @@ impl SupremacyResolver {
                     min_ttl: 60,
                     from_upstream: 0,
                 };
-                self.cache
-                    .put(key, v.clone(), Duration::from_secs(60), now);
+                self.cache.put(key, v.clone(), Duration::from_secs(60), now);
                 return Ok(v);
             }
             AggAnswer::NoData => {
@@ -207,11 +206,7 @@ impl SupremacyResolver {
         }
     }
 
-    async fn fetch_upstream(
-        &self,
-        key: &CKey,
-        budget: &QueryBudget,
-    ) -> Result<CVal, SupremacyErr> {
+    async fn fetch_upstream(&self, key: &CKey, budget: &QueryBudget) -> Result<CVal, SupremacyErr> {
         // Hook your existing Resolver / HyperResolver / routing here.
         // Placeholder returns failure so SWR/negative paths stay testable.
         let _ = (key, budget, &self.pool, &self.sigcache);

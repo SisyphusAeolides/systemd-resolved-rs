@@ -24,7 +24,7 @@ fn parity_scripts_are_nonempty() {
 }
 
 #[test]
-#[ignore] // run with: cargo test -- --ignored (needs root/service)
+#[ignore = "run with: cargo test -- --ignored (needs root/service)"]
 fn boot_smoke_if_available() {
     let smoke = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/boot-smoke.sh");
     if !smoke.exists() {

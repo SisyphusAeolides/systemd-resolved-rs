@@ -72,9 +72,7 @@ pub fn to_unicode(name: &str) -> Result<String, IdnaError> {
 
 /// Lowercase ASCII name suitable as cache key (A-labels).
 pub fn cache_key_name(name: &str) -> Result<String, IdnaError> {
-    Ok(to_ascii(name)?
-        .trim_end_matches('.')
-        .to_ascii_lowercase())
+    Ok(to_ascii(name)?.trim_end_matches('.').to_ascii_lowercase())
 }
 
 pub fn is_ldh_label(lab: &str) -> bool {
@@ -85,8 +83,7 @@ pub fn is_ldh_label(lab: &str) -> bool {
     if b[0] == b'-' || b[lab.len() - 1] == b'-' {
         return false;
     }
-    b.iter()
-        .all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+    b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
 }
 
 /// Validate each label of an ASCII domain.

@@ -15,7 +15,5 @@ pub mod transport_pool;
 
 pub use dataplane::{Dataplane, DataplaneConfig};
 pub use l2_cache::L2Cache;
+pub use obs::{serve_metrics, FlightRecorder, Metrics};
 pub use resolver::SupremacyResolver;
-pub use obs::{Metrics, FlightRecorder, serve_metrics};
-
-

@@ -35,7 +35,9 @@ pub struct LandingConfig {
 
 impl Default for LandingConfig {
     fn default() -> Self {
-        let metrics = std::env::var("RESOLVED_RS_METRICS").ok().filter(|s| !s.is_empty());
+        let metrics = std::env::var("RESOLVED_RS_METRICS")
+            .ok()
+            .filter(|s| !s.is_empty());
         let shm = std::env::var("RESOLVED_RS_SHM")
             .map(|v| v != "0" && v != "false")
             .unwrap_or(true);

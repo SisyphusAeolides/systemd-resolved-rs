@@ -88,10 +88,7 @@ impl LlmnrEngine {
         self.links
             .read()
             .get(&ifindex)
-            .map(|l| {
-                l.mode == LlmnrMode::Yes
-                    && l.claim_names.iter().any(|c| Self::norm(c) == n)
-            })
+            .map(|l| l.mode == LlmnrMode::Yes && l.claim_names.iter().any(|c| Self::norm(c) == n))
             .unwrap_or(false)
     }
 
@@ -123,7 +120,9 @@ impl LlmnrEngine {
     }
 
     async fn handle_query(&self, pkt: &[u8], peer: SocketAddr, sock: &UdpSocket) {
-        let Some(qname) = parse_qname(pkt) else { return };
+        let Some(qname) = parse_qname(pkt) else {
+            return;
+        };
         let qtype = qtype_at(pkt).unwrap_or(1);
         debug!(%qname, qtype, %peer, "llmnr query");
 
@@ -153,7 +152,9 @@ impl LlmnrEngine {
 
     fn handle_response(&self, pkt: &[u8], peer: SocketAddr) {
         let id = u16::from_be_bytes([pkt[0], pkt[1]]);
-        let Some(qname) = parse_qname(pkt) else { return };
+        let Some(qname) = parse_qname(pkt) else {
+            return;
+        };
         let mut inflight = self.inflight.write();
         if let Some((name, _)) = inflight.remove(&id) {
             if Self::norm(&name) != Self::norm(&qname) {
@@ -197,10 +198,7 @@ impl LlmnrEngine {
             let left = deadline.saturating_duration_since(Instant::now());
             match tokio::time::timeout(left, sock.recv_from(&mut buf)).await {
                 Ok(Ok((n, peer))) => {
-                    if n >= 12
-                        && u16::from_be_bytes([buf[0], buf[1]]) == id
-                        && buf[2] & 0x80 != 0
-                    {
+                    if n >= 12 && u16::from_be_bytes([buf[0], buf[1]]) == id && buf[2] & 0x80 != 0 {
                         extract_addrs(&buf[..n], &mut addrs);
                         from.push(peer);
                     }
@@ -369,7 +367,9 @@ pub fn extract_addrs(pkt: &[u8], out: &mut Vec<std::net::IpAddr>) {
         return;
     }
     let an = u16::from_be_bytes([pkt[6], pkt[7]]) as usize;
-    let Some(mut i) = skip_name(pkt, 12) else { return };
+    let Some(mut i) = skip_name(pkt, 12) else {
+        return;
+    };
     i += 4;
     for _ in 0..an {
         let Some(ni) = skip_name(pkt, i) else { return };
@@ -385,7 +385,10 @@ pub fn extract_addrs(pkt: &[u8], out: &mut Vec<std::net::IpAddr>) {
         }
         if typ == 1 && rdlen == 4 {
             out.push(std::net::IpAddr::V4(Ipv4Addr::new(
-                pkt[i], pkt[i + 1], pkt[i + 2], pkt[i + 3],
+                pkt[i],
+                pkt[i + 1],
+                pkt[i + 2],
+                pkt[i + 3],
             )));
         } else if typ == 28 && rdlen == 16 {
             let mut a = [0u8; 16];

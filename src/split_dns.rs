@@ -105,11 +105,9 @@ impl SplitDnsTable {
     }
 
     pub fn upsert_rule(&mut self, rule: DomainRule) {
-        if let Some(e) = self
-            .rules
-            .iter_mut()
-            .find(|r| r.ifindex == rule.ifindex && normalize_name(&r.suffix) == normalize_name(&rule.suffix))
-        {
+        if let Some(e) = self.rules.iter_mut().find(|r| {
+            r.ifindex == rule.ifindex && normalize_name(&r.suffix) == normalize_name(&rule.suffix)
+        }) {
             *e = rule;
         } else {
             self.rules.push(rule);
@@ -209,10 +207,7 @@ pub fn expand_search(name: &str, search: &[String], ndots: usize) -> Vec<String>
 
 /// True if sending `name` to a global uplink would violate a more-specific route-only domain.
 pub fn would_leak_to_uplink(name: &str, rules: &[DomainRule]) -> bool {
-    matches!(
-        pick_links_for_name(name, rules, &[], false),
-        Pick::Links(_)
-    )
+    matches!(pick_links_for_name(name, rules, &[], false), Pick::Links(_))
 }
 
 #[cfg(test)]
