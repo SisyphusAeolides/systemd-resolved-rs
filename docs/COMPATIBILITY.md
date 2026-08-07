@@ -10,7 +10,7 @@ gate at the end of this document passes against the pinned upstream baseline.
 - [x] Rust package paths have concrete library and binary sources
 - [x] C and Fortran ABI declarations agree at the repository boundary
 - [x] current `main` passes Rust 1.74 and stable formatting, Clippy, tests, and release builds
-- [ ] Idris 2 and Agda modules pass with pinned compiler versions
+- [x] Idris 2 and Agda modules pass with pinned compiler versions
 - [ ] Reproducible release build and package manifest are verified
 
 ## Local resolver interfaces
@@ -20,6 +20,7 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] UDP DNS listener on `127.0.0.53`
 - [x] TCP DNS listener on `127.0.0.53`
 - [x] proxy-mode UDP/TCP listener on `127.0.0.54`
+- [x] `DNSStubListener=` UDP/TCP modes and independent `DNSStubListenerExtra=` sockets
 - [x] generated stub and uplink `resolv.conf` files
 - [x] live `org.freedesktop.resolve1` Manager and Link objects match the pinned introspection manifests
 - [ ] DNS-SD registration, delegate behavior, and complete D-Bus authorization parity
@@ -75,7 +76,8 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] ordered search-domain candidate expansion with route-only exclusion
 - [ ] live configuration reload parity
 - [x] per-link DNS state from D-Bus
-- [ ] netlink synchronization of per-link state
+- [x] RTNL synchronization of kernel link, address, carrier, operstate, and MTU state
+- [x] live systemd-networkd managed DNS/domain/default-route/protocol/security-mode synchronization
 - [x] longest-suffix routing integrated with per-link scopes
 - [x] default-route link inference
 - [x] split-DNS parallel scope behavior
