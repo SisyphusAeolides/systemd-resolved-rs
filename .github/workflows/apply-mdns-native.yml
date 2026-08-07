@@ -1,0 +1,109 @@
+name: Apply native mDNS transport
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-mdns-native.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/mdns-native","description":"Native mDNS verification in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install native dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+
+      - name: Apply native mDNS transport
+        shell: bash
+        env:
+          MDNS_NATIVE_PATCH_GZ_B64: "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"
+        run: |
+          set -euo pipefail
+          printf '%s' "$MDNS_NATIVE_PATCH_GZ_B64" | base64 --decode | gzip --decompress > /tmp/mdns-native.patch
+          echo 'f83ace1900a29de237f75c1e1afb3d5ce42181d8613d0198d6445de52328e03f  /tmp/mdns-native.patch' | sha256sum --check
+          git apply --check /tmp/mdns-native.patch
+          git apply /tmp/mdns-native.patch
+
+      - name: Verify stable toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          cargo +stable fmt --all
+          make check-native
+          make check-packaging
+          make check-nss
+          cargo +stable clippy --all-targets --all-features --locked -- -D warnings
+          cargo +stable test --all-targets --all-features --locked
+          git diff --check
+
+      - name: Verify Rust 1.74
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.74.0 --profile minimal --component rustfmt,clippy
+          cargo +1.74.0 fmt --all -- --check
+          cargo +1.74.0 clippy --all-targets --all-features --locked -- -D warnings
+          cargo +1.74.0 test --all-targets --all-features --locked
+
+      - name: Commit native mDNS transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/apply-mdns-native.yml
+          git config user.name "SisyphusAeolides"
+          git config user.email "37166405+SisyphusAeolides@users.noreply.github.com"
+          git add -A
+          git commit -m "Add native mDNS transport and address snapshots"
+          git push origin HEAD:main
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_CONTEXT: parity/mdns-native
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Native mDNS verification passed' || 'Native mDNS verification failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"%s","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_CONTEXT" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
