@@ -65,7 +65,11 @@ fn apply_credentials(config: &mut Config, directory: &Path) -> bool {
     let present = dns.is_some() || domains.is_some();
 
     if let Some(dns) = dns {
-        let _ = apply_server_assignment(&mut config.upstreams, dns.trim());
+        let _ = apply_server_spec_assignment(
+            &mut config.upstreams,
+            &mut config.upstream_specs,
+            dns.trim(),
+        );
     }
     if let Some(domains) = domains {
         let _ = apply_domain_assignment(&mut config.domains, domains.trim());
@@ -117,23 +121,6 @@ fn discover_drop_ins(main: &Path) -> Result<Vec<PathBuf>, ConfigError> {
         }
     }
     Ok(selected.into_values().collect())
-}
-
-fn apply_server_assignment(
-    destination: &mut Vec<SocketAddr>,
-    value: &str,
-) -> Result<(), ConfigError> {
-    if value.is_empty() {
-        destination.clear();
-        return Ok(());
-    }
-    for server in value.split_whitespace().map(parse_server) {
-        let server = server?;
-        if !destination.contains(&server) {
-            destination.push(server);
-        }
-    }
-    Ok(())
 }
 
 fn apply_domain_assignment(destination: &mut Vec<Domain>, value: &str) -> Result<(), ConfigError> {
@@ -203,20 +190,7 @@ fn parse_duration(value: &str) -> Result<Duration, ConfigError> {
 }
 
 pub fn parse_server(value: &str) -> Result<SocketAddr, ConfigError> {
-    let mut host = value.trim();
-    if let Some((address, _server_name)) = host.split_once('#') {
-        host = address;
-    }
-    if let Some((address, _interface)) = host.split_once('%') {
-        host = address;
-    }
-    if let Ok(address) = host.parse::<SocketAddr>() {
-        return Ok(address);
-    }
-    if let Ok(address) = host.parse::<IpAddr>() {
-        return Ok(SocketAddr::new(address, 53));
-    }
-    Err(ConfigError::InvalidServer(value.to_owned()))
+    Ok(parse_server_spec(value)?.address)
 }
 
 #[derive(Debug, Default)]
