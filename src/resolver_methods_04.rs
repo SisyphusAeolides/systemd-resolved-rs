@@ -29,7 +29,7 @@ impl Resolver {
         }
 
         let address = server.server();
-        let fd = native::udp_connect(address, server.ifindex())?;
+        let fd = native::udp_connect(address, self.server_transport_ifindex(server)?)?;
         // SAFETY: the native connector returns a fresh owned UDP socket descriptor on success.
         let socket = unsafe { <UdpSocket as std::os::fd::FromRawFd>::from_raw_fd(fd) };
         let _ = native::enable_udp_fragment_size(socket.as_raw_fd(), address.is_ipv6());
@@ -99,8 +99,16 @@ impl Resolver {
         result
     }
 
-    fn new_tcp_stream(server: ServerKey, timeout: Duration) -> Result<TcpStream, ResolveError> {
-        let fd = native::tcp_connect(server.server(), server.ifindex(), timeout)?;
+    fn new_tcp_stream(
+        &self,
+        server: ServerKey,
+        timeout: Duration,
+    ) -> Result<TcpStream, ResolveError> {
+        let fd = native::tcp_connect(
+            server.server(),
+            self.server_transport_ifindex(server)?,
+            timeout,
+        )?;
         // SAFETY: the native connector returns a fresh owned TCP socket descriptor on success.
         let stream = unsafe { <TcpStream as std::os::fd::FromRawFd>::from_raw_fd(fd) };
         stream.set_read_timeout(Some(timeout))?;
@@ -123,7 +131,7 @@ impl Resolver {
         let reused = pooled.is_some();
         let stream = match pooled {
             Some(stream) => stream,
-            None => Self::new_tcp_stream(server, timeout)?,
+            None => self.new_tcp_stream(server, timeout)?,
         };
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
@@ -191,7 +199,7 @@ impl Resolver {
         if timeout.is_zero() {
             return result;
         }
-        let mut fresh = Self::new_tcp_stream(server, timeout)?;
+        let mut fresh = self.new_tcp_stream(server, timeout)?;
         let result = Self::exchange_tcp_stream(&mut fresh, query);
         if result.is_ok() {
             self.recycle_tcp_stream(server, fresh);
