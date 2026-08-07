@@ -19,8 +19,9 @@ check-native:
 	mkdir -p build
 	$(FC) $(FFLAGS) -Jbuild -c ffi/routing.f90 -o build/routing.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/native.c -o build/native.o
+	$(CC) $(CFLAGS) -Iffi -c ffi/netlink.c -o build/netlink.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/test_native.c -o build/test_native.o
-	$(FC) build/test_native.o build/native.o build/routing.o -o build/test_native
+	$(FC) build/test_native.o build/native.o build/netlink.o build/routing.o -o build/test_native
 	./build/test_native
 
 check-rust:
