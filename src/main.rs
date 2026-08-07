@@ -96,7 +96,9 @@ fn execute() -> Result<(), Box<dyn Error>> {
         print_configuration(&config, options.no_varlink);
         return Ok(());
     }
-    if options.no_varlink && config.dns_stub_listener == DnsStubListenerMode::No {
+    let stub_enabled = config.dns_stub_listener != DnsStubListenerMode::No
+        && (!config.listeners.is_empty() || !config.proxy_listeners.is_empty());
+    if options.no_varlink && !stub_enabled {
         return Err("all resolver interfaces are disabled".into());
     }
 
@@ -140,17 +142,19 @@ fn execute() -> Result<(), Box<dyn Error>> {
         )
     };
 
-    for address in &config.listeners {
-        eprintln!(
-            "systemd-resolved: full stub listening on {address} ({})",
-            config.dns_stub_listener.as_str()
-        );
-    }
-    for address in &config.proxy_listeners {
-        eprintln!(
-            "systemd-resolved: proxy stub listening on {address} ({})",
-            config.dns_stub_listener.as_str()
-        );
+    if stub_enabled {
+        for address in &config.listeners {
+            eprintln!(
+                "systemd-resolved: full stub listening on {address} ({})",
+                config.dns_stub_listener.as_str()
+            );
+        }
+        for address in &config.proxy_listeners {
+            eprintln!(
+                "systemd-resolved: proxy stub listening on {address} ({})",
+                config.dns_stub_listener.as_str()
+            );
+        }
     }
 
     let result = run_stub(&resolver);
