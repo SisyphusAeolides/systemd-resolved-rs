@@ -50,17 +50,20 @@ impl DnsAttemptBudget {
         }
     }
 
+    fn remaining(&self) -> Result<Duration, ResolveError> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "DNS query timed out").into())
+    }
+
     fn begin_attempt(&mut self) -> Result<Duration, ResolveError> {
         if self.exhausted() {
             return Err(ResolveError::Protocol(
                 "maximum DNS transaction attempts reached",
             ));
         }
-        let remaining = self
-            .deadline
-            .checked_duration_since(Instant::now())
-            .filter(|duration| !duration.is_zero())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "DNS query timed out"))?;
+        let remaining = self.remaining()?;
         self.attempts += 1;
         Ok(remaining)
     }
