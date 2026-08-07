@@ -13,7 +13,7 @@ int main(void) {
     const char *parent = "example.com";
     const char *child = "eu.example.com";
     const char *miss = "example.net";
-    resolved_link_snapshot *links;
+    resolved_link_info *links;
     int64_t link_count;
     int64_t filled;
     int64_t parent_score;
