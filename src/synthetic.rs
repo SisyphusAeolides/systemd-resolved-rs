@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn hosts_file() {
-        let t = HostsTable::parse_hosts_file("10.0.0.1 foo.example foo\\n");
+        let t = HostsTable::parse_hosts_file("10.0.0.1 foo.example foo\n");
         match t.lookup_name("foo", 1) {
             Some(SynthAnswer::Addrs(a)) => assert_eq!(a[0].to_string(), "10.0.0.1"),
             _ => panic!(),
