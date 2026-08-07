@@ -50,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends dbus gfortran systemd
+          sudo apt-get install --yes --no-install-recommends dbus gfortran libssl-dev systemd
 
       - name: Install Rust toolchain
         shell: bash
