@@ -4,6 +4,7 @@ use crate::config::{Config, Domain, SupportMode, TlsMode, ValidationMode};
 use crate::edns::{self, FeatureLevel, ServerFeatureState};
 use crate::hosts::Hosts;
 use crate::native;
+use crate::networkd::LinkState as NetworkdLinkState;
 use crate::policy::{choose_server, update_rtt, ServerMetric};
 use crate::routing::{LinkError, LinkState, RouteScope, RoutingTable, ScopeKind};
 use crate::transport::{ServerTransportState, TransportMode, TRANSPORT_RETRY_ATTEMPTS};
@@ -278,6 +279,7 @@ pub struct Resolver {
     udp_sockets: Mutex<HashMap<ServerKey, Vec<UdpSocket>>>,
     tcp_streams: Mutex<HashMap<ServerKey, Vec<TcpStream>>>,
     routing: RwLock<RoutingTable>,
+    networkd_links: RwLock<HashMap<i32, NetworkdLinkState>>,
     routing_generation: AtomicU64,
     inflight: Inflight,
     cache: Cache,
