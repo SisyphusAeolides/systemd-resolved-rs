@@ -53,6 +53,13 @@ impl TlsMode {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DnsServerSpec {
+    pub address: SocketAddr,
+    pub interface: Option<String>,
+    pub server_name: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DnsStubListenerMode {
     No,
