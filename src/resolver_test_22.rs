@@ -2,7 +2,11 @@
 mod test_22_logical_server_identity {
     use super::*;
 
-    fn spec(address: SocketAddr, interface: &str, server_name: &str) -> crate::config::DnsServerSpec {
+    fn spec(
+        address: SocketAddr,
+        interface: &str,
+        server_name: &str,
+    ) -> crate::config::DnsServerSpec {
         crate::config::DnsServerSpec {
             address,
             interface: Some(interface.to_owned()),
