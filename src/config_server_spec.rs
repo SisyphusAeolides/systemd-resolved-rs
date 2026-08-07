@@ -62,21 +62,22 @@ fn filtered_server_specs(
     addresses: &[SocketAddr],
     specs: &[DnsServerSpec],
 ) -> Vec<DnsServerSpec> {
-    if specs.is_empty() {
-        return filtered_servers(addresses)
-            .into_iter()
-            .map(|address| DnsServerSpec {
+    let addresses = filtered_servers(addresses);
+    let mut output = Vec::new();
+    for address in addresses {
+        let mut matched = false;
+        for spec in specs.iter().filter(|spec| spec.address == address) {
+            matched = true;
+            if !output.contains(spec) {
+                output.push(spec.clone());
+            }
+        }
+        if !matched {
+            output.push(DnsServerSpec {
                 address,
                 interface: None,
                 server_name: None,
-            })
-            .collect();
-    }
-
-    let mut output = Vec::new();
-    for spec in specs {
-        if !is_local_stub(spec.address) && !output.contains(spec) {
-            output.push(spec.clone());
+            });
         }
     }
     output
@@ -152,6 +153,18 @@ mod server_spec_tests {
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].server_name.as_deref(), Some("one.example"));
         assert_eq!(specs[1].server_name.as_deref(), Some("two.example"));
+    }
+
+    #[test]
+    fn server_spec_projection_tracks_legacy_address_mutation() {
+        let old = "192.0.2.53:53".parse().expect("old address");
+        let new = "192.0.2.54:53".parse().expect("new address");
+        let specs = vec![parse_server_spec("192.0.2.53#old.example").expect("old spec")];
+        let projected = filtered_server_specs(&[new], &specs);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].address, new);
+        assert_eq!(projected[0].server_name, None);
+        assert_ne!(projected[0].address, old);
     }
 
     #[test]
