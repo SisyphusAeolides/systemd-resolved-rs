@@ -108,8 +108,20 @@ impl Resolver {
         &self,
         links: Vec<crate::routing::KernelLinkState>,
     ) -> Result<(), LinkError> {
-        let changed = self.routing_mut().sync_kernel_links(links)?;
-        self.finish_routing_change(changed);
+        let route_changed = self.routing_mut().sync_kernel_links(links)?;
+        let live_ifindices = self
+            .routing()
+            .links()
+            .into_iter()
+            .map(|link| link.ifindex)
+            .collect::<HashSet<_>>();
+        let identity_changed = {
+            let mut specs = self.link_server_specs_mut();
+            let before = specs.len();
+            specs.retain(|ifindex, _| live_ifindices.contains(ifindex));
+            specs.len() != before
+        };
+        self.finish_routing_change(route_changed || identity_changed);
         Ok(())
     }
 
@@ -121,16 +133,22 @@ impl Resolver {
         let mut networkd = self.networkd_links_mut();
         let mut routing = self.routing_mut();
         let mut changed = false;
+        let mut removed_identities = Vec::new();
+        let mut managed_identities = Vec::new();
 
         for (&ifindex, previous) in networkd.iter() {
             let still_managed = incoming.get(&ifindex).is_some_and(|link| link.managed);
-            if previous.managed && !still_managed && routing.link(ifindex).is_some() {
-                changed |= routing.revert(ifindex)?;
+            if previous.managed && !still_managed {
+                removed_identities.push(ifindex);
+                if routing.link(ifindex).is_some() {
+                    changed |= routing.revert(ifindex)?;
+                }
             }
         }
 
         for link in incoming.values().filter(|link| link.managed) {
             if routing.link(link.ifindex).is_none() {
+                removed_identities.push(link.ifindex);
                 continue;
             }
             changed |= routing.set_dns(link.ifindex, link.dns_servers.clone())?;
@@ -150,20 +168,44 @@ impl Resolver {
                 link.ifindex,
                 link.dnssec_negative_trust_anchors.clone(),
             )?;
+            if let Some(state) = routing.link(link.ifindex) {
+                managed_identities.push((link.ifindex, state.dns_servers));
+            }
         }
 
         *networkd = incoming;
         drop(routing);
         drop(networkd);
-        self.finish_routing_change(changed);
+
+        let mut identity_changed = false;
+        for ifindex in removed_identities {
+            identity_changed |= self.remove_link_server_specs(ifindex);
+        }
+        for (ifindex, servers) in managed_identities {
+            let specs = servers
+                .into_iter()
+                .map(|address| DnsServerSpec {
+                    address,
+                    interface: None,
+                    server_name: None,
+                })
+                .collect();
+            identity_changed |= self.replace_link_server_specs(ifindex, specs);
+        }
+        self.finish_routing_change(changed || identity_changed);
         Ok(())
     }
 
     pub fn set_link_dns(&self, ifindex: i32, servers: Vec<SocketAddr>) -> Result<(), LinkError> {
-        self.ensure_link_writable(ifindex)?;
-        let changed = self.routing_mut().set_dns(ifindex, servers)?;
-        self.finish_routing_change(changed);
-        Ok(())
+        let specs = servers
+            .into_iter()
+            .map(|address| DnsServerSpec {
+                address,
+                interface: None,
+                server_name: None,
+            })
+            .collect();
+        self.set_link_dns_specs(ifindex, specs)
     }
 
     pub fn set_link_domains(&self, ifindex: i32, domains: Vec<Domain>) -> Result<(), LinkError> {
@@ -229,8 +271,9 @@ impl Resolver {
 
     pub fn revert_link(&self, ifindex: i32) -> Result<(), LinkError> {
         self.ensure_link_writable(ifindex)?;
-        let changed = self.routing_mut().revert(ifindex)?;
-        self.finish_routing_change(changed);
+        let route_changed = self.routing_mut().revert(ifindex)?;
+        let identity_changed = self.remove_link_server_specs(ifindex);
+        self.finish_routing_change(route_changed || identity_changed);
         Ok(())
     }
 
