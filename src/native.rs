@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use std::ffi::CString;
 use std::io;
+use std::net::SocketAddr;
+use std::os::fd::RawFd;
 use std::os::raw::{c_char, c_int, c_void};
+use std::time::Duration;
 
 extern "C" {
     fn resolved_notify(state: *const c_char) -> c_int;
@@ -10,6 +13,19 @@ extern "C" {
     fn resolved_take_reload() -> c_int;
     fn resolved_should_stop() -> c_int;
     fn resolved_peer_credentials(fd: c_int, pid: *mut u32, uid: *mut u32, gid: *mut u32) -> c_int;
+    fn resolved_udp_connect(
+        address: *const c_char,
+        port: u16,
+        scope_id: u32,
+        ifindex: c_int,
+    ) -> c_int;
+    fn resolved_tcp_connect(
+        address: *const c_char,
+        port: u16,
+        scope_id: u32,
+        ifindex: c_int,
+        timeout_msec: u32,
+    ) -> c_int;
     fn resolved_udp_path_mtu(fd: c_int, ipv6: c_int) -> c_int;
     fn resolved_udp_enable_recvfragsize(fd: c_int, ipv6: c_int) -> c_int;
     fn resolved_udp_recv(
@@ -60,6 +76,50 @@ pub fn notify(state: &str) -> io::Result<bool> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "notification contains NUL"))?;
     // SAFETY: CString guarantees a non-null, NUL-terminated pointer for this call.
     result(unsafe { resolved_notify(state.as_ptr()) }).map(|value| value != 0)
+}
+
+pub fn udp_connect(server: SocketAddr, ifindex: Option<i32>) -> io::Result<RawFd> {
+    let address = CString::new(server.ip().to_string())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid DNS server address"))?;
+    let scope_id = match server {
+        SocketAddr::V4(_) => 0,
+        SocketAddr::V6(address) => address.scope_id(),
+    };
+    // SAFETY: CString provides a valid pointer for the duration of the call; all other values are scalars.
+    result(unsafe {
+        resolved_udp_connect(
+            address.as_ptr(),
+            server.port(),
+            scope_id,
+            ifindex.unwrap_or(0),
+        )
+    })
+}
+
+pub fn tcp_connect(
+    server: SocketAddr,
+    ifindex: Option<i32>,
+    timeout: Duration,
+) -> io::Result<RawFd> {
+    let address = CString::new(server.ip().to_string())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid DNS server address"))?;
+    let scope_id = match server {
+        SocketAddr::V4(_) => 0,
+        SocketAddr::V6(address) => address.scope_id(),
+    };
+    let timeout_msec = u32::try_from(timeout.as_millis())
+        .unwrap_or(u32::MAX)
+        .max(1);
+    // SAFETY: CString provides a valid pointer for the duration of the call; all other values are scalars.
+    result(unsafe {
+        resolved_tcp_connect(
+            address.as_ptr(),
+            server.port(),
+            scope_id,
+            ifindex.unwrap_or(0),
+            timeout_msec,
+        )
+    })
 }
 
 pub fn udp_path_mtu(fd: c_int, ipv6: bool) -> io::Result<u32> {
