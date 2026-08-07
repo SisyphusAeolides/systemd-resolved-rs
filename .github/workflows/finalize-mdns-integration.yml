@@ -1,0 +1,291 @@
+name: Finalize verified mDNS integration
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-mdns-integration.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize with the current main branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install verification dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+
+      - name: Apply the complete integration deterministically
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          c_path = Path('ffi/mdns.c')
+          c = c_path.read_text(encoding='utf-8')
+          if '#include <limits.h>' not in c:
+              c = c.replace('#include <ifaddrs.h>\n', '#include <ifaddrs.h>\n#include <limits.h>\n', 1)
+          c_path.write_text(c, encoding='utf-8')
+
+          runtime_path = Path('src/mdns_runtime.rs')
+          runtime = runtime_path.read_text(encoding='utf-8')
+          runtime = runtime.replace(
+              'matches!(error.raw_os_error(), Some(13 | 19 | 98 | 99 | 101))',
+              'matches!(\n                error.raw_os_error(),\n                Some(13) | Some(19) | Some(98) | Some(99) | Some(101)\n            )',
+          )
+          old_error_kind = '''            if matches!(
+                error.kind(),
+                io::ErrorKind::AddrNotAvailable
+                    | io::ErrorKind::NetworkUnreachable
+                    | io::ErrorKind::PermissionDenied
+            ) {
+                continue;
+            }
+'''
+          new_errno = '''            if matches!(
+                error.raw_os_error(),
+                Some(13) | Some(19) | Some(98) | Some(99) | Some(101)
+            ) {
+                continue;
+            }
+'''
+          runtime = runtime.replace(old_error_kind, new_errno)
+          invalid_truncation = '''    if output.len() > usize::from(u16::MAX) {
+        output[2..4].copy_from_slice(&(flags | DNS_FLAG_TC).to_be_bytes());
+        output.truncate(1232);
+    }
+'''
+          runtime = runtime.replace(invalid_truncation, '')
+          runtime = runtime.replace('const DNS_FLAG_TC: u16 = 1 << 9;\n', '')
+          runtime_path.write_text(runtime, encoding='utf-8')
+
+          build_path = Path('build.rs')
+          build = build_path.read_text(encoding='utf-8')
+          if 'ffi/mdns.c' not in build:
+              matches = list(re.finditer(r'(?m)^(?P<indent>\s*)\.file\("ffi/[^"\n]+\.c"\)', build))
+              if matches:
+                  match = matches[-1]
+                  build = (
+                      build[:match.end()]
+                      + f'\n{match.group("indent")}.file("ffi/mdns.c")'
+                      + build[match.end():]
+                  )
+              elif '"ffi/networkd.c"' in build:
+                  build = build.replace(
+                      '"ffi/networkd.c"',
+                      '"ffi/networkd.c",\n        "ffi/mdns.c"',
+                      1,
+                  )
+              else:
+                  raise SystemExit('cannot locate native C source list in build.rs')
+          if 'cargo:rerun-if-changed=ffi/mdns.c' not in build:
+              anchor = 'fn main() {'
+              if anchor not in build:
+                  raise SystemExit('cannot locate build.rs main function')
+              build = build.replace(
+                  anchor,
+                  anchor
+                  + '\n    println!("cargo:rerun-if-changed=ffi/mdns.c");'
+                  + '\n    println!("cargo:rerun-if-changed=ffi/mdns.h");',
+                  1,
+              )
+          build_path.write_text(build, encoding='utf-8')
+
+          make_path = Path('Makefile')
+          make = make_path.read_text(encoding='utf-8')
+          compile_anchor = '\t$(CC) $(CFLAGS) -Iffi -c ffi/networkd.c -o build/networkd.o\n'
+          if 'ffi/mdns.c -o build/mdns.o' not in make:
+              if compile_anchor not in make:
+                  raise SystemExit('cannot locate native compilation block in Makefile')
+              make = make.replace(
+                  compile_anchor,
+                  compile_anchor
+                  + '\t$(CC) $(CFLAGS) -Iffi -c ffi/mdns.c -o build/mdns.o\n'
+                  + '\t$(CC) $(CFLAGS) -Iffi -c ffi/test_mdns.c -o build/test_mdns.o\n',
+                  1,
+              )
+          link_lines = [
+              line for line in make.splitlines()
+              if 'build/test_native.o' in line and ' -o build/test_native' in line
+          ]
+          if not link_lines:
+              raise SystemExit('cannot locate native test link command in Makefile')
+          old_link = link_lines[0]
+          if 'build/mdns.o' not in old_link:
+              if ' build/routing.o ' in old_link:
+                  new_link = old_link.replace(
+                      ' build/routing.o ', ' build/mdns.o build/routing.o '
+                  )
+              else:
+                  new_link = old_link.replace(
+                      ' -o build/test_native', ' build/mdns.o -o build/test_native'
+                  )
+              make = make.replace(old_link, new_link, 1)
+          run_anchor = '\t./build/test_native\n'
+          if './build/test_mdns' not in make:
+              if run_anchor not in make:
+                  raise SystemExit('cannot locate native test execution in Makefile')
+              make = make.replace(
+                  run_anchor,
+                  run_anchor
+                  + '\t$(CC) build/test_mdns.o build/mdns.o -o build/test_mdns\n'
+                  + '\t./build/test_mdns\n',
+                  1,
+              )
+          make_path.write_text(make, encoding='utf-8')
+
+          mdns_path = Path('src/mdns.rs')
+          mdns = mdns_path.read_text(encoding='utf-8')
+          markers = (
+              '#[path = "mdns_full.rs"]\npub mod parity;\n',
+              '#[path = "dnssd_full.rs"]\npub mod parity_dnssd;\n',
+              '#[path = "mdns_runtime.rs"]\npub mod runtime;\n',
+          )
+          for marker in markers:
+              if marker not in mdns:
+                  if not mdns.endswith('\n'):
+                      mdns += '\n'
+                  mdns += '\n' + marker
+          mdns_path.write_text(mdns, encoding='utf-8')
+
+          query_path = Path('src/resolver_query_on_link.rs')
+          query = query_path.read_text(encoding='utf-8')
+          marker = '// Route RFC 6762 names exclusively through the interface-scoped mDNS runtime.\n'
+          if marker not in query:
+              block = '''// Route RFC 6762 names exclusively through the interface-scoped mDNS runtime.
+if mode == QueryMode::Full && crate::mdns::runtime::should_handle_query(query) {
+    let response = crate::mdns::runtime::query_raw(
+        query,
+        ifindex,
+        self.config().query_timeout,
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+    return response.ok_or(ResolveError::NoSuchResourceRecord);
+}
+
+'''
+              query = block + query
+          query_path.write_text(query, encoding='utf-8')
+
+          for path in Path('src').glob('resolver*.rs'):
+              text = path.read_text(encoding='utf-8')
+              needle = 'self.cache.flush();'
+              replacement = 'self.cache.flush();\n            crate::mdns::runtime::flush_cache();'
+              if needle in text and 'crate::mdns::runtime::flush_cache();' not in text:
+                  text = text.replace(needle, replacement)
+                  path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Ensure the upstream baseline is immutable
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -s compat/upstream-systemd/commit || ! -s compat/upstream-systemd/release ]]; then
+            rm -rf /tmp/systemd-upstream
+            git clone --filter=blob:none --no-checkout https://github.com/systemd/systemd.git /tmp/systemd-upstream
+            git -C /tmp/systemd-upstream fetch --tags --force
+            tag=$(git -C /tmp/systemd-upstream tag --list 'v[0-9]*' --sort=-version:refname | grep -E '^v[0-9]+$' | head -n1)
+            test -n "$tag"
+            git -C /tmp/systemd-upstream checkout --detach "$tag"
+            commit=$(git -C /tmp/systemd-upstream rev-parse HEAD)
+            mkdir -p compat/upstream-systemd/interfaces
+            printf '%s\n' "$tag" > compat/upstream-systemd/release
+            printf '%s\n' "$commit" > compat/upstream-systemd/commit
+            printf '%s\n' 'https://github.com/systemd/systemd.git' > compat/upstream-systemd/repository
+            printf '{\n  "repository": "https://github.com/systemd/systemd.git",\n  "release": "%s",\n  "commit": "%s"\n}\n' \
+              "$tag" "$commit" > compat/upstream-systemd/baseline.json
+            find /tmp/systemd-upstream/src/resolve /tmp/systemd-upstream/test \
+              -type f \
+              \( -path '*/src/resolve/*' -o -iname '*resolved*' -o -iname '*resolve*' -o -iname '*mdns*' -o -iname '*dnssd*' \) \
+              -print0 \
+              | sort -z \
+              | xargs -0 sha256sum \
+              | sed 's#  /tmp/systemd-upstream/#  #' \
+              > compat/upstream-systemd/manifest.sha256
+          fi
+          test -s compat/upstream-systemd/commit
+          test -s compat/upstream-systemd/release
+          test -s compat/upstream-systemd/manifest.sha256
+          rm -f compat/upstream-systemd/.gitkeep
+
+      - name: Remove superseded one-use workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/workflows/pin-upstream-resolved.yml \
+            .github/workflows/land-mdns-core.yml \
+            .github/workflows/land-dnssd-core.yml \
+            .github/workflows/land-mdns-native.yml \
+            .github/workflows/integrate-mdns-stack.yml
+
+      - name: Verify every existing and new gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tests/differential-resolved.py
+          bash -n scripts/preflight-replacement.sh
+          cargo fmt --all
+          make check-native
+          make check-packaging
+          make check-nss
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+          python3 tests/live-dns.py \
+            target/release/systemd-resolved \
+            target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          git diff --check
+
+      - name: Commit only the verified tree
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git rm --force .github/workflows/finalize-mdns-integration.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'Finalize the verified mDNS query integration'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
