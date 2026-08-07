@@ -22,10 +22,11 @@ check-native:
 	$(CC) $(CFLAGS) -Iffi -c ffi/native.c -o build/native.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/interface.c -o build/interface.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/tls.c -o build/tls.o
+	$(CC) $(CFLAGS) -Iffi -c ffi/dnssec.c -o build/dnssec.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/netlink.c -o build/netlink.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/networkd.c -o build/networkd.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/test_native.c -o build/test_native.o
-	$(FC) build/test_native.o build/native.o build/interface.o build/tls.o build/netlink.o build/networkd.o build/routing.o $(LDLIBS) -o build/test_native
+	$(FC) build/test_native.o build/native.o build/interface.o build/tls.o build/dnssec.o build/netlink.o build/networkd.o build/routing.o $(LDLIBS) -o build/test_native
 	./build/test_native
 
 check-rust:
