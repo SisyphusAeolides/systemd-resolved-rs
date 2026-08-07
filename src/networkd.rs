@@ -229,7 +229,11 @@ fn parse_names(value: &str) -> io::Result<Vec<String>> {
 }
 
 fn normalize_name(value: &str) -> io::Result<String> {
-    let value = value.trim().trim_end_matches('.');
+    let value = value.trim();
+    if matches!(value, "." | "~" | "~.") {
+        return Ok(".".to_owned());
+    }
+    let value = value.strip_prefix('~').unwrap_or(value).trim_end_matches('.');
     if value.is_empty()
         || !value.is_ascii()
         || value.len() > 253
@@ -388,6 +392,22 @@ mod tests {
         assert_eq!(
             state.dnssec_negative_trust_anchors,
             vec!["private.example".to_owned()]
+        );
+    }
+
+    #[test]
+    fn root_route_domain_is_preserved() {
+        let state = parse_link_state(
+            7,
+            "ADMIN_STATE=configured\nOPER_STATE=routable\nROUTE_DOMAINS=.\n",
+        )
+        .expect("root route domain");
+        assert_eq!(
+            state.domains,
+            vec![Domain {
+                name: ".".to_owned(),
+                route_only: true,
+            }]
         );
     }
 
