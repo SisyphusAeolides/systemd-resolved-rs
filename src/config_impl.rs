@@ -66,8 +66,16 @@ impl Config {
 
     fn apply_setting(&mut self, key: &str, value: &str) -> Result<(), ConfigError> {
         match key {
-            "DNS" => apply_server_assignment(&mut self.upstreams, value)?,
-            "FallbackDNS" => apply_server_assignment(&mut self.fallback_upstreams, value)?,
+            "DNS" => apply_server_spec_assignment(
+                &mut self.upstreams,
+                &mut self.upstream_specs,
+                value,
+            )?,
+            "FallbackDNS" => apply_server_spec_assignment(
+                &mut self.fallback_upstreams,
+                &mut self.fallback_upstream_specs,
+                value,
+            )?,
             "Domains" => apply_domain_assignment(&mut self.domains, value)?,
             "RefuseRecordTypes" => apply_refuse_record_types(&mut self.refuse_record_types, value),
             "Cache" => {
@@ -125,14 +133,31 @@ impl Config {
         filtered_servers(&self.upstreams)
     }
 
+    pub fn configured_upstream_specs(&self) -> Vec<DnsServerSpec> {
+        filtered_server_specs(&self.upstreams, &self.upstream_specs)
+    }
+
     pub fn configured_fallback_upstreams(&self) -> Vec<SocketAddr> {
         filtered_servers(&self.fallback_upstreams)
+    }
+
+    pub fn configured_fallback_upstream_specs(&self) -> Vec<DnsServerSpec> {
+        filtered_server_specs(&self.fallback_upstreams, &self.fallback_upstream_specs)
     }
 
     pub fn effective_upstreams(&self) -> Vec<SocketAddr> {
         let upstreams = self.configured_upstreams();
         if upstreams.is_empty() {
             self.configured_fallback_upstreams()
+        } else {
+            upstreams
+        }
+    }
+
+    pub fn effective_upstream_specs(&self) -> Vec<DnsServerSpec> {
+        let upstreams = self.configured_upstream_specs();
+        if upstreams.is_empty() {
+            self.configured_fallback_upstream_specs()
         } else {
             upstreams
         }
