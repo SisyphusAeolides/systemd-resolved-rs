@@ -62,7 +62,16 @@ fn execute() -> Result<(), Box<dyn Error>> {
     let Some(options) = parse_options()? else {
         return Ok(());
     };
+    let config = configured_resolver(&options)?;
 
+    if options.check_config {
+        print_configuration(&config, options.no_varlink);
+        return Ok(());
+    }
+    run_resolver(config, &options)
+}
+
+fn configured_resolver(options: &Options) -> Result<Config, Box<dyn Error>> {
     let mut config = Config::load(&options.config)?;
     if !options.listeners.is_empty() {
         config.listeners = parse_servers(&options.listeners)?;
@@ -74,11 +83,11 @@ fn execute() -> Result<(), Box<dyn Error>> {
         config.upstreams = parse_servers(&options.upstreams)?;
         config.fallback_upstreams.clear();
     }
-    if let Some(path) = options.varlink {
-        config.varlink_path = path;
+    if let Some(path) = &options.varlink {
+        config.varlink_path = path.clone();
     }
-    if let Some(path) = options.runtime_directory {
-        config.runtime_directory = path;
+    if let Some(path) = &options.runtime_directory {
+        config.runtime_directory = path.clone();
     }
     if let Some(workers) = options.workers {
         config.workers = workers;
@@ -91,11 +100,10 @@ fn execute() -> Result<(), Box<dyn Error>> {
         config.dns_stub_listener = DnsStubListenerMode::No;
     }
     config.validate()?;
+    Ok(config)
+}
 
-    if options.check_config {
-        print_configuration(&config, options.no_varlink);
-        return Ok(());
-    }
+fn run_resolver(config: Config, options: &Options) -> Result<(), Box<dyn Error>> {
     let stub_enabled = config.dns_stub_listener != DnsStubListenerMode::No
         && (!config.listeners.is_empty() || !config.proxy_listeners.is_empty());
     if options.no_varlink && options.no_dbus && !stub_enabled {
@@ -111,52 +119,9 @@ fn execute() -> Result<(), Box<dyn Error>> {
         eprintln!("systemd-resolved: warning: no upstream DNS servers are configured");
     }
 
-    let dbus_thread = if options.no_dbus {
-        None
-    } else {
-        let server = DbusServer::new(Arc::clone(&resolver));
-        Some(
-            thread::Builder::new()
-                .name("resolved-dbus".to_owned())
-                .spawn(move || {
-                    if let Err(error) = server.run() {
-                        eprintln!("systemd-resolved: D-Bus server failed: {error}");
-                        request_stop();
-                    }
-                })?,
-        )
-    };
-
-    let varlink_thread = if options.no_varlink {
-        None
-    } else {
-        let server = VarlinkServer::new(config.varlink_path.clone(), Arc::clone(&resolver))?;
-        Some(
-            thread::Builder::new()
-                .name("resolved-varlink".to_owned())
-                .spawn(move || {
-                    if let Err(error) = server.run() {
-                        eprintln!("systemd-resolved: Varlink server failed: {error}");
-                        request_stop();
-                    }
-                })?,
-        )
-    };
-
-    if stub_enabled {
-        for address in &config.listeners {
-            eprintln!(
-                "systemd-resolved: full stub listening on {address} ({})",
-                config.dns_stub_listener.as_str()
-            );
-        }
-        for address in &config.proxy_listeners {
-            eprintln!(
-                "systemd-resolved: proxy stub listening on {address} ({})",
-                config.dns_stub_listener.as_str()
-            );
-        }
-    }
+    let dbus_thread = spawn_dbus(&resolver, options.no_dbus)?;
+    let varlink_thread = spawn_varlink(&resolver, &config, options.no_varlink)?;
+    log_stub_listeners(&config, stub_enabled);
 
     let result = run_stub(&resolver);
     request_stop();
@@ -169,6 +134,65 @@ fn execute() -> Result<(), Box<dyn Error>> {
     let _ = netlink_thread.join();
     result?;
     Ok(())
+}
+
+fn spawn_dbus(
+    resolver: &Arc<Resolver>,
+    disabled: bool,
+) -> Result<Option<thread::JoinHandle<()>>, Box<dyn Error>> {
+    if disabled {
+        return Ok(None);
+    }
+    let server = DbusServer::new(Arc::clone(resolver));
+    Ok(Some(
+        thread::Builder::new()
+            .name("resolved-dbus".to_owned())
+            .spawn(move || {
+                if let Err(error) = server.run() {
+                    eprintln!("systemd-resolved: D-Bus server failed: {error}");
+                    request_stop();
+                }
+            })?,
+    ))
+}
+
+fn spawn_varlink(
+    resolver: &Arc<Resolver>,
+    config: &Config,
+    disabled: bool,
+) -> Result<Option<thread::JoinHandle<()>>, Box<dyn Error>> {
+    if disabled {
+        return Ok(None);
+    }
+    let server = VarlinkServer::new(config.varlink_path.clone(), Arc::clone(resolver))?;
+    Ok(Some(
+        thread::Builder::new()
+            .name("resolved-varlink".to_owned())
+            .spawn(move || {
+                if let Err(error) = server.run() {
+                    eprintln!("systemd-resolved: Varlink server failed: {error}");
+                    request_stop();
+                }
+            })?,
+    ))
+}
+
+fn log_stub_listeners(config: &Config, enabled: bool) {
+    if !enabled {
+        return;
+    }
+    for address in &config.listeners {
+        eprintln!(
+            "systemd-resolved: full stub listening on {address} ({})",
+            config.dns_stub_listener.as_str()
+        );
+    }
+    for address in &config.proxy_listeners {
+        eprintln!(
+            "systemd-resolved: proxy stub listening on {address} ({})",
+            config.dns_stub_listener.as_str()
+        );
+    }
 }
 
 fn parse_servers(values: &[String]) -> Result<Vec<SocketAddr>, Box<dyn Error>> {
