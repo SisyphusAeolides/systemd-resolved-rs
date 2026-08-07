@@ -54,8 +54,10 @@
             match self.inflight.begin(inflight_key.clone()) {
                 InflightRole::Leader(transaction_leader) => {
                     let result = match self.query_scopes(&scopes, query) {
-                        Ok(response) => {
-                            if self.config.cache {
+                        Ok((response, server)) => {
+                            if self.config.cache
+                                && (self.config.cache_from_localhost || !server.ip().is_loopback())
+                            {
                                 let _ = self.cache.insert(key.clone(), &response);
                             }
                             Ok(response)
