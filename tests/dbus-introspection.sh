@@ -27,6 +27,15 @@ daemon_pid=$!
 cleanup() {
     status=$?
     kill -TERM "$daemon_pid" 2>/dev/null || true
+    for _ in {1..50}; do
+        if ! kill -0 "$daemon_pid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    if kill -0 "$daemon_pid" 2>/dev/null; then
+        kill -KILL "$daemon_pid" 2>/dev/null || true
+    fi
     wait "$daemon_pid" 2>/dev/null || true
     if (( status != 0 )); then
         cat "$WORK/daemon.log"
