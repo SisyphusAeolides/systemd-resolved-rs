@@ -16,7 +16,9 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
+#[cfg(test)]
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::mpsc;
