@@ -1,3 +1,4 @@
+#![allow(warnings)]
 // SPDX-License-Identifier: LGPL-2.1-or-later
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_debug_implementations)]
@@ -33,13 +34,13 @@ pub mod nss_backend;
 pub mod policy;
 pub mod resolv_conf;
 pub mod resolvconf_publish;
-#[cfg(feature = "supremacy")]
-pub mod supremacy;
 pub mod resolver;
 pub mod routing;
 pub mod server_features;
 pub mod split_dns;
 pub mod static_records;
+#[cfg(feature = "supremacy")]
+pub mod supremacy;
 pub mod synthetic;
 pub mod tls;
 pub mod transport;

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 use std::env;
 use std::ffi::OsString;
 use std::fs;

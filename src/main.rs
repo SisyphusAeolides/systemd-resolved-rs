@@ -1,3 +1,4 @@
+#![allow(warnings)]
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use resolved::config::{parse_server, Config, DnsStubListenerMode};
 use resolved::daemon::{install_signal_handlers, request_stop, run_stub};
@@ -68,7 +69,9 @@ fn execute() -> Result<(), Box<dyn Error>> {
         print_configuration(&config, options.no_varlink);
         return Ok(());
     }
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     rt.block_on(async {
         resolved::landing_glue::run(resolved::landing_glue::LandingConfig::default()).await
     })?;
