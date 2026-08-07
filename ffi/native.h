@@ -19,6 +19,8 @@ typedef struct resolved_link_info {
     char ifname[RESOLVED_IFNAME_MAX];
 } resolved_link_info;
 
+typedef struct resolved_tls_stream resolved_tls_stream;
+
 int resolved_notify(const char *state);
 int resolved_listen_fds(void);
 int resolved_install_signal_handlers(void);
@@ -45,6 +47,21 @@ uint16_t resolved_dns_udp_payload_size(
     int fragmented,
     uint32_t received_udp_fragment_max
 );
+
+int resolved_tls_connect(
+    const char *address,
+    uint16_t port,
+    uint32_t scope_id,
+    int ifindex,
+    const char *server_name,
+    int strict,
+    uint32_t timeout_msec,
+    resolved_tls_stream **ret
+);
+int resolved_tls_set_timeout(resolved_tls_stream *stream, uint32_t timeout_msec);
+int64_t resolved_tls_read(resolved_tls_stream *stream, void *buffer, size_t capacity);
+int64_t resolved_tls_write(resolved_tls_stream *stream, const void *buffer, size_t length);
+void resolved_tls_free(resolved_tls_stream *stream);
 
 int64_t resolved_link_snapshot(resolved_link_info *entries, size_t capacity);
 int resolved_rtnl_open(void);
