@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use crate::wire::{age_ttls, cache_lifetime, rewrite_id, Header, WireError};
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -15,7 +15,7 @@ pub struct CacheKey {
 
 #[derive(Clone, Debug)]
 struct Entry {
-    packet: Vec<u8>,
+    packet: Arc<Vec<u8>>,
     inserted: Instant,
     expires: Instant,
     stale_until: Instant,
@@ -57,20 +57,35 @@ impl Cache {
 
     pub fn get(&self, key: &CacheKey, id: u16, allow_stale: bool) -> Option<Vec<u8>> {
         let now = Instant::now();
-        let mut state = self.state();
-        let entry = state.entries.get(key)?;
-        let is_stale = now >= entry.expires;
-        if is_stale && (!allow_stale || now >= entry.stale_until) {
-            state.entries.remove(key);
-            return None;
-        }
+        let (packet, inserted, is_stale, generation) = {
+            let mut state = self.state();
+            let entry = state.entries.get(key)?;
+            let is_stale = now >= entry.expires;
+            if is_stale && (!allow_stale || now >= entry.stale_until) {
+                state.entries.remove(key);
+                return None;
+            }
+            (
+                Arc::clone(&entry.packet),
+                entry.inserted,
+                is_stale,
+                entry.generation,
+            )
+        };
 
-        let elapsed = now.saturating_duration_since(entry.inserted).as_secs();
+        let elapsed = now.saturating_duration_since(inserted).as_secs();
         let elapsed = u32::try_from(elapsed).unwrap_or(u32::MAX);
-        let mut packet = entry.packet.clone();
+        let mut packet = (*packet).clone();
         if rewrite_id(&mut packet, id).is_err() || age_ttls(&mut packet, elapsed, is_stale).is_err()
         {
-            state.entries.remove(key);
+            let mut state = self.state();
+            if state
+                .entries
+                .get(key)
+                .is_some_and(|entry| entry.generation == generation)
+            {
+                state.entries.remove(key);
+            }
             return None;
         }
         Some(packet)
@@ -101,7 +116,7 @@ impl Cache {
         state.entries.insert(
             key,
             Entry {
-                packet,
+                packet: Arc::new(packet),
                 inserted: now,
                 expires,
                 stale_until,
@@ -161,6 +176,31 @@ mod tests {
         assert!(cache.insert(key(), &response).expect("cache insert"));
         let hit = cache.get(&key(), 99, false).expect("cache hit");
         assert_eq!(&hit[..2], &99u16.to_be_bytes());
+    }
+
+    #[test]
+    fn concurrent_hits_keep_transaction_ids_isolated() {
+        let cache = std::sync::Arc::new(Cache::new(
+            16,
+            Duration::from_secs(60),
+            Duration::ZERO,
+        ));
+        let query = make_query("example", TYPE_A, 7).expect("query");
+        let response = local_response(&query, &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))], 30)
+            .expect("response");
+        assert!(cache.insert(key(), &response).expect("cache insert"));
+
+        let mut workers = Vec::new();
+        for id in 100u16..116 {
+            let cache = std::sync::Arc::clone(&cache);
+            workers.push(std::thread::spawn(move || {
+                let hit = cache.get(&key(), id, false).expect("cache hit");
+                assert_eq!(&hit[..2], &id.to_be_bytes());
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("cache worker");
+        }
     }
 
     #[test]
