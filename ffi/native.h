@@ -63,6 +63,14 @@ int64_t resolved_tls_read(resolved_tls_stream *stream, void *buffer, size_t capa
 int64_t resolved_tls_write(resolved_tls_stream *stream, const void *buffer, size_t length);
 void resolved_tls_free(resolved_tls_stream *stream);
 
+int resolved_dnssec_digest(
+    uint8_t digest_type,
+    const void *data,
+    size_t length,
+    uint8_t *output,
+    size_t capacity
+);
+
 int64_t resolved_link_snapshot(resolved_link_info *entries, size_t capacity);
 int resolved_rtnl_open(void);
 int resolved_rtnl_wait(int fd, uint32_t timeout_msec);
