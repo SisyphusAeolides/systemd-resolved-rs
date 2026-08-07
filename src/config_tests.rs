@@ -31,6 +31,7 @@ mod tests {
         let config = Config::default();
         assert!(config.cache);
         assert!(config.cache_negative);
+        assert!(!config.cache_from_localhost);
         assert_eq!(config.cache_size, 4096);
         assert_eq!(config.cache_max_ttl, Duration::from_secs(2 * 60 * 60));
     }
@@ -66,6 +67,15 @@ mod tests {
             .expect("configuration");
         assert!(config.cache);
         assert!(!config.cache_negative);
+    }
+
+    #[test]
+    fn parses_cache_from_localhost() {
+        let mut config = Config::default();
+        config
+            .apply_text("[Resolve]\nCacheFromLocalhost=yes\n")
+            .expect("configuration");
+        assert!(config.cache_from_localhost);
     }
 
     #[test]
