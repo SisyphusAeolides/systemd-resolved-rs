@@ -121,6 +121,7 @@ pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
         QueryMode::Full,
         stub_mode.udp_enabled(),
         stub_mode.tcp_enabled(),
+        true,
         &mut udp_endpoints,
         &mut tcp_endpoints,
     )?;
@@ -129,6 +130,7 @@ pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
         QueryMode::Proxy,
         stub_mode.udp_enabled(),
         stub_mode.tcp_enabled(),
+        true,
         &mut udp_endpoints,
         &mut tcp_endpoints,
     )?;
@@ -138,6 +140,7 @@ pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
             QueryMode::Full,
             listener.udp_enabled(),
             listener.tcp_enabled(),
+            false,
             &mut udp_endpoints,
             &mut tcp_endpoints,
         )?;
@@ -204,26 +207,39 @@ fn bind_endpoints(
     mode: QueryMode,
     udp_enabled: bool,
     tcp_enabled: bool,
+    ignore_addr_in_use: bool,
     udp_endpoints: &mut Vec<UdpEndpoint>,
     tcp_endpoints: &mut Vec<TcpEndpoint>,
 ) -> io::Result<()> {
     for &address in addresses {
         if udp_enabled {
-            let udp = UdpSocket::bind(address)?;
-            udp.set_read_timeout(Some(Duration::from_millis(250)))?;
-            udp_endpoints.push(UdpEndpoint {
-                socket: Arc::new(udp),
-                mode,
-            });
+            match UdpSocket::bind(address) {
+                Ok(udp) => {
+                    udp.set_read_timeout(Some(Duration::from_millis(250)))?;
+                    udp_endpoints.push(UdpEndpoint {
+                        socket: Arc::new(udp),
+                        mode,
+                    });
+                }
+                Err(error)
+                    if ignore_addr_in_use && error.kind() == io::ErrorKind::AddrInUse => {}
+                Err(error) => return Err(error),
+            }
         }
 
         if tcp_enabled {
-            let tcp = TcpListener::bind(address)?;
-            tcp.set_nonblocking(true)?;
-            tcp_endpoints.push(TcpEndpoint {
-                listener: tcp,
-                mode,
-            });
+            match TcpListener::bind(address) {
+                Ok(tcp) => {
+                    tcp.set_nonblocking(true)?;
+                    tcp_endpoints.push(TcpEndpoint {
+                        listener: tcp,
+                        mode,
+                    });
+                }
+                Err(error)
+                    if ignore_addr_in_use && error.kind() == io::ErrorKind::AddrInUse => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(())
@@ -406,6 +422,68 @@ mod tests {
         let dispatcher = UdpDispatcher::new(vec![first_sender, second_sender]);
 
         assert!(!dispatcher.dispatch(test_udp_job(&socket)));
+    }
+
+    #[test]
+    fn occupied_primary_udp_socket_is_ignored() {
+        let occupied = UdpSocket::bind("127.0.0.1:0").expect("occupy UDP address");
+        let address = occupied.local_addr().expect("occupied UDP address");
+        let mut udp_endpoints = Vec::new();
+        let mut tcp_endpoints = Vec::new();
+        bind_endpoints(
+            &[address],
+            QueryMode::Full,
+            true,
+            false,
+            true,
+            &mut udp_endpoints,
+            &mut tcp_endpoints,
+        )
+        .expect("ignore occupied primary UDP socket");
+        assert!(udp_endpoints.is_empty());
+
+        let error = bind_endpoints(
+            &[address],
+            QueryMode::Full,
+            true,
+            false,
+            false,
+            &mut udp_endpoints,
+            &mut tcp_endpoints,
+        )
+        .expect_err("explicit occupied UDP socket must fail");
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn occupied_primary_tcp_socket_is_ignored() {
+        let occupied = TcpListener::bind("127.0.0.1:0").expect("occupy TCP address");
+        let address = occupied.local_addr().expect("occupied TCP address");
+        let mut udp_endpoints = Vec::new();
+        let mut tcp_endpoints = Vec::new();
+        bind_endpoints(
+            &[address],
+            QueryMode::Full,
+            false,
+            true,
+            true,
+            &mut udp_endpoints,
+            &mut tcp_endpoints,
+        )
+        .expect("ignore occupied primary TCP socket");
+        assert!(tcp_endpoints.is_empty());
+
+        let error = bind_endpoints(
+            &[address],
+            QueryMode::Full,
+            false,
+            true,
+            false,
+            &mut udp_endpoints,
+            &mut tcp_endpoints,
+        )
+        .expect_err("explicit occupied TCP socket must fail");
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
     }
 
     #[test]
