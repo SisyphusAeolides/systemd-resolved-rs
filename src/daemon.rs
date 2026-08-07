@@ -4,13 +4,14 @@ use crate::resolver::{QueryMode, Resolver};
 use std::env;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const MAX_UDP_PACKET: usize = 65_535;
+const UDP_QUEUE_PER_WORKER: usize = 256;
 static LOCAL_STOP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
@@ -31,6 +32,43 @@ struct UdpEndpoint {
 struct TcpEndpoint {
     listener: TcpListener,
     mode: QueryMode,
+}
+
+#[derive(Debug)]
+struct UdpDispatcher {
+    senders: Vec<SyncSender<UdpJob>>,
+    next: AtomicUsize,
+}
+
+impl UdpDispatcher {
+    fn new(senders: Vec<SyncSender<UdpJob>>) -> Self {
+        Self {
+            senders,
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    fn dispatch(&self, mut job: UdpJob) -> bool {
+        if self.senders.is_empty() {
+            return false;
+        }
+
+        let start = self.next.fetch_add(1, Ordering::Relaxed) % self.senders.len();
+        let mut connected = false;
+        for offset in 0..self.senders.len() {
+            let index = (start + offset) % self.senders.len();
+            match self.senders[index].try_send(job) {
+                Ok(()) => return true,
+                Err(TrySendError::Full(returned)) => {
+                    connected = true;
+                    job = returned;
+                }
+                Err(TrySendError::Disconnected(returned)) => job = returned,
+            }
+        }
+
+        connected
+    }
 }
 
 #[derive(Debug)]
@@ -96,25 +134,26 @@ pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
     )?;
 
     let workers = resolver.config().workers;
-    let (sender, receiver) = mpsc::sync_channel::<UdpJob>(workers.saturating_mul(256).max(256));
-    let receiver = Arc::new(Mutex::new(receiver));
+    let mut senders = Vec::with_capacity(workers);
     let mut threads = Vec::new();
-
     for index in 0..workers {
+        let (sender, receiver) = mpsc::sync_channel::<UdpJob>(UDP_QUEUE_PER_WORKER);
+        senders.push(sender);
         let resolver = Arc::clone(resolver);
-        let receiver = Arc::clone(&receiver);
         threads.push(
             thread::Builder::new()
                 .name(format!("resolved-udp-worker-{index}"))
-                .spawn(move || udp_worker(&resolver, &receiver))?,
+                .spawn(move || udp_worker(&resolver, receiver))?,
         );
     }
+    let dispatcher = Arc::new(UdpDispatcher::new(senders));
+
     for (index, endpoint) in udp_endpoints.into_iter().enumerate() {
-        let sender = sender.clone();
+        let dispatcher = Arc::clone(&dispatcher);
         threads.push(
             thread::Builder::new()
                 .name(format!("resolved-udp-listener-{index}"))
-                .spawn(move || udp_listener(&endpoint, &sender))?,
+                .spawn(move || udp_listener(&endpoint, &dispatcher))?,
         );
     }
     for (index, endpoint) in tcp_endpoints.into_iter().enumerate() {
@@ -145,7 +184,7 @@ pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
         thread::sleep(sleep_duration);
     }
     let _ = native::notify("STOPPING=1\nSTATUS=Shutting down");
-    drop(sender);
+    drop(dispatcher);
     join_all(threads);
     Ok(())
 }
@@ -180,7 +219,7 @@ fn bind_endpoints(
     Ok(())
 }
 
-fn udp_listener(endpoint: &UdpEndpoint, sender: &SyncSender<UdpJob>) {
+fn udp_listener(endpoint: &UdpEndpoint, dispatcher: &UdpDispatcher) {
     let mut buffer = vec![0; MAX_UDP_PACKET];
     while !stop_requested() {
         match endpoint.socket.recv_from(&mut buffer) {
@@ -191,9 +230,8 @@ fn udp_listener(endpoint: &UdpEndpoint, sender: &SyncSender<UdpJob>) {
                     peer,
                     mode: endpoint.mode,
                 };
-                match sender.try_send(job) {
-                    Ok(()) | Err(TrySendError::Full(_)) => {}
-                    Err(TrySendError::Disconnected(_)) => break,
+                if !dispatcher.dispatch(job) {
+                    break;
                 }
             }
             Err(error)
@@ -211,13 +249,9 @@ fn udp_listener(endpoint: &UdpEndpoint, sender: &SyncSender<UdpJob>) {
     }
 }
 
-fn udp_worker(resolver: &Resolver, receiver: &Mutex<Receiver<UdpJob>>) {
+fn udp_worker(resolver: &Resolver, receiver: Receiver<UdpJob>) {
     while !stop_requested() {
-        let result = receiver
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .recv_timeout(Duration::from_millis(250));
-        let job = match result {
+        let job = match receiver.recv_timeout(Duration::from_millis(250)) {
             Ok(job) => job,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
@@ -329,6 +363,40 @@ fn join_all(threads: Vec<JoinHandle<()>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_udp_job(socket: &Arc<UdpSocket>) -> UdpJob {
+        UdpJob {
+            socket: Arc::clone(socket),
+            packet: vec![0; 12],
+            peer: socket.local_addr().expect("test UDP address"),
+            mode: QueryMode::Full,
+        }
+    }
+
+    #[test]
+    fn udp_dispatcher_spreads_jobs_across_worker_queues() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").expect("bind test UDP socket"));
+        let (first_sender, first_receiver) = mpsc::sync_channel(1);
+        let (second_sender, second_receiver) = mpsc::sync_channel(1);
+        let dispatcher = UdpDispatcher::new(vec![first_sender, second_sender]);
+
+        assert!(dispatcher.dispatch(test_udp_job(&socket)));
+        assert!(dispatcher.dispatch(test_udp_job(&socket)));
+        assert!(first_receiver.try_recv().is_ok());
+        assert!(second_receiver.try_recv().is_ok());
+    }
+
+    #[test]
+    fn udp_dispatcher_detects_when_all_workers_disconnect() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").expect("bind test UDP socket"));
+        let (first_sender, first_receiver) = mpsc::sync_channel(1);
+        let (second_sender, second_receiver) = mpsc::sync_channel(1);
+        drop(first_receiver);
+        drop(second_receiver);
+        let dispatcher = UdpDispatcher::new(vec![first_sender, second_sender]);
+
+        assert!(!dispatcher.dispatch(test_udp_job(&socket)));
+    }
 
     #[test]
     fn watchdog_uses_half_the_configured_period() {
