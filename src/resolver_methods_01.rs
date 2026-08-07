@@ -22,6 +22,7 @@ impl Resolver {
             fallback_servers,
             states: Mutex::new(states),
             udp_sockets: Mutex::new(HashMap::new()),
+            tcp_streams: Mutex::new(HashMap::new()),
             routing: RwLock::new(RoutingTable::default()),
             routing_generation: AtomicU64::new(1),
             inflight: Inflight::default(),
