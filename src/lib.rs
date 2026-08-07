@@ -35,6 +35,7 @@ pub mod policy;
 pub mod resolv_conf;
 pub mod resolvconf_publish;
 pub mod resolver;
+pub mod resolvectl_dbus;
 pub mod routing;
 pub mod server_features;
 pub mod split_dns;
