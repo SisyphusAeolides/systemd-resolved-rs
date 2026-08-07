@@ -59,7 +59,9 @@ mod test_14_root_rrsig_detection {
         );
 
         let mut states = resolver.states();
-        let state = states.get_mut(&server_address).expect("server state");
+        let state = states
+            .get_mut(&ServerKey::new(ScopeKind::Global, server_address))
+            .expect("server state");
         assert!(state.missing_root_rrsig);
         assert_eq!(
             state
@@ -112,7 +114,7 @@ mod test_14_root_rrsig_detection {
         assert!(matches!(error, ResolveError::Protocol(_)));
         assert!(resolver
             .states()
-            .get(&server_address)
+            .get(&ServerKey::new(ScopeKind::Global, server_address))
             .expect("server state")
             .missing_root_rrsig);
         server.join().expect("mock DNS thread");
