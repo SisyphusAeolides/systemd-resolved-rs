@@ -1,52 +1,88 @@
 impl Resolver {
+    fn take_udp_socket(&self, server: SocketAddr) -> Result<UdpSocket, ResolveError> {
+        let pooled = {
+            let mut sockets = self
+                .udp_sockets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            sockets.get_mut(&server).and_then(Vec::pop)
+        };
+
+        let socket = if let Some(socket) = pooled {
+            socket
+        } else {
+            let bind_address = if server.is_ipv4() {
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+            } else {
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
+            };
+            let socket = UdpSocket::bind(bind_address)?;
+            socket.connect(server)?;
+            let _ = native::enable_udp_fragment_size(socket.as_raw_fd(), server.is_ipv6());
+            socket
+        };
+
+        socket.set_read_timeout(Some(self.config.query_timeout))?;
+        socket.set_write_timeout(Some(self.config.query_timeout))?;
+        Ok(socket)
+    }
+
+    fn recycle_udp_socket(&self, server: SocketAddr, socket: UdpSocket) {
+        let mut sockets = self
+            .udp_sockets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pool = sockets.entry(server).or_default();
+        if pool.len() < UDP_POOL_PER_SERVER_MAX {
+            pool.push(socket);
+        }
+    }
+
     fn exchange_udp(
         &self,
         server: SocketAddr,
         query: &[u8],
     ) -> Result<(Vec<u8>, u32), ResolveError> {
-        let bind_address = if server.is_ipv4() {
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
-        } else {
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
-        };
-        let socket = UdpSocket::bind(bind_address)?;
-        socket.set_read_timeout(Some(self.config.query_timeout))?;
-        socket.set_write_timeout(Some(self.config.query_timeout))?;
-        socket.connect(server)?;
-        let _ = native::enable_udp_fragment_size(socket.as_raw_fd(), server.is_ipv6());
-        if socket.send(query)? != query.len() {
-            return Err(ResolveError::Protocol("short UDP send"));
-        }
+        let socket = self.take_udp_socket(server)?;
+        let result = (|| {
+            if socket.send(query)? != query.len() {
+                return Err(ResolveError::Protocol("short UDP send"));
+            }
 
-        let started = Instant::now();
-        let mut response = vec![0; usize::from(u16::MAX)];
-        loop {
-            let Some(remaining) = self.config.query_timeout.checked_sub(started.elapsed()) else {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "DNS UDP query timed out").into());
-            };
-            if remaining.is_zero() {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "DNS UDP query timed out").into());
+            let started = Instant::now();
+            let mut response = vec![0; usize::from(u16::MAX)];
+            loop {
+                let Some(remaining) = self.config.query_timeout.checked_sub(started.elapsed()) else {
+                    return Err(
+                        io::Error::new(io::ErrorKind::TimedOut, "DNS UDP query timed out").into(),
+                    );
+                };
+                if remaining.is_zero() {
+                    return Err(
+                        io::Error::new(io::ErrorKind::TimedOut, "DNS UDP query timed out").into(),
+                    );
+                }
+                socket.set_read_timeout(Some(remaining))?;
+                let (length, fragment_size) = native::udp_recv(socket.as_raw_fd(), &mut response)?;
+                if response_matches(query, &response[..length]).is_err() {
+                    continue;
+                }
+                response.truncate(length);
+                return Ok((response, fragment_size));
             }
-            socket.set_read_timeout(Some(remaining))?;
-            let (length, fragment_size) = native::udp_recv(socket.as_raw_fd(), &mut response)?;
-            if response_matches(query, &response[..length]).is_err() {
-                continue;
-            }
-            response.truncate(length);
-            return Ok((response, fragment_size));
+        })();
+
+        if result.is_ok() {
+            self.recycle_udp_socket(server, socket);
         }
+        result
     }
 
-    #[allow(clippy::unused_self)]
     fn udp_path_mtu(&self, server: SocketAddr) -> Option<u32> {
-        let bind_address = if server.is_ipv4() {
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
-        } else {
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
-        };
-        let socket = UdpSocket::bind(bind_address).ok()?;
-        socket.connect(server).ok()?;
-        native::udp_path_mtu(socket.as_raw_fd(), server.is_ipv6()).ok()
+        let socket = self.take_udp_socket(server).ok()?;
+        let result = native::udp_path_mtu(socket.as_raw_fd(), server.is_ipv6()).ok();
+        self.recycle_udp_socket(server, socket);
+        result
     }
 
     fn exchange_tcp(&self, server: SocketAddr, query: &[u8]) -> Result<Vec<u8>, ResolveError> {
