@@ -36,7 +36,7 @@ pub struct Cache {
     capacity: usize,
     maximum_ttl: Duration,
     stale_retention: Duration,
-    cache_negative: bool,
+    store_negative: bool,
 }
 
 impl Cache {
@@ -44,7 +44,7 @@ impl Cache {
         capacity: usize,
         maximum_ttl: Duration,
         stale_retention: Duration,
-        cache_negative: bool,
+        store_negative: bool,
     ) -> Self {
         Self {
             state: Mutex::new(State {
@@ -54,7 +54,7 @@ impl Cache {
             capacity,
             maximum_ttl,
             stale_retention,
-            cache_negative,
+            store_negative,
         }
     }
 
@@ -108,7 +108,7 @@ impl Cache {
 
         let rcode = header.response_code();
         let negative = rcode != 0 || header.answer_count == 0;
-        if negative && !self.cache_negative {
+        if negative && !self.store_negative {
             return Ok(false);
         }
 
