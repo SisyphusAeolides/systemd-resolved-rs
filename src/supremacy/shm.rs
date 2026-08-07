@@ -296,7 +296,7 @@ impl ShmPublisher {
             // for the duration of this copy.
             let bytes = unsafe {
                 std::slice::from_raw_parts(
-                    std::ptr::from_ref(address).cast::<u8>(),
+                    (address as *const ShmAddr).cast::<u8>(),
                     std::mem::size_of::<ShmAddr>(),
                 )
             };
@@ -396,10 +396,10 @@ pub fn hash_key(owner: &[u8], qtype: u16, qclass: u16) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for &byte in owner {
         hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash ^= u64::from(qtype) << 16;
-    hash = hash.wrapping_mul(0x1000_0000_01b3);
+    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     hash ^= u64::from(qclass);
     hash ^= hash >> 33;
     hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
@@ -485,7 +485,7 @@ impl ShmReader {
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         bytes.as_ptr(),
-                        std::ptr::from_mut(&mut address).cast::<u8>(),
+                        (&mut address as *mut ShmAddr).cast::<u8>(),
                         std::mem::size_of::<ShmAddr>(),
                     );
                 }
@@ -645,7 +645,7 @@ fn write_bucket_metadata(pointer: *mut ShmBucket, metadata: &ShmBucket) {
     // generation field itself.
     unsafe {
         let destination = pointer.cast::<u8>().add(std::mem::size_of::<u64>());
-        let source = std::ptr::from_ref(metadata)
+        let source = (metadata as *const ShmBucket)
             .cast::<u8>()
             .add(std::mem::size_of::<u64>());
         std::ptr::copy_nonoverlapping(
@@ -737,7 +737,7 @@ mod tests {
     fn arena_wrap_invalidates_old_buckets() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cache");
-        let mut publisher = ShmPublisher::create_at(&path, 8, 64).unwrap();
+        let mut publisher = ShmPublisher::create_at(&path, 8, 63).unwrap();
         let first_owner = owner();
         let second_owner = vec![6, b's', b'e', b'c', b'o', b'n', b'd', 0];
         let address = [ShmAddr::from_ip("192.0.2.1".parse().unwrap(), 0).unwrap()];
