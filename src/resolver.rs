@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 include!("resolver_prelude.rs");
 include!("resolver_methods_01.rs");
+include!("resolver_link_specs.rs");
 include!("resolver_methods_02.rs");
 include!("resolver_methods_03.rs");
 include!("resolver_methods_04.rs");
