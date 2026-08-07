@@ -4,6 +4,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_fallback_dns_matches_pinned_upstream_order() {
+        let config = Config::default();
+        let expected: Vec<SocketAddr> = [
+            "1.1.1.1:53",
+            "8.8.8.8:53",
+            "9.9.9.9:53",
+            "1.0.0.1:53",
+            "8.8.4.4:53",
+            "149.112.112.112:53",
+            "[2606:4700:4700::1111]:53",
+            "[2001:4860:4860::8888]:53",
+            "[2620:fe::fe]:53",
+            "[2606:4700:4700::1001]:53",
+            "[2001:4860:4860::8844]:53",
+            "[2620:fe::9]:53",
+        ]
+        .into_iter()
+        .map(|server| server.parse().expect("fallback server"))
+        .collect();
+        assert_eq!(config.fallback_upstreams, expected);
+    }
+
+    #[test]
     fn parses_core_resolved_settings() {
         let mut config = Config::default();
         config
