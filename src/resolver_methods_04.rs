@@ -101,11 +101,7 @@ impl Resolver {
         result
     }
 
-    fn new_tcp_stream(
-        &self,
-        server: SocketAddr,
-        timeout: Duration,
-    ) -> Result<TcpStream, ResolveError> {
+    fn new_tcp_stream(server: SocketAddr, timeout: Duration) -> Result<TcpStream, ResolveError> {
         let stream = TcpStream::connect_timeout(&server, timeout)?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
@@ -127,7 +123,7 @@ impl Resolver {
         let reused = pooled.is_some();
         let stream = match pooled {
             Some(stream) => stream,
-            None => self.new_tcp_stream(server, timeout)?,
+            None => Self::new_tcp_stream(server, timeout)?,
         };
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
@@ -190,7 +186,7 @@ impl Resolver {
         if timeout.is_zero() {
             return result;
         }
-        let mut fresh = self.new_tcp_stream(server, timeout)?;
+        let mut fresh = Self::new_tcp_stream(server, timeout)?;
         let result = Self::exchange_tcp_stream(&mut fresh, query);
         if result.is_ok() {
             self.recycle_tcp_stream(server, fresh);
