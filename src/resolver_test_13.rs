@@ -184,7 +184,9 @@ mod test_13_transport_fallback {
         );
 
         let states = resolver.states();
-        let state = states.get(&server_address).expect("server state");
+        let state = states
+            .get(&ServerKey::new(ScopeKind::Global, server_address))
+            .expect("server state");
         assert_eq!(state.transport.mode(), TransportMode::Udp);
         assert!(state.transport.packet_truncated());
         drop(states);
@@ -258,7 +260,7 @@ mod test_13_transport_fallback {
         let states = resolver.states();
         assert_eq!(
             states
-                .get(&server_address)
+                .get(&ServerKey::new(ScopeKind::Global, server_address))
                 .expect("server state")
                 .transport
                 .mode(),
