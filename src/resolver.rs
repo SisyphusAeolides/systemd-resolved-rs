@@ -4,6 +4,7 @@ include!("resolver_methods_01.rs");
 include!("resolver_link_specs.rs");
 include!("resolver_methods_02.rs");
 include!("resolver_methods_03.rs");
+include!("resolver_server_identity.rs");
 include!("resolver_methods_04.rs");
 include!("resolver_edns.rs");
 include!("resolver_methods_05.rs");
