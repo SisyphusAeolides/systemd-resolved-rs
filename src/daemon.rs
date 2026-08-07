@@ -132,6 +132,16 @@ pub fn run_stub(resolver: &Arc<Resolver>) -> io::Result<()> {
         &mut udp_endpoints,
         &mut tcp_endpoints,
     )?;
+    for listener in &resolver.config().dns_stub_listener_extra {
+        bind_endpoints(
+            &[listener.address()],
+            QueryMode::Full,
+            listener.udp_enabled(),
+            listener.tcp_enabled(),
+            &mut udp_endpoints,
+            &mut tcp_endpoints,
+        )?;
+    }
 
     let workers = resolver.config().workers;
     let mut senders = Vec::with_capacity(workers);
