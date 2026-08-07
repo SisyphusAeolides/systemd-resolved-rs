@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <ifaddrs.h>
 #include <limits.h>
-#include <linux/if.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <net/if.h>
@@ -15,39 +14,87 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 _Static_assert(IF_NAMESIZE == RESOLVED_IFNAME_MAX, "interface name ABI size mismatch");
 
+enum {
+    RESOLVED_IF_OPER_UNKNOWN = 0,
+    RESOLVED_IF_OPER_NOTPRESENT = 1,
+    RESOLVED_IF_OPER_DOWN = 2,
+    RESOLVED_IF_OPER_LOWERLAYERDOWN = 3,
+    RESOLVED_IF_OPER_TESTING = 4,
+    RESOLVED_IF_OPER_DORMANT = 5,
+    RESOLVED_IF_OPER_UP = 6,
+};
+
+static int sysfs_path(char *buffer, size_t capacity, const char *ifname, const char *property) {
+    int length;
+
+    length = snprintf(buffer, capacity, "/sys/class/net/%s/%s", ifname, property);
+    if (length < 0 || (size_t)length >= capacity) {
+        return -ENAMETOOLONG;
+    }
+    return 0;
+}
+
+static uint32_t read_u32_property(const char *ifname, const char *property, int base) {
+    char path[PATH_MAX];
+    char text[64];
+    char *end = NULL;
+    unsigned long value;
+    FILE *file;
+
+    if (sysfs_path(path, sizeof(path), ifname, property) < 0) {
+        return 0;
+    }
+    file = fopen(path, "re");
+    if (file == NULL) {
+        return 0;
+    }
+    if (fgets(text, sizeof(text), file) == NULL) {
+        (void)fclose(file);
+        return 0;
+    }
+    (void)fclose(file);
+
+    errno = 0;
+    value = strtoul(text, &end, base);
+    if (errno != 0 || end == text || value > UINT32_MAX) {
+        return 0;
+    }
+    return (uint32_t)value;
+}
+
 static uint8_t read_operstate(const char *ifname) {
     char path[PATH_MAX];
     char state[32];
     FILE *file;
 
-    if (snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", ifname) < 0) {
-        return IF_OPER_UNKNOWN;
+    if (sysfs_path(path, sizeof(path), ifname, "operstate") < 0) {
+        return RESOLVED_IF_OPER_UNKNOWN;
     }
     file = fopen(path, "re");
     if (file == NULL) {
-        return IF_OPER_UNKNOWN;
+        return RESOLVED_IF_OPER_UNKNOWN;
     }
     if (fgets(state, sizeof(state), file) == NULL) {
         (void)fclose(file);
-        return IF_OPER_UNKNOWN;
+        return RESOLVED_IF_OPER_UNKNOWN;
     }
     (void)fclose(file);
 
-    if (strncmp(state, "notpresent", 10) == 0) return IF_OPER_NOTPRESENT;
-    if (strncmp(state, "down", 4) == 0) return IF_OPER_DOWN;
-    if (strncmp(state, "lowerlayerdown", 14) == 0) return IF_OPER_LOWERLAYERDOWN;
-    if (strncmp(state, "testing", 7) == 0) return IF_OPER_TESTING;
-    if (strncmp(state, "dormant", 7) == 0) return IF_OPER_DORMANT;
-    if (strncmp(state, "up", 2) == 0) return IF_OPER_UP;
-    return IF_OPER_UNKNOWN;
+    if (strncmp(state, "notpresent", 10) == 0) return RESOLVED_IF_OPER_NOTPRESENT;
+    if (strncmp(state, "down", 4) == 0) return RESOLVED_IF_OPER_DOWN;
+    if (strncmp(state, "lowerlayerdown", 14) == 0) return RESOLVED_IF_OPER_LOWERLAYERDOWN;
+    if (strncmp(state, "testing", 7) == 0) return RESOLVED_IF_OPER_TESTING;
+    if (strncmp(state, "dormant", 7) == 0) return RESOLVED_IF_OPER_DORMANT;
+    if (strncmp(state, "up", 2) == 0) return RESOLVED_IF_OPER_UP;
+    return RESOLVED_IF_OPER_UNKNOWN;
 }
 
 static int find_snapshot(resolved_link_info *entries, size_t length, unsigned int ifindex) {
@@ -125,7 +172,6 @@ int64_t resolved_link_snapshot(resolved_link_info *entries, size_t capacity) {
     struct if_nameindex *interface;
     size_t count = 0;
     size_t filled = 0;
-    int ioctl_fd = -1;
 
     if (entries == NULL && capacity != 0) {
         return -EINVAL;
@@ -144,36 +190,18 @@ int64_t resolved_link_snapshot(resolved_link_info *entries, size_t capacity) {
     }
 
     memset(entries, 0, capacity * sizeof(*entries));
-    ioctl_fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (ioctl_fd < 0) {
-        const int error = errno;
-        if_freenameindex(interfaces);
-        return -error;
-    }
-
     for (interface = interfaces;
          interface->if_index != 0U && interface->if_name != NULL && filled < capacity;
          interface++, filled++) {
-        struct ifreq request;
         resolved_link_info *snapshot = &entries[filled];
 
-        memset(&request, 0, sizeof(request));
         snapshot->ifindex = (int32_t)interface->if_index;
         (void)snprintf(snapshot->ifname, sizeof(snapshot->ifname), "%s", interface->if_name);
-        (void)snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", interface->if_name);
-        if (ioctl(ioctl_fd, SIOCGIFFLAGS, &request) >= 0) {
-            snapshot->flags = (uint32_t)(unsigned short)request.ifr_flags;
-        }
-
-        memset(&request, 0, sizeof(request));
-        (void)snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", interface->if_name);
-        if (ioctl(ioctl_fd, SIOCGIFMTU, &request) >= 0 && request.ifr_mtu > 0) {
-            snapshot->mtu = (uint32_t)request.ifr_mtu;
-        }
+        snapshot->flags = read_u32_property(interface->if_name, "flags", 0);
+        snapshot->mtu = read_u32_property(interface->if_name, "mtu", 10);
         snapshot->operstate = read_operstate(interface->if_name);
     }
 
-    (void)close(ioctl_fd);
     if_freenameindex(interfaces);
     collect_addresses(entries, filled);
     return (int64_t)count;
