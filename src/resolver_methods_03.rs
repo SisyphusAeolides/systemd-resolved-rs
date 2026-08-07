@@ -1,7 +1,11 @@
 const RCODE_REFUSED: u16 = 5;
 
 impl Resolver {
-    fn query_scopes(&self, scopes: &[RouteScope], query: &[u8]) -> Result<Vec<u8>, ResolveError> {
+    fn query_scopes(
+        &self,
+        scopes: &[RouteScope],
+        query: &[u8],
+    ) -> Result<(Vec<u8>, SocketAddr), ResolveError> {
         if scopes.len() == 1 {
             return self.query_servers(&scopes[0].servers, query);
         }
@@ -21,9 +25,9 @@ impl Resolver {
             let mut last_error = None;
             for result in receiver {
                 match result {
-                    Ok(response) if response_is_success(&response) => {
+                    Ok((response, server)) if response_is_success(&response) => {
                         if first_success.is_none() {
-                            first_success = Some(response);
+                            first_success = Some((response, server));
                         }
                     }
                     Ok(response) => last_response = Some(response),
@@ -38,7 +42,11 @@ impl Resolver {
         })
     }
 
-    fn query_servers(&self, servers: &[SocketAddr], query: &[u8]) -> Result<Vec<u8>, ResolveError> {
+    fn query_servers(
+        &self,
+        servers: &[SocketAddr],
+        query: &[u8],
+    ) -> Result<(Vec<u8>, SocketAddr), ResolveError> {
         if servers.is_empty() {
             return Err(ResolveError::NoNameServers);
         }
@@ -62,13 +70,13 @@ impl Resolver {
                 Ok(response) => {
                     self.record_success(server, started.elapsed());
                     if Header::parse(&response)?.response_code() == RCODE_REFUSED {
-                        last_response = Some(response);
+                        last_response = Some((response, server));
                         if attempted.len() == servers.len() {
                             break;
                         }
                         continue;
                     }
-                    return Ok(response);
+                    return Ok((response, server));
                 }
                 Err(error) => {
                     self.record_failure(server, started.elapsed());
