@@ -1,4 +1,5 @@
 name: Apply tested NSS Varlink integration
+# Retry after repairing shared-memory test diagnostics.
 
 on:
   push:
