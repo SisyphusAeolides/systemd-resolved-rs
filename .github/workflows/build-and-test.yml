@@ -253,7 +253,7 @@ jobs:
           STATUS_CONTEXT: build-and-test/formal
           STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
           STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Formal verification passed' || 'Formal verification failed' }}
-          STATUS_URL: ${{ github.server_url }}/${{ github.repository}/actions/runs/${{ github.run_id }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           payload=$(printf '{"state":"%s","context":"%s","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_CONTEXT" "$STATUS_DESCRIPTION" "$STATUS_URL")
