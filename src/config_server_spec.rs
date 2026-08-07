@@ -159,7 +159,7 @@ mod server_spec_tests {
     fn server_spec_projection_tracks_legacy_address_mutation() {
         let old = "192.0.2.53:53".parse().expect("old address");
         let new = "192.0.2.54:53".parse().expect("new address");
-        let specs = vec![parse_server_spec("192.0.2.53#old.example").expect("old spec")];
+        let specs = [parse_server_spec("192.0.2.53#old.example").expect("old spec")];
         let projected = filtered_server_specs(&[new], &specs);
         assert_eq!(projected.len(), 1);
         assert_eq!(projected[0].address, new);
