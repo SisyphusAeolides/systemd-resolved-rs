@@ -83,7 +83,7 @@ impl Resolver {
             Ok(response)
         } else if budget.expired() {
             Err(io::Error::new(io::ErrorKind::TimedOut, "DNS query timed out").into())
-        } else if budget.exhausted() && last_error.is_none() {
+        } else if budget.exhausted() {
             Err(ResolveError::Protocol(
                 "maximum DNS transaction attempts reached",
             ))
