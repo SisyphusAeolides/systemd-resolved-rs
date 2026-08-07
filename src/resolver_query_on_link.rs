@@ -40,13 +40,21 @@
             self.counters.cache_misses.fetch_add(1, Ordering::Relaxed);
         }
 
-        let scopes = self.routing().select(
-            question.name.text(),
-            ifindex,
-            &self.global_servers,
-            &self.fallback_servers,
-            &self.config.domains,
-        )?;
+        let scopes = self
+            .routing()
+            .select(
+                question.name.text(),
+                ifindex,
+                &self.global_servers,
+                &self.fallback_servers,
+                &self.config.domains,
+            )?
+            .into_iter()
+            .filter(|scope| match scope.kind {
+                ScopeKind::Link(ifindex) => self.networkd_link_relevant(ifindex),
+                ScopeKind::Global | ScopeKind::Fallback => true,
+            })
+            .collect::<Vec<_>>();
         if scopes.is_empty() {
             self.counters.failures.fetch_add(1, Ordering::Relaxed);
             return Err(ResolveError::NoNameServers);
