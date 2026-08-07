@@ -20,6 +20,7 @@ impl Resolver {
         &self,
         server: SocketAddr,
         query: &[u8],
+        budget: &mut DnsAttemptBudget,
     ) -> Result<Vec<u8>, ResolveError> {
         let configured_best_level = self.preferred_feature_level();
         let mut forced_level = None;
@@ -54,96 +55,105 @@ impl Resolver {
                 (level, state.transport.mode(), payload_size)
             };
             let outbound = edns::prepare_query(query, level, payload_size)?;
+            let remaining = budget.begin_attempt()?;
 
             let (response, response_transport) = match transport {
-                TransportMode::Udp => match self.exchange_udp(server, &outbound.packet) {
-                    Ok((response, fragment_size)) => {
-                        self.record_udp_packet(server, response.len(), fragment_size);
-                        let truncated = Header::parse(&response)?.truncated();
-                        if udp_requires_tcp_retry(truncated, fragment_size, level) {
-                            self.record_transport_success(server, TransportMode::Udp);
-                            if truncated {
-                                self.record_transport_truncated(server);
-                            }
-                            match self.exchange_tcp(server, &outbound.packet) {
-                                Ok(response) => {
-                                    self.record_transport_success(server, TransportMode::Tcp);
-                                    (response, TransportMode::Tcp)
+                TransportMode::Udp => {
+                    match self.exchange_udp(server, &outbound.packet, remaining) {
+                        Ok((response, fragment_size)) => {
+                            self.record_udp_packet(server, response.len(), fragment_size);
+                            let truncated = Header::parse(&response)?.truncated();
+                            if udp_requires_tcp_retry(truncated, fragment_size, level) {
+                                self.record_transport_success(server, TransportMode::Udp);
+                                if truncated {
+                                    self.record_transport_truncated(server);
                                 }
-                                Err(error) => {
-                                    let (_, failures) = self
-                                        .record_transport_failure(server, TransportMode::Tcp);
-                                    if failures >= TRANSPORT_RETRY_ATTEMPTS
-                                        && level > FeatureLevel::Udp
-                                        && self.config.dnssec != ValidationMode::Yes
-                                        && feature_retries < MAX_FEATURE_RETRIES
-                                    {
-                                        let lower = level.lower();
-                                        self.downgrade_feature(server, lower);
-                                        feature_retries += 1;
-                                        forced_level = Some(lower);
-                                        continue;
+                                match self.exchange_tcp(
+                                    server,
+                                    &outbound.packet,
+                                    budget.remaining()?,
+                                ) {
+                                    Ok(response) => {
+                                        self.record_transport_success(server, TransportMode::Tcp);
+                                        (response, TransportMode::Tcp)
                                     }
-                                    return Err(error);
+                                    Err(error) => {
+                                        let (_, failures) = self
+                                            .record_transport_failure(server, TransportMode::Tcp);
+                                        if failures >= TRANSPORT_RETRY_ATTEMPTS
+                                            && level > FeatureLevel::Udp
+                                            && self.config.dnssec != ValidationMode::Yes
+                                            && feature_retries < MAX_FEATURE_RETRIES
+                                        {
+                                            let lower = level.lower();
+                                            self.downgrade_feature(server, lower);
+                                            feature_retries += 1;
+                                            forced_level = Some(lower);
+                                            continue;
+                                        }
+                                        return Err(error);
+                                    }
+                                }
+                            } else {
+                                self.record_transport_success(server, TransportMode::Udp);
+                                (response, TransportMode::Udp)
+                            }
+                        }
+                        Err(error) => {
+                            let lower = if outbound.managed_opt
+                                && self.config.dnssec != ValidationMode::Yes
+                            {
+                                let mut states = self.states();
+                                states
+                                    .entry(server)
+                                    .or_default()
+                                    .features
+                                    .record_failure(level, Instant::now())
+                            } else {
+                                None
+                            };
+                            if let Some(lower) =
+                                lower.filter(|_| feature_retries < MAX_FEATURE_RETRIES)
+                            {
+                                self.clear_transport_failures(server);
+                                feature_retries += 1;
+                                forced_level = Some(lower);
+                                continue;
+                            }
+
+                            if level == FeatureLevel::Udp {
+                                let (switched, _) =
+                                    self.record_transport_failure(server, TransportMode::Udp);
+                                if switched == Some(TransportMode::Tcp)
+                                    && transport_retries < MAX_TRANSPORT_RETRIES
+                                {
+                                    transport_retries += 1;
+                                    continue;
                                 }
                             }
-                        } else {
-                            self.record_transport_success(server, TransportMode::Udp);
-                            (response, TransportMode::Udp)
+                            return Err(error);
                         }
                     }
-                    Err(error) => {
-                        let lower = if outbound.managed_opt
-                            && self.config.dnssec != ValidationMode::Yes
-                        {
-                            let mut states = self.states();
-                            states
-                                .entry(server)
-                                .or_default()
-                                .features
-                                .record_failure(level, Instant::now())
-                        } else {
-                            None
-                        };
-                        if let Some(lower) =
-                            lower.filter(|_| feature_retries < MAX_FEATURE_RETRIES)
-                        {
-                            self.clear_transport_failures(server);
-                            feature_retries += 1;
-                            forced_level = Some(lower);
-                            continue;
+                }
+                TransportMode::Tcp => {
+                    match self.exchange_tcp(server, &outbound.packet, remaining) {
+                        Ok(response) => {
+                            self.record_transport_success(server, TransportMode::Tcp);
+                            (response, TransportMode::Tcp)
                         }
-
-                        if level == FeatureLevel::Udp {
+                        Err(error) => {
                             let (switched, _) =
-                                self.record_transport_failure(server, TransportMode::Udp);
-                            if switched == Some(TransportMode::Tcp)
+                                self.record_transport_failure(server, TransportMode::Tcp);
+                            if switched == Some(TransportMode::Udp)
                                 && transport_retries < MAX_TRANSPORT_RETRIES
                             {
                                 transport_retries += 1;
                                 continue;
                             }
+                            return Err(error);
                         }
-                        return Err(error);
                     }
-                },
-                TransportMode::Tcp => match self.exchange_tcp(server, &outbound.packet) {
-                    Ok(response) => {
-                        self.record_transport_success(server, TransportMode::Tcp);
-                        (response, TransportMode::Tcp)
-                    }
-                    Err(error) => {
-                        let (switched, _) =
-                            self.record_transport_failure(server, TransportMode::Tcp);
-                        if switched == Some(TransportMode::Udp)
-                            && transport_retries < MAX_TRANSPORT_RETRIES
-                        {
-                            transport_retries += 1;
-                            continue;
-                        }
-                        return Err(error);
-                    }
-                },
+                }
             };
 
             let opt = edns::inspect_opt(&response)?;
