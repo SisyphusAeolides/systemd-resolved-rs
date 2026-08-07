@@ -72,6 +72,7 @@ pub enum ResolveError {
     Link(LinkError),
     NoNameServers,
     NoSuchResourceRecord,
+    DnsError { rcode: u16, query: String },
     UnsupportedFamily(i32),
     Protocol(&'static str),
 }
@@ -81,6 +82,7 @@ impl ResolveError {
         match self {
             Self::NoNameServers => "io.systemd.Resolve.NoNameServers",
             Self::NoSuchResourceRecord => "io.systemd.Resolve.NoSuchResourceRecord",
+            Self::DnsError { .. } => "io.systemd.Resolve.DNSError",
             Self::UnsupportedFamily(_) => "io.systemd.Resolve.BadAddressSize",
             Self::Link(LinkError::NoSuchLink(_)) => "io.systemd.Resolve.NoSuchLink",
             Self::Link(_) => "io.systemd.Resolve.InvalidParameter",
@@ -106,6 +108,9 @@ impl fmt::Display for ResolveError {
             Self::Link(error) => write!(formatter, "{error}"),
             Self::NoNameServers => formatter.write_str("no DNS name servers are configured"),
             Self::NoSuchResourceRecord => formatter.write_str("no such DNS resource record"),
+            Self::DnsError { rcode, query } => {
+                write!(formatter, "DNS response code {rcode} for {query}")
+            }
             Self::UnsupportedFamily(family) => {
                 write!(formatter, "unsupported address family {family}")
             }
