@@ -206,6 +206,7 @@ impl Error for WireError {}
 
 include!("wire/codec.rs");
 include!("wire/packet.rs");
+include!("wire/error_response.rs");
 include!("wire/records.rs");
 include!("wire/dnssec.rs");
 include!("wire/redirects.rs");
