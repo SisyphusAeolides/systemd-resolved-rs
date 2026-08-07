@@ -46,14 +46,15 @@ The pinned D-Bus signatures live in `compat/`.
 - [x] in-answer CNAME and DNAME redirect-chain validation
 - [x] cross-transaction CNAME and DNAME follow-up for high-level lookups with loop detection and the upstream 16-redirect limit
 - [x] accumulated redirect-chain record reporting and complete redirect flag/error parity
-- [x] EDNS0/DO feature negotiation with per-server retry downgrade, exponential recovery grace periods, 1232-byte UDP sizing, and RFC 6975 algorithm signaling
+- [x] EDNS0/DO feature negotiation with per-server retry downgrade, exponential recovery grace periods, adaptive UDP sizing, RFC 6975 algorithm signaling, same-level SERVFAIL retry, and EDE-aware downgrade suppression
 - [x] root-domain RRSIG omission detection with a persistent per-server DO clamp, allow-downgrade retry, and strict-mode failure
-- [x] adaptive MTU/fragment-size advertisement
-- [ ] TLS feature levels and exact upstream retry timing
+- [x] adaptive MTU/fragment-size advertisement and fragmented-EDNS TCP retry
+- [x] upstream DNS retry budget and default timing: 24 emissions, 120-second overall deadline, 5-second UDP windows, and 10-second TCP windows
+- [ ] TLS feature levels
 - [ ] complete resource-record validation and compression expansion
 - [x] concurrent identical transaction coalescing with per-client ID restoration and one-upstream regression coverage
 - [x] parallel queries across equivalent scopes
-- [ ] TCP and UDP connection pooling matching upstream behavior
+- [x] reusable per-upstream UDP and TCP pools with exclusive leasing, bounded idle retention, and stale-TCP reconnect
 
 ## Secure and local-link protocols
 
