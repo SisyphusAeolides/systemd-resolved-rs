@@ -1,4 +1,5 @@
 #![allow(missing_debug_implementations)]
+pub use dataplane::{Dataplane, DataplaneConfig};
 pub mod budget;
 pub mod dataplane;
 pub mod disk_cache;

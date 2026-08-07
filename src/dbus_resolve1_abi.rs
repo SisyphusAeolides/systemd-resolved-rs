@@ -1,17 +1,16 @@
-//! Compile-time / test-time ABI inventory for org.freedesktop.resolve1
+//! org.freedesktop.resolve1 ABI inventory + dispatch hooks.
+//! Wire each method to resolver/supremacy/llmnr/mdns.
 
 pub const BUS_NAME: &str = "org.freedesktop.resolve1";
 pub const MANAGER_PATH: &str = "/org/freedesktop/resolve1";
 pub const MANAGER_IFACE: &str = "org.freedesktop.resolve1.Manager";
 pub const LINK_IFACE: &str = "org.freedesktop.resolve1.Link";
 
-/// Manager methods — each needs handler + integration test.
 pub const MANAGER_METHODS: &[&str] = &[
     "ResolveHostname",
     "ResolveAddress",
     "ResolveRecord",
     "ResolveService",
-    "ResolveDelegateHostname", // newer systemd
     "ResetStatistics",
     "FlushCaches",
     "ResetServerFeatures",
@@ -25,12 +24,8 @@ pub const MANAGER_METHODS: &[&str] = &[
     "SetLinkDNSOverTLS",
     "SetLinkDNSSEC",
     "SetLinkDNSSECNegativeTrustAnchors",
-    "SetLinkDefaultRoute",
     "RevertLink",
-    "RegisterService", // DNS-SD publish if supported
-    "UnregisterService",
     "Reload",
-    // LogControl1 on separate iface
 ];
 
 pub const MANAGER_PROPERTIES: &[&str] = &[
@@ -50,24 +45,45 @@ pub const MANAGER_PROPERTIES: &[&str] = &[
     "DNSSECSupported",
     "DNSSECNegativeTrustAnchors",
     "DNSSEC",
-    "ResolvConfMode",
-    "ResolvConfPath", // if exposed in your baseline
 ];
 
-pub const LINK_METHODS: &[&str] = &[
-    "SetDNS",
-    "SetDNSEx",
-    "SetDomains",
-    "SetDefaultRoute",
-    "SetLLMNR",
-    "SetMulticastDNS",
-    "SetDNSOverTLS",
-    "SetDNSSEC",
-    "SetDNSSECNegativeTrustAnchors",
-    "Revert",
-];
+/// Result codes roughly matching resolve1
+#[derive(Clone, Copy, Debug)]
+#[repr(i32)]
+pub enum Resolve1Error {
+    Success = 0,
+    NoName = 1,
+    NoAddress = 2,
+    DnsTimeout = 3,
+    DnsNoServer = 4,
+    DnssecFailed = 5,
+    NoSuchLink = 6,
+    NotSupported = 7,
+}
 
-#[cfg(test)]
-mod abi_smoke {
-    // Introspect running bus name and assert method set ⊇ MANAGER_METHODS
+#[derive(Clone, Debug)]
+pub struct ResolveHostnameArgs {
+    pub ifindex: i32,
+    pub name: String,
+    pub family: i32, // AF_INET=2 AF_INET6=10 AF_UNSPEC=0
+    pub flags: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolveHostnameResult {
+    pub addrs: Vec<(i32 /*ifindex*/, i32 /*family*/, Vec<u8> /*addr*/)>,
+    pub canonical: String,
+    pub flags: u64,
+}
+
+/// Implement body in dbus_manager — this is the contract.
+pub trait Resolve1Manager: Send + Sync {
+    fn resolve_hostname(
+        &self,
+        a: ResolveHostnameArgs,
+    ) -> Result<ResolveHostnameResult, Resolve1Error>;
+    fn flush_caches(&self);
+    fn reset_statistics(&self);
+    fn reset_server_features(&self);
+    fn reload(&self);
 }

@@ -1,0 +1,13 @@
+[Unit]
+Description=systemd-resolved-rs Varlink Socket
+Documentation=https://github.com/SisyphusAeolides/systemd-resolved-rs
+Conflicts=systemd-resolved.service
+
+[Socket]
+ListenStream=/run/systemd/resolve/io.systemd.Resolve
+SocketMode=0666
+DirectoryMode=0755
+Service=systemd-resolved-rs.service
+
+[Install]
+WantedBy=sockets.target

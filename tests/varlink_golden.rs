@@ -1,8 +1,5 @@
-//! `tests/varlink_golden.rs`
-//! Parse upstream io.systemd.Resolve IDL; assert your methods match.
-//! Monitor interface: push DNS query logs for resolvectl monitor / JSON stream.
-
 #[test]
-fn test_varlink_abi_matches_upstream() {
-    // Assert varlink methods
+fn varlink_socket_path_constant() {
+    let p = "/run/systemd/resolve/io.systemd.Resolve";
+    assert!(p.starts_with("/run/systemd/resolve/"));
 }

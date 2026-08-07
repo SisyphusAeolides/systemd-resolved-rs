@@ -1,9 +1,9 @@
-//! src/llmnr/mod.rs — experimental LLMNR parity core (RFC 4795)
-//! Modes match resolved: yes (resolve+respond), resolve (query only), no.
-#![allow(missing_debug_implementations)]
+//! LLMNR RFC 4795 — resolve + respond skeleton wired for landing.
 
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use parking_lot::RwLock;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use tracing::{debug, warn};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LlmnrMode {
@@ -16,64 +16,123 @@ pub enum LlmnrMode {
 pub struct LlmnrLinkCfg {
     pub ifindex: i32,
     pub mode: LlmnrMode,
-    /// Names we claim on this link (hostname, aliases).
-    pub claim_names: Vec<String>, // A-labels lowercase
+    pub claim_names: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
-pub struct LlmnrConflict {
-    pub name: String,
-    pub ifindex: i32,
-    pub seen_from: SocketAddr,
-}
-
+#[derive(Debug)]
 pub struct LlmnrEngine {
     pub links: RwLock<Vec<LlmnrLinkCfg>>,
-    pub conflicts: RwLock<Vec<LlmnrConflict>>,
-    // Shared unicast resolver for "resolve" path when LLMNR lookup fails upward.
-    // pub upstream: Arc<HyperResolver>,
 }
 
 impl LlmnrEngine {
     pub const PORT: u16 = 5355;
     pub const MCAST_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 252);
-    // FF02:0:0:0:0:0:1:3
-    pub fn mcast_v6() -> Ipv6Addr {
-        "ff02::1:3".parse().unwrap()
+
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            links: RwLock::new(Vec::new()),
+        })
     }
 
-    /// Join per-link multicast + bind 0.0.0.0:5355 / [::]:5355 with REUSEADDR/PORT.
-    pub async fn run_udp(&self /* socks, router */) {
-        // loop: recv_from → classify Query vs Response
-        //  if Query && mode==Yes && we_own(name, ifindex) → respond unicast/multicast
-        //  if Query && mode!=No && !we_own → optionally nothing (responder only for claims)
-        //  if we issued query → match TXID+name, detect conflicts (two responders)
+    pub fn set_link(&self, cfg: LlmnrLinkCfg) {
+        let mut g = self.links.write();
+        if let Some(e) = g.iter_mut().find(|l| l.ifindex == cfg.ifindex) {
+            *e = cfg;
+        } else {
+            g.push(cfg);
+        }
     }
 
-    pub async fn query_name(
-        &self,
-        ifindex: i32,
-        name: &str,
-        qtype: u16,
-    ) -> Result<Vec<std::net::IpAddr>, LlmnrErr> {
-        // Build LLMNR query (QR=0, no RD recursion semantics like DNS)
-        // Send to mcast on that interface only (IP_MULTICAST_IF / IPV6_MULTICAST_IF)
-        // Collect unique answers within ~1s; conflict if contradictory A/AAAA
-        // Return addresses with scope_id = ifindex for link-local
-        let _ = (ifindex, name, qtype);
-        Err(LlmnrErr::Timeout)
+    pub fn we_own(&self, ifindex: i32, name: &str) -> bool {
+        let n = name.trim_end_matches('.').to_ascii_lowercase();
+        self.links.read().iter().any(|l| {
+            l.ifindex == ifindex
+                && l.mode == LlmnrMode::Yes
+                && l.claim_names
+                    .iter()
+                    .any(|c| c.trim_end_matches('.').eq_ignore_ascii_case(&n))
+        })
     }
 
-    pub fn on_conflict(&self, c: LlmnrConflict) {
-        // resolved: log + stop claiming name; optionally rename hostname policy
-        self.conflicts.write().push(c);
+    /// Spawn UDP listener — call from landing_glue.
+    pub async fn run_udp(self: Arc<Self>, sock: tokio::net::UdpSocket) {
+        let mut buf = vec![0u8; 1500];
+        loop {
+            let (n, peer) = match sock.recv_from(&mut buf).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(error = %e, "llmnr recv");
+                    continue;
+                }
+            };
+            if n < 12 {
+                continue;
+            }
+            let qr = buf[2] & 0x80 != 0;
+            if qr {
+                continue; // response path for our queries later
+            }
+            // parse first question name (no compression expected often)
+            if let Some(qname) = parse_qname(&buf[..n]) {
+                debug!(%qname, %peer, "llmnr query");
+                // ifindex unknown without IP_PKTINFO — use first Yes link as approx
+                let links = self.links.read().clone();
+                for l in links {
+                    if l.mode == LlmnrMode::Yes && self.we_own(l.ifindex, &qname) {
+                        if let Some(resp) = build_llmnr_response(&buf[..n], &[]) {
+                            let _ = sock.send_to(&resp, peer).await;
+                        }
+                        break;
+                    }
+                }
+            }
+            let _ = SocketAddr::from(peer);
+        }
     }
 }
 
-#[derive(Debug)]
-pub enum LlmnrErr {
-    Timeout,
-    Disabled,
-    Io(std::io::Error),
-    Wire,
+fn parse_qname(pkt: &[u8]) -> Option<String> {
+    if pkt.len() < 13 {
+        return None;
+    }
+    let mut i = 12usize;
+    let mut labels = Vec::new();
+    loop {
+        if i >= pkt.len() {
+            return None;
+        }
+        let l = pkt[i] as usize;
+        if l == 0 {
+            break;
+        }
+        if l > 63 || i + 1 + l > pkt.len() {
+            return None;
+        }
+        labels.push(String::from_utf8_lossy(&pkt[i + 1..i + 1 + l]).to_string());
+        i += 1 + l;
+    }
+    Some(labels.join("."))
+}
+
+fn build_llmnr_response(query: &[u8], addrs: &[[u8; 4]]) -> Option<Vec<u8>> {
+    if query.len() < 12 {
+        return None;
+    }
+    let mut r = query.to_vec();
+    r[2] = 0x80; // QR
+    r[3] = 0;
+    // ancount
+    let an = addrs.len() as u16;
+    r[6] = (an >> 8) as u8;
+    r[7] = an as u8;
+    // append answers with compression pointer to qname 0xC00C
+    for a in addrs {
+        r.extend_from_slice(&[0xC0, 0x0C]); // name ptr
+        r.extend_from_slice(&1u16.to_be_bytes()); // A
+        r.extend_from_slice(&1u16.to_be_bytes()); // IN
+        r.extend_from_slice(&30u32.to_be_bytes()); // ttl
+        r.extend_from_slice(&4u16.to_be_bytes());
+        r.extend_from_slice(a);
+    }
+    Some(r)
 }

@@ -5,3 +5,8 @@
 *.mod
 *.agdai
 formal/idris/build/
+
+nss/*.o
+nss/libnss_resolve.so.2
+*.so
+*.so.*

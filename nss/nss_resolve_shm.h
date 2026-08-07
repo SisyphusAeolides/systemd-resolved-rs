@@ -1,25 +1,42 @@
 #ifndef NSS_RESOLVE_SHM_H
 #define NSS_RESOLVE_SHM_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define SR_SHM_PATH "/dev/shm/systemd-resolved-rs-l1"
 #define SR_SHM_MAGIC 0x52534C314E535301ULL
 
 struct sr_shm_addr {
-    uint8_t family; // 4 or 6
-    uint8_t _pad;
+    uint8_t family;     /* 4 or 6 */
+    uint8_t pad;
     uint16_t scope_id;
     uint8_t addr[16];
 };
 
+/*
+ * Lookup owner wire name (lowercase absolute) in shared cache.
+ * Returns 0 on hit, -1 on miss/error.
+ * *n_io is in/out capacity/count of addrs.
+ */
 int sr_shm_lookup(const uint8_t *owner, size_t owner_len,
                   uint16_t qtype, uint16_t qclass,
                   uint8_t *rcode_out,
                   struct sr_shm_addr *addrs, size_t *n_io,
                   int *secure_out);
 
+/* Encode presentation name to wire lowercase absolute. */
 int sr_encode_name(const char *name, uint8_t *out, size_t cap, size_t *out_len);
 
+/* Miss path: resolve via local stub DNS @127.0.0.53 */
+int sr_stub_resolve_hostname(const char *name,
+                             char out[][64], int max, int *n_out);
+
+#ifdef __cplusplus
+}
+#endif
 #endif

@@ -1,65 +1,81 @@
-//! localhost, hostname, gateway, _gateway, _outbound, reverse zonals, etc.
-#![allow(missing_debug_implementations)]
+//! Synthetic answers: localhost, hostname, _gateway, hosts file.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[derive(Clone, Debug)]
 pub enum SynthAnswer {
     Addrs(Vec<IpAddr>),
-    Name(String),
     NxDomain,
     NoData,
 }
 
+#[derive(Debug)]
 pub struct SynthContext<'a> {
-    pub hostname: &'a str, // from /etc/hostname / LLMNRHostname
+    pub hostname: &'a str,
     pub pretty_hostname: Option<&'a str>,
     pub gateway_v4: Option<Ipv4Addr>,
     pub gateway_v6: Option<Ipv6Addr>,
-    pub local_addrs: &'a [(i32, IpAddr)], // ifindex, addr
-    pub hosts_file: &'a HostsDB,
+    pub local_addrs: &'a [IpAddr],
 }
 
-pub fn lookup_synthetic(ctx: &SynthContext, qname: &str, qtype: u16) -> Option<SynthAnswer> {
+pub fn lookup_synthetic(ctx: &SynthContext<'_>, qname: &str, qtype: u16) -> Option<SynthAnswer> {
     let n = qname.trim_end_matches('.').to_ascii_lowercase();
-    match n.as_str() {
-        "localhost" | "localhost.localdomain" => {
-            if qtype == 1 {
-                return Some(SynthAnswer::Addrs(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]));
-            }
-            if qtype == 28 {
-                return Some(SynthAnswer::Addrs(vec![IpAddr::V6(Ipv6Addr::LOCALHOST)]));
-            }
-        }
-        "_gateway" | "gateway" => {
-            let mut v = vec![];
+
+    if n == "localhost" || n == "localhost.localdomain" {
+        return match qtype {
+            1 => Some(SynthAnswer::Addrs(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)])),
+            28 => Some(SynthAnswer::Addrs(vec![IpAddr::V6(Ipv6Addr::LOCALHOST)])),
+            255 => Some(SynthAnswer::Addrs(vec![
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ])),
+            _ => Some(SynthAnswer::NoData),
+        };
+    }
+
+    if n == "_gateway" || n == "gateway" {
+        let mut v = Vec::new();
+        if matches!(qtype, 1 | 255) {
             if let Some(a) = ctx.gateway_v4 {
                 v.push(IpAddr::V4(a));
             }
+        }
+        if matches!(qtype, 28 | 255) {
             if let Some(a) = ctx.gateway_v6 {
                 v.push(IpAddr::V6(a));
             }
-            if !v.is_empty() {
-                return Some(SynthAnswer::Addrs(v));
-            }
         }
-        "_outbound" => { /* primary outbound iface addr — networkd/route */ }
-        x if x == ctx.hostname || ctx.pretty_hostname == Some(x) => {
-            let addrs: Vec<_> = ctx.local_addrs.iter().map(|(_, a)| *a).collect();
-            if !addrs.is_empty() {
-                return Some(SynthAnswer::Addrs(addrs));
-            }
+        if !v.is_empty() {
+            return Some(SynthAnswer::Addrs(v));
         }
-        _ => {}
+        return Some(SynthAnswer::NxDomain);
     }
-    // 127.0.0.0/8 PTR → localhost
-    // hosts_file hit
-    ctx.hosts_file.lookup(&n, qtype)
+
+    let host = ctx.hostname.trim_end_matches('.').to_ascii_lowercase();
+    let pretty = ctx
+        .pretty_hostname
+        .map(|p| p.trim_end_matches('.').to_ascii_lowercase());
+    if n == host || pretty.as_deref() == Some(n.as_str()) {
+        let mut v = Vec::new();
+        for a in ctx.local_addrs {
+            match (qtype, a) {
+                (1, IpAddr::V4(_)) | (28, IpAddr::V6(_)) | (255, _) => v.push(*a),
+                _ => {}
+            }
+        }
+        if !v.is_empty() {
+            return Some(SynthAnswer::Addrs(v));
+        }
+    }
+
+    None
 }
 
-pub struct HostsDB;
-impl HostsDB {
-    pub fn lookup(&self, _n: &str, _t: u16) -> Option<SynthAnswer> {
-        None
+/// PTR for 127.0.0.0/8 and ::1
+pub fn lookup_synthetic_ptr(addr: IpAddr) -> Option<String> {
+    match addr {
+        IpAddr::V4(v) if v.octets()[0] == 127 => Some("localhost".into()),
+        IpAddr::V6(v) if v.is_loopback() => Some("localhost".into()),
+        _ => None,
     }
 }

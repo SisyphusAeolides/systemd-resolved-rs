@@ -1,5 +1,9 @@
-//! src/mdns/engine.rs — RFC 6762 / 6763 experimental parity
-#![allow(missing_debug_implementations)]
+//! mDNS / DNS-SD minimum for ResolveService + .local
+
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MdnsMode {
@@ -10,99 +14,91 @@ pub enum MdnsMode {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct ServiceType {
-    /// e.g. "_ssh._tcp"
-    pub kind: String,
-    pub domain: String, // usually "local"
+    pub kind: String,   // _ssh._tcp
+    pub domain: String, // local
 }
 
 #[derive(Clone, Debug)]
 pub struct ServiceInstance {
-    pub instance: String, // "My Printer"
+    pub instance: String,
     pub service: ServiceType,
     pub port: u16,
-    pub target_host: String, // "printer.local"
+    pub target_host: String,
     pub txt: Vec<(String, Vec<u8>)>,
     pub ifindex: i32,
-    pub ttl: u32,
-}
-
-pub struct MdnsEngine {
-    pub mode: parking_lot::RwLock<std::collections::HashMap<i32, MdnsMode>>,
-    pub records: parking_lot::RwLock<MdnsZone>, // A/AAAA/PTR/SRV/TXT we publish
-    pub cache: parking_lot::RwLock<MdnsCache>,  // passive + active cache w/ goodbye
-}
-
-pub struct MdnsZone {
-    pub host_a: Vec<(String, std::net::Ipv4Addr, i32)>,
-    pub host_aaaa: Vec<(String, std::net::Ipv6Addr, i32)>,
-    pub services: Vec<ServiceInstance>,
-}
-
-impl MdnsEngine {
-    pub const PORT: u16 = 5353;
-
-    /// Probe → Announce → Defend (RFC 6762 probing)
-    pub async fn claim_hostname(&self, _ifindex: i32, _host_local: &str) { /* ... */
-    }
-
-    /// `ResolveService` parity: instance or type browse.
-    pub async fn resolve_service(
-        &self,
-        name: &str, // instance or type
-        stype: Option<&str>,
-        domain: &str,
-        ifindex: Option<i32>,
-    ) -> Result<ResolvedService, MdnsErr> {
-        // Query PTR for type; then SRV+TXT+A/AAAA; continuous until first full set
-        let _ = (name, stype, domain, ifindex);
-        Err(MdnsErr::Timeout)
-    }
-
-    pub async fn browse(
-        &self,
-        stype: &ServiceType,
-        ifindex: i32,
-    ) -> broadcast::Receiver<BrowseEvent> {
-        // Multicast PTR questions; emit Added/Removed on cache
-        let (tx, rx) = tokio::sync::broadcast::channel(64);
-        let _ = (stype, ifindex, tx);
-        rx
-    }
-
-    /// Answer questions from our zone; known-answer suppression; TC multi-packet.
-    pub fn respond(&self, questions: &[MdnsQuestion], known_answers: &[MdnsRr]) -> Vec<MdnsRr> {
-        let _ = (questions, known_answers);
-        vec![]
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum BrowseEvent {
-    Added(ServiceInstance),
-    Removed {
-        instance: String,
-        service: ServiceType,
-    },
 }
 
 #[derive(Clone, Debug)]
 pub struct ResolvedService {
     pub instance: ServiceInstance,
-    pub addresses: Vec<std::net::IpAddr>,
+    pub addresses: Vec<IpAddr>,
 }
 
-// types omitted: MdnsQuestion, MdnsRr, MdnsCache, MdnsErr, broadcast import
-use tokio::sync::broadcast;
-#[derive(Debug)]
-pub enum MdnsErr {
-    Timeout,
-    Disabled,
-    Conflict,
-    Wire,
+#[derive(Default, Debug)]
+pub struct MdnsEngine {
+    pub modes: RwLock<HashMap<i32, MdnsMode>>,
+    pub services: RwLock<Vec<ServiceInstance>>,
+    pub host_addrs: RwLock<HashMap<String, Vec<IpAddr>>>,
 }
-#[derive(Clone, Debug)]
-pub struct MdnsQuestion;
-#[derive(Clone, Debug)]
-pub struct MdnsRr;
-#[derive(Default)]
-pub struct MdnsCache;
+
+impl MdnsEngine {
+    pub const PORT: u16 = 5353;
+
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn set_mode(&self, ifindex: i32, mode: MdnsMode) {
+        self.modes.write().insert(ifindex, mode);
+    }
+
+    pub fn register_service(&self, svc: ServiceInstance) {
+        self.services.write().push(svc);
+    }
+
+    pub async fn resolve_service(
+        &self,
+        name: &str,
+        stype: Option<&str>,
+        domain: &str,
+        _ifindex: Option<i32>,
+    ) -> Option<ResolvedService> {
+        let domain = domain.trim_end_matches('.');
+        let g = self.services.read();
+        let found = g.iter().find(|s| {
+            s.service.domain.eq_ignore_ascii_case(domain)
+                && (stype.is_none()
+                    || s.service
+                        .kind
+                        .eq_ignore_ascii_case(stype.unwrap_or("")))
+                && (s.instance.eq_ignore_ascii_case(name)
+                    || format!(
+                        "{}.{}.{}",
+                        s.instance, s.service.kind, s.service.domain
+                    )
+                    .eq_ignore_ascii_case(name))
+        })?;
+        let addrs = self
+            .host_addrs
+            .read()
+            .get(&found.target_host.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default();
+        Some(ResolvedService {
+            instance: found.clone(),
+            addresses: addrs,
+        })
+    }
+
+    pub fn lookup_local_a(&self, host: &str) -> Vec<IpAddr> {
+        let h = host.trim_end_matches('.').to_ascii_lowercase();
+        if !h.ends_with(".local") {
+            return vec![];
+        }
+        self.host_addrs
+            .read()
+            .get(&h)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
