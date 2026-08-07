@@ -16,6 +16,7 @@ impl Resolver {
                 config.cache_size,
                 config.cache_max_ttl,
                 config.stale_retention,
+                config.cache_negative,
             ),
             config,
             global_servers,
