@@ -32,6 +32,7 @@ impl Resolver {
             udp_sockets: Mutex::new(HashMap::new()),
             tcp_streams: Mutex::new(HashMap::new()),
             routing: RwLock::new(RoutingTable::default()),
+            networkd_links: RwLock::new(HashMap::new()),
             routing_generation: AtomicU64::new(1),
             inflight: Inflight::default(),
             hosts: RwLock::new(hosts),
@@ -62,12 +63,44 @@ impl Resolver {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn networkd_links(&self) -> RwLockReadGuard<'_, HashMap<i32, NetworkdLinkState>> {
+        self.networkd_links
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn networkd_links_mut(&self) -> RwLockWriteGuard<'_, HashMap<i32, NetworkdLinkState>> {
+        self.networkd_links
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn links(&self) -> Vec<LinkState> {
         self.routing().links()
     }
 
     pub fn link(&self, ifindex: i32) -> Option<LinkState> {
         self.routing().link(ifindex)
+    }
+
+    pub fn link_is_managed(&self, ifindex: i32) -> bool {
+        self.networkd_links()
+            .get(&ifindex)
+            .is_some_and(|link| link.managed)
+    }
+
+    fn networkd_link_relevant(&self, ifindex: i32) -> bool {
+        self.networkd_links()
+            .get(&ifindex)
+            .map_or(true, NetworkdLinkState::resolver_relevant)
+    }
+
+    fn ensure_link_writable(&self, ifindex: i32) -> Result<(), LinkError> {
+        if self.link_is_managed(ifindex) {
+            Err(LinkError::ManagedLink(ifindex))
+        } else {
+            Ok(())
+        }
     }
 
     pub fn sync_kernel_links(
@@ -79,13 +112,61 @@ impl Resolver {
         Ok(())
     }
 
+    pub fn sync_networkd_links(&self, links: Vec<NetworkdLinkState>) -> Result<(), LinkError> {
+        let incoming = links
+            .into_iter()
+            .map(|link| (link.ifindex, link))
+            .collect::<HashMap<_, _>>();
+        let mut networkd = self.networkd_links_mut();
+        let mut routing = self.routing_mut();
+        let mut changed = false;
+
+        for (&ifindex, previous) in networkd.iter() {
+            let still_managed = incoming.get(&ifindex).is_some_and(|link| link.managed);
+            if previous.managed && !still_managed && routing.link(ifindex).is_some() {
+                changed |= routing.revert(ifindex)?;
+            }
+        }
+
+        for link in incoming.values().filter(|link| link.managed) {
+            if routing.link(link.ifindex).is_none() {
+                continue;
+            }
+            changed |= routing.set_dns(link.ifindex, link.dns_servers.clone())?;
+            changed |= routing.set_domains(link.ifindex, link.domains.clone())?;
+            changed |= routing.set_default_route(link.ifindex, link.default_route)?;
+            changed |= routing.set_llmnr(link.ifindex, link.llmnr)?;
+            changed |= routing.set_multicast_dns(link.ifindex, link.multicast_dns)?;
+            changed |= routing.set_dns_over_tls(
+                link.ifindex,
+                link.dns_over_tls.unwrap_or(self.config.dns_over_tls),
+            )?;
+            changed |= routing.set_dnssec(
+                link.ifindex,
+                link.dnssec.unwrap_or(self.config.dnssec),
+            )?;
+            changed |= routing.set_dnssec_negative_trust_anchors(
+                link.ifindex,
+                link.dnssec_negative_trust_anchors.clone(),
+            )?;
+        }
+
+        *networkd = incoming;
+        drop(routing);
+        drop(networkd);
+        self.finish_routing_change(changed);
+        Ok(())
+    }
+
     pub fn set_link_dns(&self, ifindex: i32, servers: Vec<SocketAddr>) -> Result<(), LinkError> {
+        self.ensure_link_writable(ifindex)?;
         let changed = self.routing_mut().set_dns(ifindex, servers)?;
         self.finish_routing_change(changed);
         Ok(())
     }
 
     pub fn set_link_domains(&self, ifindex: i32, domains: Vec<Domain>) -> Result<(), LinkError> {
+        self.ensure_link_writable(ifindex)?;
         let changed = self.routing_mut().set_domains(ifindex, domains)?;
         self.finish_routing_change(changed);
         Ok(())
@@ -96,6 +177,7 @@ impl Resolver {
         ifindex: i32,
         default_route: Option<bool>,
     ) -> Result<(), LinkError> {
+        self.ensure_link_writable(ifindex)?;
         let changed = self
             .routing_mut()
             .set_default_route(ifindex, default_route)?;
@@ -104,24 +186,28 @@ impl Resolver {
     }
 
     pub fn set_link_llmnr(&self, ifindex: i32, mode: SupportMode) -> Result<(), LinkError> {
+        self.ensure_link_writable(ifindex)?;
         let changed = self.routing_mut().set_llmnr(ifindex, mode)?;
         self.finish_routing_change(changed);
         Ok(())
     }
 
     pub fn set_link_multicast_dns(&self, ifindex: i32, mode: SupportMode) -> Result<(), LinkError> {
+        self.ensure_link_writable(ifindex)?;
         let changed = self.routing_mut().set_multicast_dns(ifindex, mode)?;
         self.finish_routing_change(changed);
         Ok(())
     }
 
     pub fn set_link_dns_over_tls(&self, ifindex: i32, mode: TlsMode) -> Result<(), LinkError> {
+        self.ensure_link_writable(ifindex)?;
         let changed = self.routing_mut().set_dns_over_tls(ifindex, mode)?;
         self.finish_routing_change(changed);
         Ok(())
     }
 
     pub fn set_link_dnssec(&self, ifindex: i32, mode: ValidationMode) -> Result<(), LinkError> {
+        self.ensure_link_writable(ifindex)?;
         let changed = self.routing_mut().set_dnssec(ifindex, mode)?;
         self.finish_routing_change(changed);
         Ok(())
@@ -132,6 +218,7 @@ impl Resolver {
         ifindex: i32,
         anchors: Vec<String>,
     ) -> Result<(), LinkError> {
+        self.ensure_link_writable(ifindex)?;
         let changed = self
             .routing_mut()
             .set_dnssec_negative_trust_anchors(ifindex, anchors)?;
@@ -140,6 +227,7 @@ impl Resolver {
     }
 
     pub fn revert_link(&self, ifindex: i32) -> Result<(), LinkError> {
+        self.ensure_link_writable(ifindex)?;
         let changed = self.routing_mut().revert(ifindex)?;
         self.finish_routing_change(changed);
         Ok(())
