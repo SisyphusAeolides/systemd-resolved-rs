@@ -85,7 +85,19 @@ jobs:
         run: git diff --exit-code -- src
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings 2>&1 | tee /tmp/clippy.log
+
+      - name: Upload Clippy diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-${{ matrix.toolchain }}
+          path: /tmp/clippy.log
+          if-no-files-found: ignore
+          retention-days: 1
 
       - name: Run tests
         run: cargo test --all-targets --all-features --locked
@@ -233,7 +245,7 @@ jobs:
           STATUS_CONTEXT: build-and-test/formal
           STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
           STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Formal verification passed' || 'Formal verification failed' }}
-          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           payload=$(printf '{"state":"%s","context":"%s","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_CONTEXT" "$STATUS_DESCRIPTION" "$STATUS_URL")
