@@ -206,15 +206,7 @@ impl ShmPublisher {
         negative: bool,
     ) -> io::Result<()> {
         self.publish_addrs_with_stale(
-            owner_wire,
-            qtype,
-            qclass,
-            rcode,
-            addrs,
-            ttl,
-            secure,
-            negative,
-            false,
+            owner_wire, qtype, qclass, rcode, addrs, ttl, secure, negative, false,
         )
     }
 
@@ -359,9 +351,7 @@ impl ShmPublisher {
     fn header_generation(&self) -> &AtomicU64 {
         // SAFETY: the field is naturally aligned, has the same layout as
         // `AtomicU64`, and all accesses after initialization use atomics.
-        unsafe {
-            &*std::ptr::addr_of!((*self.header_pointer()).write_gen).cast::<AtomicU64>()
-        }
+        unsafe { &*std::ptr::addr_of!((*self.header_pointer()).write_gen).cast::<AtomicU64>() }
     }
 
     fn read_arena_used(&self) -> u32 {
@@ -472,8 +462,8 @@ impl ShmReader {
             let payload_end = payload_start.checked_add(bucket.len as usize)?;
             let payload = self.mmap.get(payload_start..payload_end)?;
             let owner_length = usize::from(*payload.first()?);
-            let addresses_length = usize::from(bucket.n_addrs)
-                .checked_mul(std::mem::size_of::<ShmAddr>())?;
+            let addresses_length =
+                usize::from(bucket.n_addrs).checked_mul(std::mem::size_of::<ShmAddr>())?;
             let minimum_length = 1usize
                 .checked_add(owner_length)?
                 .checked_add(addresses_length)?;
@@ -537,7 +527,8 @@ impl ShmReader {
     fn bucket_pointer(&self, index: usize) -> Option<*const ShmBucket> {
         let offset = std::mem::size_of::<ShmHeader>()
             .checked_add(index.checked_mul(std::mem::size_of::<ShmBucket>())?)?;
-        self.mmap.get(offset..offset + std::mem::size_of::<ShmBucket>())?;
+        self.mmap
+            .get(offset..offset + std::mem::size_of::<ShmBucket>())?;
         // SAFETY: the bounds check above proves the complete bucket is mapped.
         Some(unsafe { self.mmap.as_ptr().add(offset).cast::<ShmBucket>() })
     }
@@ -585,10 +576,9 @@ fn valid_header(header: &ShmHeader, mapping_length: usize) -> bool {
     {
         return false;
     }
-    let buckets_length = (header.n_buckets as usize)
-        .checked_mul(std::mem::size_of::<ShmBucket>());
-    let Some(expected_arena_offset) = buckets_length
-        .and_then(|length| std::mem::size_of::<ShmHeader>().checked_add(length))
+    let buckets_length = (header.n_buckets as usize).checked_mul(std::mem::size_of::<ShmBucket>());
+    let Some(expected_arena_offset) =
+        buckets_length.and_then(|length| std::mem::size_of::<ShmHeader>().checked_add(length))
     else {
         return false;
     };
