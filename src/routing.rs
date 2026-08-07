@@ -502,6 +502,7 @@ pub enum LinkError {
     InvalidIfindex(i32),
     InvalidDomain(String),
     NoSuchLink(i32),
+    ManagedLink(i32),
 }
 
 impl fmt::Display for LinkError {
@@ -512,6 +513,7 @@ impl fmt::Display for LinkError {
             Self::NoSuchLink(ifindex) => {
                 write!(formatter, "no state exists for interface {ifindex}")
             }
+            Self::ManagedLink(ifindex) => write!(formatter, "link {ifindex} is managed"),
         }
     }
 }
