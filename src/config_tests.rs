@@ -155,6 +155,36 @@ mod tests {
     }
 
     #[test]
+    fn selective_credentials_preserve_explicit_dns() {
+        let directory = temporary_credential_directory("selective");
+        fs::create_dir_all(&directory).expect("credential directory");
+        fs::write(directory.join("network.dns"), "192.0.2.53\n").expect("DNS credential");
+        fs::write(
+            directory.join("network.search_domains"),
+            "credential.example\n",
+        )
+        .expect("domain credential");
+
+        let explicit: SocketAddr = "198.51.100.53:53".parse().expect("explicit DNS");
+        let mut config = Config {
+            upstreams: vec![explicit],
+            ..Config::default()
+        };
+        let assignments = apply_credentials_selective(&mut config, &directory, false, true);
+        assert!(!assignments.dns);
+        assert!(assignments.domains);
+        assert_eq!(config.upstreams, vec![explicit]);
+        assert_eq!(
+            config.domains,
+            vec![Domain {
+                name: "credential.example".to_owned(),
+                route_only: false,
+            }]
+        );
+        fs::remove_dir_all(directory).expect("remove credential directory");
+    }
+
+    #[test]
     fn empty_credentials_are_present_and_reset_lists() {
         let directory = temporary_credential_directory("empty");
         fs::create_dir_all(&directory).expect("credential directory");
@@ -181,6 +211,64 @@ mod tests {
         let mut config = Config::default();
         assert!(!apply_credentials(&mut config, &directory));
         fs::remove_dir_all(directory).expect("remove credential directory");
+    }
+
+    #[test]
+    fn resolv_conf_discovers_dns_search_and_domain_lines() {
+        let directory = temporary_credential_directory("resolv-conf");
+        fs::create_dir_all(&directory).expect("resolv.conf directory");
+        let path = directory.join("resolv.conf");
+        fs::write(
+            &path,
+            "nameserver 192.0.2.53\n\
+             search search.example corp.example\n\
+             domain legacy.example\n",
+        )
+        .expect("resolv.conf");
+
+        let discovered = discover_resolv_conf_state(&path).expect("resolv.conf discovery");
+        assert_eq!(
+            discovered.servers,
+            vec!["192.0.2.53:53".parse().expect("DNS server")]
+        );
+        assert_eq!(
+            discovered.domains,
+            vec![
+                Domain {
+                    name: "search.example".to_owned(),
+                    route_only: false,
+                },
+                Domain {
+                    name: "corp.example".to_owned(),
+                    route_only: false,
+                },
+                Domain {
+                    name: "legacy.example".to_owned(),
+                    route_only: false,
+                },
+            ]
+        );
+        fs::remove_dir_all(directory).expect("remove resolv.conf directory");
+    }
+
+    #[test]
+    fn invalid_resolv_conf_nameserver_does_not_hide_valid_entries() {
+        let directory = temporary_credential_directory("invalid-resolv-conf");
+        fs::create_dir_all(&directory).expect("resolv.conf directory");
+        let path = directory.join("resolv.conf");
+        fs::write(
+            &path,
+            "nameserver invalid\n\
+             nameserver 192.0.2.54\n",
+        )
+        .expect("resolv.conf");
+
+        let discovered = discover_resolv_conf_state(&path).expect("resolv.conf discovery");
+        assert_eq!(
+            discovered.servers,
+            vec!["192.0.2.54:53".parse().expect("DNS server")]
+        );
+        fs::remove_dir_all(directory).expect("remove resolv.conf directory");
     }
 
     fn temporary_credential_directory(name: &str) -> PathBuf {
