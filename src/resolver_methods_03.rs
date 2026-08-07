@@ -52,9 +52,11 @@ impl Resolver {
         servers: &[SocketAddr],
         query: &[u8],
     ) -> Result<(Vec<u8>, SocketAddr), ResolveError> {
-        if servers.is_empty() {
+        let server_specs = self.server_specs_for_scope(scope, servers);
+        if server_specs.is_empty() {
             return Err(ResolveError::NoNameServers);
         }
+        let server_keys = server_keys_for_specs(scope, &server_specs);
         let mut budget = DnsAttemptBudget::new();
         let mut attempted = HashSet::new();
         let mut last_response = None;
@@ -63,21 +65,21 @@ impl Resolver {
             if budget.exhausted() || budget.expired() {
                 break;
             }
-            if attempted.len() == servers.len() {
+            if attempted.len() == server_keys.len() {
                 attempted.clear();
             }
-            let Some(server_key) = self.select_server(scope, servers, &attempted) else {
+            let Some(server_key) = self.select_server(&server_keys, &attempted) else {
                 break;
             };
             let server = server_key.server();
-            attempted.insert(server);
+            attempted.insert(server_key);
             let started = Instant::now();
             match self.exchange_with_features(server_key, query, &mut budget) {
                 Ok(response) => {
                     self.record_success(server_key, started.elapsed());
                     if Header::parse(&response)?.response_code() == RCODE_REFUSED {
                         last_response = Some((response, server));
-                        if attempted.len() == servers.len() {
+                        if attempted.len() == server_keys.len() {
                             break;
                         }
                         continue;
@@ -106,19 +108,46 @@ impl Resolver {
         }
     }
 
-    fn select_server(
+    fn server_specs_for_scope(
         &self,
         scope: ScopeKind,
         servers: &[SocketAddr],
-        attempted: &HashSet<SocketAddr>,
+    ) -> Vec<crate::config::DnsServerSpec> {
+        let configured = match scope {
+            ScopeKind::Global => self.config.configured_upstream_specs(),
+            ScopeKind::Fallback => self.config.configured_fallback_upstream_specs(),
+            ScopeKind::Link(_) => Vec::new(),
+        };
+        let mut output = Vec::new();
+        for &address in servers {
+            let before = output.len();
+            for spec in configured.iter().filter(|spec| spec.address == address) {
+                if !output.contains(spec) {
+                    output.push(spec.clone());
+                }
+            }
+            if output.len() == before {
+                output.push(crate::config::DnsServerSpec {
+                    address,
+                    interface: None,
+                    server_name: None,
+                });
+            }
+        }
+        output
+    }
+
+    fn select_server(
+        &self,
+        servers: &[ServerKey],
+        attempted: &HashSet<ServerKey>,
     ) -> Option<ServerKey> {
         let now = Instant::now();
         let mut states = self.states();
         let metrics: Vec<_> = servers
             .iter()
             .map(|server| {
-                let key = ServerKey::new(scope, *server);
-                let state = states.entry(key).or_default();
+                let state = states.entry(*server).or_default();
                 let mut metric = state.metric;
                 metric.cooldown_ms = state
                     .cooldown_until
@@ -131,7 +160,7 @@ impl Resolver {
                 metric
             })
             .collect();
-        choose_server(&metrics).map(|index| ServerKey::new(scope, servers[index]))
+        choose_server(&metrics).map(|index| servers[index])
     }
 
     fn record_success(&self, server: ServerKey, duration: Duration) {
@@ -159,4 +188,20 @@ impl Resolver {
         let delay = 250u64.saturating_mul(1u64 << exponent).min(60_000);
         state.cooldown_until = Instant::now().checked_add(Duration::from_millis(delay));
     }
+}
+
+fn server_keys_for_specs(
+    scope: ScopeKind,
+    specs: &[crate::config::DnsServerSpec],
+) -> Vec<ServerKey> {
+    let mut slots = HashMap::<SocketAddr, usize>::new();
+    specs
+        .iter()
+        .map(|spec| {
+            let slot = slots.entry(spec.address).or_insert(0);
+            let key = ServerKey::with_slot(scope, spec.address, *slot);
+            *slot += 1;
+            key
+        })
+        .collect()
 }
