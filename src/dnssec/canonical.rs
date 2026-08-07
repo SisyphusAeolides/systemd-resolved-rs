@@ -100,9 +100,10 @@ fn label_offsets(name: &[u8]) -> Result<Vec<usize>, WireError> {
     let mut offsets = Vec::new();
     let mut offset = 0usize;
     loop {
-        let length = usize::from(*name.get(offset).ok_or_else(|| {
-            WireError::InvalidName("truncated canonical DNS name".to_owned())
-        })?);
+        let length =
+            usize::from(*name.get(offset).ok_or_else(|| {
+                WireError::InvalidName("truncated canonical DNS name".to_owned())
+            })?);
         if length == 0 {
             if offset + 1 != name.len() {
                 return Err(WireError::InvalidName(
