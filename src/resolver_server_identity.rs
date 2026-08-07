@@ -132,9 +132,10 @@ mod server_identity_tests {
 
     #[test]
     fn link_dns_over_tls_mode_overrides_global_policy() {
-        let mut config = Config::default();
-        config.dns_over_tls = TlsMode::No;
-        let resolver = Resolver::new(config);
+        let resolver = Resolver::new(Config {
+            dns_over_tls: TlsMode::No,
+            ..Config::default()
+        });
         resolver
             .sync_kernel_links(vec![kernel_link(7)])
             .expect("kernel link");
