@@ -1,0 +1,38 @@
+name: Pin MSRV lockfile
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/pin-msrv-lock.yml
+
+permissions:
+  contents: write
+
+jobs:
+  pin-lockfile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate Rust 1.74-compatible lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo update --package idna_adapter --precise 1.1.0
+          git diff --check
+          git diff --exit-code -- Cargo.toml
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock is already canonical"
+            exit 0
+          fi
+          git config user.name "SisyphusAeolides"
+          git config user.email "37166405+SisyphusAeolides@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "Pin Rust 1.74-compatible dependency graph"
+          git push origin HEAD:main
