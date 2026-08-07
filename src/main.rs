@@ -223,10 +223,7 @@ fn print_configuration(config: &Config, no_varlink: bool) {
     println!("upstreams: {}", config.effective_upstreams().len());
     println!("full listeners: {}", config.listeners.len());
     println!("proxy listeners: {}", config.proxy_listeners.len());
-    println!(
-        "extra listeners: {}",
-        config.dns_stub_listener_extra.len()
-    );
+    println!("extra listeners: {}", config.dns_stub_listener_extra.len());
     println!("stub listener mode: {}", config.dns_stub_listener.as_str());
     if no_varlink {
         println!("varlink: disabled");
