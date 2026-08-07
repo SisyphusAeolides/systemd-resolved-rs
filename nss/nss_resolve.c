@@ -11,9 +11,6 @@
 
 #include "nss_resolve_shm.h"
 
-/* Declared in nss_varlink.c for compatibility with the original glue name. */
-int sr_varlink_resolve_hostname(const char *name, char out[][64], int max, int *n_out);
-
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
 static size_t align_up(size_t value, size_t alignment)
@@ -50,6 +47,7 @@ static enum nss_status status_from_errno(int error, int *errnop, int *h_errnop)
 
     switch (error) {
     case ENOENT:
+    case ESRCH:
         if (h_errnop)
             *h_errnop = HOST_NOT_FOUND;
         return NSS_STATUS_NOTFOUND;
@@ -425,8 +423,8 @@ enum nss_status _nss_resolve_gethostbyaddr2_r(
 
     char names[32][256];
     int name_count = 0;
-    if (sr_stub_resolve_address(address, address_length, family,
-                                names, (int)ARRAY_SIZE(names), &name_count) != 0)
+    if (sr_varlink_resolve_address(address, address_length, family,
+                                   names, (int)ARRAY_SIZE(names), &name_count) != 0)
         return status_from_errno(errno, errnop, h_errnop);
 
     return pack_reverse_hostent(address, address_length, family, names, name_count,

@@ -4,36 +4,47 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
-#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
-#include <time.h>
+#include <sys/time.h>
+#include <sys/un.h>
 #include <unistd.h>
 
-#define DNS_HEADER_SIZE 12u
-#define DNS_MAX_NAME 255u
-#define DNS_MAX_PACKET 65535u
-#define DNS_TYPE_A 1u
-#define DNS_TYPE_PTR 12u
-#define DNS_TYPE_AAAA 28u
-#define DNS_CLASS_IN 1u
+#define VARLINK_SOCKET_PATH "/run/systemd/resolve/io.systemd.Resolve"
+#define VARLINK_MAX_REPLY (1024u * 1024u)
 
-static _Atomic uint32_t query_counter = 1;
-
-static uint16_t read_u16(const uint8_t *p)
+static int set_timeouts(int fd)
 {
-    return ((uint16_t)p[0] << 8) | p[1];
+    const struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout) < 0)
+        return -1;
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout) < 0)
+        return -1;
+    return 0;
 }
 
-static int write_all(int fd, const void *buffer, size_t length)
+static const char *varlink_socket_path(void)
+{
+    const char *value = secure_getenv("SYSTEMD_NSS_RESOLVE_VARLINK");
+    if (!value || !*value)
+        return VARLINK_SOCKET_PATH;
+    if (strcmp(value, "0") == 0 || strcasecmp(value, "no") == 0 ||
+        strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0) {
+        errno = ENOENT;
+        return NULL;
+    }
+    return value;
+}
+
+static int send_all_no_signal(int fd, const void *buffer, size_t length)
 {
     const uint8_t *p = buffer;
     while (length > 0) {
-        ssize_t written = write(fd, p, length);
+        ssize_t written = send(fd, p, length, MSG_NOSIGNAL);
         if (written < 0) {
             if (errno == EINTR)
                 continue;
@@ -49,636 +60,544 @@ static int write_all(int fd, const void *buffer, size_t length)
     return 0;
 }
 
-static int read_all(int fd, void *buffer, size_t length)
+static int json_escape(const char *input, char **ret)
 {
-    uint8_t *p = buffer;
-    while (length > 0) {
-        ssize_t n = read(fd, p, length);
-        if (n < 0) {
+    if (!input || !ret) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t length = strlen(input);
+    if (length > 4096) {
+        errno = EMSGSIZE;
+        return -1;
+    }
+    size_t capacity = length * 6u + 1u;
+    char *output = malloc(capacity);
+    if (!output) {
+        errno = ENOMEM;
+        return -1;
+    }
+    size_t used = 0;
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < length; i++) {
+        unsigned char byte = (unsigned char)input[i];
+        if (byte == '"' || byte == '\\') {
+            output[used++] = '\\';
+            output[used++] = (char)byte;
+        } else if (byte == '\b') {
+            output[used++] = '\\';
+            output[used++] = 'b';
+        } else if (byte == '\f') {
+            output[used++] = '\\';
+            output[used++] = 'f';
+        } else if (byte == '\n') {
+            output[used++] = '\\';
+            output[used++] = 'n';
+        } else if (byte == '\r') {
+            output[used++] = '\\';
+            output[used++] = 'r';
+        } else if (byte == '\t') {
+            output[used++] = '\\';
+            output[used++] = 't';
+        } else if (byte < 0x20u) {
+            output[used++] = '\\';
+            output[used++] = 'u';
+            output[used++] = '0';
+            output[used++] = '0';
+            output[used++] = hex[byte >> 4];
+            output[used++] = hex[byte & 0x0fu];
+        } else {
+            output[used++] = (char)byte;
+        }
+    }
+    output[used] = '\0';
+    *ret = output;
+    return 0;
+}
+
+static int varlink_call(const char *request, char **reply_out, size_t *reply_length_out)
+{
+    if (!request || !reply_out || !reply_length_out) {
+        errno = EINVAL;
+        return -1;
+    }
+    const char *path = varlink_socket_path();
+    if (!path)
+        return -1;
+    size_t path_length = strlen(path);
+    if (path_length == 0 || path_length >= sizeof(((struct sockaddr_un *)0)->sun_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return -1;
+    if (set_timeouts(fd) < 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof address);
+    address.sun_family = AF_UNIX;
+    memcpy(address.sun_path, path, path_length + 1u);
+    if (connect(fd, (const struct sockaddr *)&address, sizeof address) < 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+
+    size_t request_length = strlen(request);
+    if (send_all_no_signal(fd, request, request_length) < 0 ||
+        send_all_no_signal(fd, "\0", 1) < 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+
+    size_t capacity = 8192;
+    size_t used = 0;
+    char *reply = malloc(capacity + 1u);
+    if (!reply) {
+        close(fd);
+        errno = ENOMEM;
+        return -1;
+    }
+
+    for (;;) {
+        if (used == capacity) {
+            if (capacity >= VARLINK_MAX_REPLY) {
+                free(reply);
+                close(fd);
+                errno = EMSGSIZE;
+                return -1;
+            }
+            size_t next = capacity * 2u;
+            if (next > VARLINK_MAX_REPLY)
+                next = VARLINK_MAX_REPLY;
+            char *grown = realloc(reply, next + 1u);
+            if (!grown) {
+                int saved = errno;
+                free(reply);
+                close(fd);
+                errno = saved;
+                return -1;
+            }
+            reply = grown;
+            capacity = next;
+        }
+        ssize_t received = recv(fd, reply + used, capacity - used, 0);
+        if (received < 0) {
             if (errno == EINTR)
                 continue;
+            int saved = errno;
+            free(reply);
+            close(fd);
+            errno = saved;
             return -1;
         }
-        if (n == 0) {
+        if (received == 0) {
+            free(reply);
+            close(fd);
             errno = ECONNRESET;
             return -1;
         }
-        p += (size_t)n;
-        length -= (size_t)n;
-    }
-    return 0;
-}
-
-static int set_timeouts(int fd)
-{
-    const struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
-    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout) < 0)
-        return -1;
-    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout) < 0)
-        return -1;
-    return 0;
-}
-
-static int parse_port(const char *text, uint16_t *ret)
-{
-    char *end = NULL;
-    errno = 0;
-    unsigned long value = strtoul(text, &end, 10);
-    if (errno != 0 || !end || *end != '\0' || value == 0 || value > 65535) {
-        errno = EINVAL;
-        return -1;
-    }
-    *ret = (uint16_t)value;
-    return 0;
-}
-
-static int copy_part(char *out, size_t capacity, const char *start, size_t length)
-{
-    if (length == 0 || length >= capacity) {
-        errno = EINVAL;
-        return -1;
-    }
-    memcpy(out, start, length);
-    out[length] = '\0';
-    return 0;
-}
-
-static int stub_endpoint(struct sockaddr_storage *storage, socklen_t *length)
-{
-    const char *value = secure_getenv("SYSTEMD_NSS_RESOLVE_STUB");
-    char host[INET6_ADDRSTRLEN + 1];
-    uint16_t port = 53;
-
-    if (!value || !*value)
-        value = "127.0.0.53";
-
-    if (value[0] == '[') {
-        const char *close = strchr(value + 1, ']');
-        if (!close || copy_part(host, sizeof host, value + 1, (size_t)(close - value - 1)) < 0)
-            return -1;
-        if (close[1] != '\0') {
-            if (close[1] != ':' || parse_port(close + 2, &port) < 0)
-                return -1;
-        }
-    } else {
-        const char *first_colon = strchr(value, ':');
-        const char *last_colon = strrchr(value, ':');
-        if (last_colon && first_colon == last_colon) {
-            if (copy_part(host, sizeof host, value, (size_t)(last_colon - value)) < 0)
-                return -1;
-            if (parse_port(last_colon + 1, &port) < 0)
-                return -1;
-        } else {
-            if (copy_part(host, sizeof host, value, strlen(value)) < 0)
-                return -1;
+        char *terminator = memchr(reply + used, '\0', (size_t)received);
+        used += (size_t)received;
+        if (terminator) {
+            used = (size_t)(terminator - reply);
+            break;
         }
     }
+    close(fd);
+    reply[used] = '\0';
+    *reply_out = reply;
+    *reply_length_out = used;
+    return 0;
+}
 
-    memset(storage, 0, sizeof *storage);
-    struct sockaddr_in *ipv4 = (struct sockaddr_in *)storage;
-    if (inet_pton(AF_INET, host, &ipv4->sin_addr) == 1) {
-        ipv4->sin_family = AF_INET;
-        ipv4->sin_port = htons(port);
-        *length = sizeof *ipv4;
-        return 0;
+static const char *json_find_key(const char *start, const char *end, const char *key)
+{
+    size_t key_length = strlen(key);
+    size_t pattern_length = key_length + 2u;
+    if (!start || !end || start > end || pattern_length > (size_t)(end - start))
+        return NULL;
+
+    for (const char *cursor = start; cursor + pattern_length <= end; cursor++) {
+        if (*cursor != '"' || cursor[pattern_length - 1u] != '"' ||
+            memcmp(cursor + 1, key, key_length) != 0)
+            continue;
+        const char *value = cursor + pattern_length;
+        while (value < end && (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n'))
+            value++;
+        if (value >= end || *value != ':')
+            continue;
+        value++;
+        while (value < end && (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n'))
+            value++;
+        return value < end ? value : NULL;
     }
+    return NULL;
+}
 
-    struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)storage;
-    if (inet_pton(AF_INET6, host, &ipv6->sin6_addr) == 1) {
-        ipv6->sin6_family = AF_INET6;
-        ipv6->sin6_port = htons(port);
-        *length = sizeof *ipv6;
-        return 0;
-    }
-
-    errno = EINVAL;
+static int hex_value(char byte)
+{
+    if (byte >= '0' && byte <= '9')
+        return byte - '0';
+    if (byte >= 'a' && byte <= 'f')
+        return byte - 'a' + 10;
+    if (byte >= 'A' && byte <= 'F')
+        return byte - 'A' + 10;
     return -1;
 }
 
-static uint16_t next_query_id(void)
+static int parse_json_string(const char *start, const char *end,
+                             char *output, size_t capacity, const char **next)
 {
-    struct timespec now = { 0 };
-    (void)clock_gettime(CLOCK_MONOTONIC, &now);
-    uint32_t counter = atomic_fetch_add_explicit(&query_counter, 1, memory_order_relaxed);
-    uint32_t mixed = counter ^ (uint32_t)getpid() ^ (uint32_t)now.tv_nsec ^ (uint32_t)now.tv_sec;
-    mixed ^= mixed >> 16;
-    uint16_t id = (uint16_t)mixed;
-    return id == 0 ? 1 : id;
-}
-
-static int build_query(const char *name, uint16_t qtype, uint16_t id,
-                       uint8_t *packet, size_t capacity, size_t *length)
-{
-    if (!name || !packet || !length || capacity < DNS_HEADER_SIZE) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    memset(packet, 0, capacity);
-    packet[0] = (uint8_t)(id >> 8);
-    packet[1] = (uint8_t)id;
-    packet[2] = 0x01; /* RD */
-    packet[5] = 1;
-
-    size_t offset = DNS_HEADER_SIZE;
-    size_t wire_length = 0;
-    if (sr_encode_name(name, packet + offset, capacity - offset, &wire_length) < 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    offset += wire_length;
-    if (offset + 4 > capacity) {
-        errno = EMSGSIZE;
-        return -1;
-    }
-    packet[offset++] = (uint8_t)(qtype >> 8);
-    packet[offset++] = (uint8_t)qtype;
-    packet[offset++] = 0;
-    packet[offset++] = DNS_CLASS_IN;
-    *length = offset;
-    return 0;
-}
-
-static int tcp_query(const struct sockaddr *destination, socklen_t destination_length,
-                     const uint8_t *query, size_t query_length,
-                     uint8_t *response, size_t response_capacity, size_t *response_length)
-{
-    int fd = socket(destination->sa_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0)
-        return -1;
-    if (set_timeouts(fd) < 0 || connect(fd, destination, destination_length) < 0) {
-        int saved = errno;
-        close(fd);
-        errno = saved;
-        return -1;
-    }
-
-    uint8_t frame_length[2] = {
-        (uint8_t)(query_length >> 8),
-        (uint8_t)query_length,
-    };
-    if (write_all(fd, frame_length, sizeof frame_length) < 0 ||
-        write_all(fd, query, query_length) < 0) {
-        int saved = errno;
-        close(fd);
-        errno = saved;
-        return -1;
-    }
-
-    if (read_all(fd, frame_length, sizeof frame_length) < 0) {
-        int saved = errno;
-        close(fd);
-        errno = saved;
-        return -1;
-    }
-    size_t length = read_u16(frame_length);
-    if (length < DNS_HEADER_SIZE || length > response_capacity) {
-        close(fd);
-        errno = EMSGSIZE;
-        return -1;
-    }
-    if (read_all(fd, response, length) < 0) {
-        int saved = errno;
-        close(fd);
-        errno = saved;
-        return -1;
-    }
-    close(fd);
-    *response_length = length;
-    return 0;
-}
-
-static int dns_expand_name(const uint8_t *packet, size_t packet_length, size_t *offset,
-                           char *out, size_t out_capacity)
-{
-    if (!packet || !offset || !out || out_capacity < 2 || *offset >= packet_length) {
+    if (!start || start >= end || *start != '"' || !output || capacity == 0) {
         errno = EPROTO;
         return -1;
     }
-
-    size_t position = *offset;
-    size_t next = position;
-    size_t output_length = 0;
-    unsigned jumps = 0;
-    int jumped = 0;
-
-    for (;;) {
-        if (position >= packet_length) {
-            errno = EPROTO;
-            return -1;
-        }
-        uint8_t label_length = packet[position];
-        if ((label_length & 0xC0u) == 0xC0u) {
-            if (position + 1 >= packet_length) {
-                errno = EPROTO;
-                return -1;
-            }
-            size_t pointer = ((size_t)(label_length & 0x3Fu) << 8) | packet[position + 1];
-            if (pointer >= position || pointer >= packet_length || ++jumps > 128) {
-                errno = EPROTO;
-                return -1;
-            }
-            if (!jumped)
-                next = position + 2;
-            position = pointer;
-            jumped = 1;
-            continue;
-        }
-        if ((label_length & 0xC0u) != 0 || label_length > 63) {
-            errno = EPROTO;
-            return -1;
-        }
-        position++;
-        if (label_length == 0) {
-            if (!jumped)
-                next = position;
-            if (output_length == 0) {
-                out[0] = '.';
-                output_length = 1;
-            }
-            out[output_length] = '\0';
-            *offset = next;
+    size_t used = 0;
+    const char *cursor = start + 1;
+    while (cursor < end) {
+        unsigned char byte = (unsigned char)*cursor++;
+        if (byte == '"') {
+            output[used] = '\0';
+            if (next)
+                *next = cursor;
             return 0;
         }
-        if (position + label_length > packet_length) {
+        if (byte == '\\') {
+            if (cursor >= end) {
+                errno = EPROTO;
+                return -1;
+            }
+            char escape = *cursor++;
+            switch (escape) {
+            case '"': byte = '"'; break;
+            case '\\': byte = '\\'; break;
+            case '/': byte = '/'; break;
+            case 'b': byte = '\b'; break;
+            case 'f': byte = '\f'; break;
+            case 'n': byte = '\n'; break;
+            case 'r': byte = '\r'; break;
+            case 't': byte = '\t'; break;
+            case 'u': {
+                if (end - cursor < 4) {
+                    errno = EPROTO;
+                    return -1;
+                }
+                int a = hex_value(cursor[0]);
+                int b = hex_value(cursor[1]);
+                int c = hex_value(cursor[2]);
+                int d = hex_value(cursor[3]);
+                if (a < 0 || b < 0 || c < 0 || d < 0 || a != 0 || b != 0) {
+                    errno = EPROTO;
+                    return -1;
+                }
+                byte = (unsigned char)((c << 4) | d);
+                cursor += 4;
+                break;
+            }
+            default:
+                errno = EPROTO;
+                return -1;
+            }
+        } else if (byte < 0x20u) {
             errno = EPROTO;
             return -1;
         }
-        size_t additional = label_length + (output_length > 0 ? 1u : 0u);
-        if (output_length + additional >= out_capacity || output_length + additional > DNS_MAX_NAME) {
+        if (used + 1u >= capacity) {
             errno = EMSGSIZE;
             return -1;
         }
-        if (output_length > 0)
-            out[output_length++] = '.';
-        memcpy(out + output_length, packet + position, label_length);
-        output_length += label_length;
-        position += label_length;
-        if (!jumped)
-            next = position;
+        output[used++] = (char)byte;
     }
+    errno = EPROTO;
+    return -1;
 }
 
-static int validate_response(const uint8_t *response, size_t response_length,
-                             uint16_t id, const char *name, uint16_t qtype)
+static int parse_json_integer(const char *start, const char *end, long *value, const char **next)
 {
-    if (response_length < DNS_HEADER_SIZE || read_u16(response) != id ||
-        (response[2] & 0x80u) == 0 || read_u16(response + 4) != 1) {
+    if (!start || start >= end || !value) {
         errno = EPROTO;
         return -1;
     }
-
-    size_t offset = DNS_HEADER_SIZE;
-    char response_name[DNS_MAX_NAME + 1];
-    if (dns_expand_name(response, response_length, &offset, response_name, sizeof response_name) < 0)
-        return -1;
-    if (offset + 4 > response_length || strcasecmp(response_name, name) != 0 ||
-        read_u16(response + offset) != qtype || read_u16(response + offset + 2) != DNS_CLASS_IN) {
+    errno = 0;
+    char *parsed_end = NULL;
+    long parsed = strtol(start, &parsed_end, 10);
+    if (errno != 0 || parsed_end == start || parsed_end > end) {
         errno = EPROTO;
         return -1;
     }
+    *value = parsed;
+    if (next)
+        *next = parsed_end;
     return 0;
 }
 
-static int dns_query(const char *name, uint16_t qtype,
-                     uint8_t *response, size_t response_capacity, size_t *response_length)
+static int parse_byte_array(const char *start, const char *end,
+                            uint8_t *bytes, size_t capacity, size_t *length)
 {
-    struct sockaddr_storage destination;
-    socklen_t destination_length = 0;
-    if (stub_endpoint(&destination, &destination_length) < 0)
-        return -1;
-
-    uint16_t id = next_query_id();
-    uint8_t query[512];
-    size_t query_length = 0;
-    if (build_query(name, qtype, id, query, sizeof query, &query_length) < 0)
-        return -1;
-
-    int fd = socket(destination.ss_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (fd < 0)
-        return -1;
-    if (set_timeouts(fd) < 0 ||
-        connect(fd, (const struct sockaddr *)&destination, destination_length) < 0 ||
-        write_all(fd, query, query_length) < 0) {
-        int saved = errno;
-        close(fd);
-        errno = saved;
-        return -1;
-    }
-
-    ssize_t n;
-    do {
-        n = recv(fd, response, response_capacity, 0);
-    } while (n < 0 && errno == EINTR);
-    if (n < 0) {
-        int saved = errno;
-        close(fd);
-        errno = saved;
-        return -1;
-    }
-    close(fd);
-    if ((size_t)n < DNS_HEADER_SIZE) {
+    if (!start || start >= end || *start != '[' || !bytes || !length) {
         errno = EPROTO;
         return -1;
     }
-    *response_length = (size_t)n;
-
-    if (validate_response(response, *response_length, id, name, qtype) < 0)
-        return -1;
-    if ((response[2] & 0x02u) != 0) {
-        if (tcp_query((const struct sockaddr *)&destination, destination_length,
-                      query, query_length, response, response_capacity, response_length) < 0)
+    size_t used = 0;
+    const char *cursor = start + 1;
+    for (;;) {
+        while (cursor < end && (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n'))
+            cursor++;
+        if (cursor >= end) {
+            errno = EPROTO;
             return -1;
-        if (validate_response(response, *response_length, id, name, qtype) < 0)
+        }
+        if (*cursor == ']') {
+            *length = used;
+            return 0;
+        }
+        long value = 0;
+        if (parse_json_integer(cursor, end, &value, &cursor) < 0 || value < 0 || value > 255) {
+            errno = EPROTO;
             return -1;
+        }
+        if (used >= capacity) {
+            errno = EMSGSIZE;
+            return -1;
+        }
+        bytes[used++] = (uint8_t)value;
+        while (cursor < end && (*cursor == ' ' || *cursor == '\t' || *cursor == '\r' || *cursor == '\n'))
+            cursor++;
+        if (cursor >= end || (*cursor != ',' && *cursor != ']')) {
+            errno = EPROTO;
+            return -1;
+        }
+        if (*cursor == ']') {
+            *length = used;
+            return 0;
+        }
+        cursor++;
     }
-    return 0;
 }
 
-static int response_rcode(const uint8_t *response, size_t response_length)
+static int varlink_error(const char *reply, size_t length)
 {
-    if (response_length < DNS_HEADER_SIZE) {
-        errno = EPROTO;
-        return -1;
-    }
-    uint8_t rcode = response[3] & 0x0Fu;
-    if (rcode == 0)
+    const char *end = reply + length;
+    const char *value = json_find_key(reply, end, "error");
+    if (!value)
         return 0;
-    if (rcode == 2)
-        errno = EAGAIN;
-    else if (rcode == 3)
-        errno = ENOENT;
+    char identifier[256];
+    if (parse_json_string(value, end, identifier, sizeof identifier, NULL) < 0)
+        return -1;
+    if (strstr(identifier, "NoSuch") || strstr(identifier, "NotFound"))
+        errno = ESRCH;
+    else if (strstr(identifier, "TimedOut") || strstr(identifier, "MaxAttempts"))
+        errno = ETIMEDOUT;
+    else if (strstr(identifier, "Network") || strstr(identifier, "NoSource"))
+        errno = ENETUNREACH;
+    else if (strstr(identifier, "InvalidParameter"))
+        errno = EINVAL;
+    else if (strstr(identifier, "DNSSec") || strstr(identifier, "DNSSEC"))
+        errno = EACCES;
     else
         errno = EIO;
     return -1;
 }
 
-static int skip_questions(const uint8_t *response, size_t response_length, size_t *offset)
+static int parse_varlink_addresses(const char *reply, size_t length,
+                                   char out[][64], int max, int *n_out)
 {
-    uint16_t questions = read_u16(response + 4);
-    for (uint16_t i = 0; i < questions; i++) {
-        char ignored[DNS_MAX_NAME + 1];
-        if (dns_expand_name(response, response_length, offset, ignored, sizeof ignored) < 0)
-            return -1;
-        if (*offset + 4 > response_length) {
-            errno = EPROTO;
-            return -1;
-        }
-        *offset += 4;
-    }
-    return 0;
-}
-
-static int append_unique(char out[][64], int max, int *count, const char *address)
-{
-    for (int i = 0; i < *count; i++) {
-        if (strcmp(out[i], address) == 0)
-            return 0;
-    }
-    if (*count >= max)
-        return 0;
-    int written = snprintf(out[*count], 64, "%s", address);
-    if (written < 0 || written >= 64) {
-        errno = EMSGSIZE;
+    if (varlink_error(reply, length) < 0)
+        return -1;
+    const char *end = reply + length;
+    const char *cursor = json_find_key(reply, end, "addresses");
+    if (!cursor || *cursor != '[') {
+        errno = EPROTO;
         return -1;
     }
-    (*count)++;
-    return 0;
-}
-
-static int parse_addresses(const uint8_t *response, size_t response_length,
-                           char out[][64], int max, int *count)
-{
-    if (response_rcode(response, response_length) < 0)
-        return -1;
-
-    size_t offset = DNS_HEADER_SIZE;
-    if (skip_questions(response, response_length, &offset) < 0)
-        return -1;
-    uint16_t answers = read_u16(response + 6);
-
-    for (uint16_t i = 0; i < answers; i++) {
-        char owner[DNS_MAX_NAME + 1];
-        if (dns_expand_name(response, response_length, &offset, owner, sizeof owner) < 0)
+    *n_out = 0;
+    while (cursor < end) {
+        const char *family_value = json_find_key(cursor, end, "family");
+        const char *address_value = json_find_key(cursor, end, "address");
+        if (!family_value || !address_value)
+            break;
+        long family_number = 0;
+        if (parse_json_integer(family_value, end, &family_number, NULL) < 0)
             return -1;
-        if (offset + 10 > response_length) {
-            errno = EPROTO;
+        uint8_t bytes[16];
+        size_t byte_count = 0;
+        if (parse_byte_array(address_value, end, bytes, sizeof bytes, &byte_count) < 0)
             return -1;
-        }
-        uint16_t type = read_u16(response + offset);
-        uint16_t class = read_u16(response + offset + 2);
-        uint16_t data_length = read_u16(response + offset + 8);
-        offset += 10;
-        if (offset + data_length > response_length) {
-            errno = EPROTO;
-            return -1;
-        }
-
-        char text[INET6_ADDRSTRLEN];
-        const void *address = response + offset;
-        int family = AF_UNSPEC;
-        if (class == DNS_CLASS_IN && type == DNS_TYPE_A && data_length == 4)
-            family = AF_INET;
-        else if (class == DNS_CLASS_IN && type == DNS_TYPE_AAAA && data_length == 16)
-            family = AF_INET6;
-
-        if (family != AF_UNSPEC) {
-            if (!inet_ntop(family, address, text, sizeof text))
+        int family = family_number == AF_INET ? AF_INET : family_number == AF_INET6 ? AF_INET6 : AF_UNSPEC;
+        size_t expected = family == AF_INET ? 4u : family == AF_INET6 ? 16u : 0u;
+        if (expected != 0 && byte_count == expected && *n_out < max) {
+            if (!inet_ntop(family, bytes, out[*n_out], 64))
                 return -1;
-            if (append_unique(out, max, count, text) < 0)
-                return -1;
+            (*n_out)++;
         }
-        offset += data_length;
+        cursor = address_value + 1;
     }
-
-    if (*count == 0) {
+    if (*n_out == 0) {
         errno = ENODATA;
         return -1;
     }
     return 0;
 }
 
-static int append_unique_name(char out[][256], int max, int *count, const char *name)
+static int parse_varlink_names(const char *reply, size_t length,
+                               char out[][256], int max, int *n_out)
 {
-    for (int i = 0; i < *count; i++) {
-        if (strcasecmp(out[i], name) == 0)
-            return 0;
-    }
-    if (*count >= max)
-        return 0;
-    int written = snprintf(out[*count], 256, "%s", name);
-    if (written < 0 || written >= 256) {
-        errno = EMSGSIZE;
+    if (varlink_error(reply, length) < 0)
+        return -1;
+    const char *end = reply + length;
+    const char *cursor = json_find_key(reply, end, "names");
+    if (!cursor || *cursor != '[') {
+        errno = EPROTO;
         return -1;
     }
-    (*count)++;
-    return 0;
-}
-
-static int parse_ptr_names(const uint8_t *response, size_t response_length,
-                           char out[][256], int max, int *count)
-{
-    if (response_rcode(response, response_length) < 0)
-        return -1;
-
-    size_t offset = DNS_HEADER_SIZE;
-    if (skip_questions(response, response_length, &offset) < 0)
-        return -1;
-    uint16_t answers = read_u16(response + 6);
-
-    for (uint16_t i = 0; i < answers; i++) {
-        char owner[DNS_MAX_NAME + 1];
-        if (dns_expand_name(response, response_length, &offset, owner, sizeof owner) < 0)
+    *n_out = 0;
+    while (cursor < end && *n_out < max) {
+        const char *name_value = json_find_key(cursor, end, "name");
+        if (!name_value)
+            break;
+        const char *next = NULL;
+        if (parse_json_string(name_value, end, out[*n_out], 256, &next) < 0)
             return -1;
-        if (offset + 10 > response_length) {
-            errno = EPROTO;
-            return -1;
-        }
-        uint16_t type = read_u16(response + offset);
-        uint16_t class = read_u16(response + offset + 2);
-        uint16_t data_length = read_u16(response + offset + 8);
-        offset += 10;
-        if (offset + data_length > response_length) {
-            errno = EPROTO;
-            return -1;
-        }
-
-        if (class == DNS_CLASS_IN && type == DNS_TYPE_PTR) {
-            size_t name_offset = offset;
-            char name[DNS_MAX_NAME + 1];
-            if (dns_expand_name(response, response_length, &name_offset, name, sizeof name) < 0)
-                return -1;
-            if (name_offset > offset + data_length) {
-                errno = EPROTO;
-                return -1;
-            }
-            if (append_unique_name(out, max, count, name) < 0)
-                return -1;
-        }
-        offset += data_length;
+        (*n_out)++;
+        cursor = next;
     }
-
-    if (*count == 0) {
+    if (*n_out == 0) {
         errno = ENODATA;
         return -1;
     }
     return 0;
 }
 
-static int resolve_type(const char *name, uint16_t qtype, char out[][64], int max, int *count)
+static int varlink_resolve_hostname(const char *name, char out[][64], int max, int *n_out)
 {
-    uint8_t *response = malloc(DNS_MAX_PACKET);
-    if (!response) {
+    char *escaped = NULL;
+    if (json_escape(name, &escaped) < 0)
+        return -1;
+    size_t request_size = strlen(escaped) + 256u;
+    char *request = malloc(request_size);
+    if (!request) {
+        free(escaped);
         errno = ENOMEM;
         return -1;
     }
-    size_t response_length = 0;
-    int result = dns_query(name, qtype, response, DNS_MAX_PACKET, &response_length);
+    int written = snprintf(
+        request,
+        request_size,
+        "{\"method\":\"io.systemd.Resolve.ResolveHostname\",\"parameters\":{\"ifindex\":0,\"name\":\"%s\",\"family\":0,\"flags\":0}}",
+        escaped);
+    free(escaped);
+    if (written < 0 || (size_t)written >= request_size) {
+        free(request);
+        errno = EMSGSIZE;
+        return -1;
+    }
+    char *reply = NULL;
+    size_t reply_length = 0;
+    int result = varlink_call(request, &reply, &reply_length);
+    free(request);
     if (result == 0)
-        result = parse_addresses(response, response_length, out, max, count);
+        result = parse_varlink_addresses(reply, reply_length, out, max, n_out);
     int saved = errno;
-    free(response);
+    free(reply);
     errno = saved;
     return result;
 }
 
-int sr_stub_resolve_hostname(const char *name, char out[][64], int max, int *n_out)
+static int varlink_resolve_address(const void *address, socklen_t length, int family,
+                                   char out[][256], int max, int *n_out)
 {
-    if (!name || !*name || !out || !n_out || max <= 0) {
-        errno = EINVAL;
+    size_t expected = family == AF_INET ? sizeof(struct in_addr) : family == AF_INET6 ? sizeof(struct in6_addr) : 0u;
+    if (!address || expected == 0 || length != expected) {
+        errno = family == AF_INET || family == AF_INET6 ? EINVAL : EAFNOSUPPORT;
         return -1;
     }
-
-    *n_out = 0;
-    int first_error = 0;
-    if (resolve_type(name, DNS_TYPE_A, out, max, n_out) < 0)
-        first_error = errno;
-    if (*n_out < max && resolve_type(name, DNS_TYPE_AAAA, out, max, n_out) < 0 && first_error == 0)
-        first_error = errno;
-
-    if (*n_out == 0) {
-        errno = first_error != 0 ? first_error : ENODATA;
+    const uint8_t *bytes = address;
+    char address_json[16u * 4u + 1u];
+    size_t used = 0;
+    for (size_t i = 0; i < expected; i++) {
+        int written = snprintf(address_json + used, sizeof address_json - used,
+                               "%s%u", i == 0 ? "" : ",", bytes[i]);
+        if (written < 0 || (size_t)written >= sizeof address_json - used) {
+            errno = EMSGSIZE;
+            return -1;
+        }
+        used += (size_t)written;
+    }
+    char request[512];
+    int written = snprintf(
+        request,
+        sizeof request,
+        "{\"method\":\"io.systemd.Resolve.ResolveAddress\",\"parameters\":{\"ifindex\":0,\"family\":%d,\"address\":[%s],\"flags\":0}}",
+        family,
+        address_json);
+    if (written < 0 || (size_t)written >= sizeof request) {
+        errno = EMSGSIZE;
         return -1;
     }
-    return 0;
+    char *reply = NULL;
+    size_t reply_length = 0;
+    int result = varlink_call(request, &reply, &reply_length);
+    if (result == 0)
+        result = parse_varlink_names(reply, reply_length, out, max, n_out);
+    int saved = errno;
+    free(reply);
+    errno = saved;
+    return result;
 }
 
-static int reverse_name(const void *address, socklen_t length, int family,
-                        char *out, size_t capacity)
+static int varlink_fallback_allowed(int error)
 {
-    if (!address || !out) {
-        errno = EINVAL;
+    switch (error) {
+    case ENOENT:
+    case ECONNREFUSED:
+    case ECONNRESET:
+    case ENOTSOCK:
+    case EPROTOTYPE:
+    case EPIPE:
+    case EPROTO:
+    case ETIMEDOUT:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+int sr_varlink_resolve_hostname(const char *name, char out[][64], int max, int *n_out)
+{
+    if (varlink_resolve_hostname(name, out, max, n_out) == 0)
+        return 0;
+    int varlink_error_number = errno;
+    if (!varlink_fallback_allowed(varlink_error_number))
         return -1;
-    }
-
-    if (family == AF_INET && length == sizeof(struct in_addr)) {
-        const uint8_t *bytes = address;
-        int written = snprintf(out, capacity, "%u.%u.%u.%u.in-addr.arpa",
-                               bytes[3], bytes[2], bytes[1], bytes[0]);
-        if (written < 0 || (size_t)written >= capacity) {
-            errno = EMSGSIZE;
-            return -1;
-        }
+    if (sr_stub_resolve_hostname(name, out, max, n_out) == 0)
         return 0;
-    }
-
-    if (family == AF_INET6 && length == sizeof(struct in6_addr)) {
-        const uint8_t *bytes = address;
-        size_t offset = 0;
-        static const char hex[] = "0123456789abcdef";
-        for (int i = 15; i >= 0; i--) {
-            if (offset + 4 >= capacity) {
-                errno = EMSGSIZE;
-                return -1;
-            }
-            out[offset++] = hex[bytes[i] & 0x0Fu];
-            out[offset++] = '.';
-            out[offset++] = hex[bytes[i] >> 4];
-            out[offset++] = '.';
-        }
-        const char suffix[] = "ip6.arpa";
-        if (offset + sizeof suffix > capacity) {
-            errno = EMSGSIZE;
-            return -1;
-        }
-        memcpy(out + offset, suffix, sizeof suffix);
-        return 0;
-    }
-
-    errno = family == AF_INET || family == AF_INET6 ? EINVAL : EAFNOSUPPORT;
+    if (varlink_error_number != ENOENT && varlink_error_number != ECONNREFUSED)
+        errno = varlink_error_number;
     return -1;
 }
 
-int sr_stub_resolve_address(const void *address, socklen_t length, int family,
-                            char out[][256], int max, int *n_out)
+int sr_varlink_resolve_address(const void *address, socklen_t length, int family,
+                               char out[][256], int max, int *n_out)
 {
-    if (!out || !n_out || max <= 0) {
-        errno = EINVAL;
+    if (varlink_resolve_address(address, length, family, out, max, n_out) == 0)
+        return 0;
+    int varlink_error_number = errno;
+    if (!varlink_fallback_allowed(varlink_error_number))
         return -1;
-    }
-
-    char name[DNS_MAX_NAME + 1];
-    if (reverse_name(address, length, family, name, sizeof name) < 0)
-        return -1;
-
-    uint8_t *response = malloc(DNS_MAX_PACKET);
-    if (!response) {
-        errno = ENOMEM;
-        return -1;
-    }
-    size_t response_length = 0;
-    *n_out = 0;
-    int result = dns_query(name, DNS_TYPE_PTR, response, DNS_MAX_PACKET, &response_length);
-    if (result == 0)
-        result = parse_ptr_names(response, response_length, out, max, n_out);
-    int saved = errno;
-    free(response);
-    errno = saved;
-    return result;
-}
-
-/* Back-compat name used by earlier glue. */
-int sr_varlink_resolve_hostname(const char *name, char out[][64], int max, int *n_out)
-{
-    return sr_stub_resolve_hostname(name, out, max, n_out);
+    if (sr_stub_resolve_address(address, length, family, out, max, n_out) == 0)
+        return 0;
+    if (varlink_error_number != ENOENT && varlink_error_number != ECONNREFUSED)
+        errno = varlink_error_number;
+    return -1;
 }

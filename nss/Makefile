@@ -2,7 +2,7 @@ CC ?= cc
 CFLAGS ?= -O2 -g -fPIC -std=c17 -Wall -Wextra -Werror -Wpedantic -fstack-protector-strong -D_FORTIFY_SOURCE=3
 LDFLAGS_SO ?= -shared -Wl,-soname,libnss_resolve.so.2 -Wl,-z,relro,-z,now
 
-OBJS = nss_resolve.o nss_resolve_shm.o nss_varlink.o
+OBJS = nss_resolve.o nss_resolve_shm.o nss_dns_stub.o nss_varlink.o
 TEST_OBJS = test_nss.o test_shm.o
 
 .PHONY: all check clean install

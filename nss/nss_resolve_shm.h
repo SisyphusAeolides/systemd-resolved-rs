@@ -33,11 +33,15 @@ int sr_shm_lookup(const uint8_t *owner, size_t owner_len,
 /* Encode presentation name to wire lowercase absolute. */
 int sr_encode_name(const char *name, uint8_t *out, size_t cap, size_t *out_len);
 
-/* Miss path: resolve through the local DNS stub. */
+/* Miss paths: prefer io.systemd.Resolve Varlink, then use the local DNS stub. */
 int sr_stub_resolve_hostname(const char *name,
                              char out[][64], int max, int *n_out);
 int sr_stub_resolve_address(const void *address, socklen_t length, int family,
                             char out[][256], int max, int *n_out);
+int sr_varlink_resolve_hostname(const char *name,
+                                char out[][64], int max, int *n_out);
+int sr_varlink_resolve_address(const void *address, socklen_t length, int family,
+                               char out[][256], int max, int *n_out);
 
 #ifdef __cplusplus
 }

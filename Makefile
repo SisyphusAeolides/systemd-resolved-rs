@@ -47,7 +47,7 @@ check-packaging:
 	work=$$(mktemp -d); \
 	trap 'rm -rf "$$work"' EXIT HUP INT TERM; \
 	PYTHONPYCACHEPREFIX="$$work/pycache" python3 -m py_compile \
-		tests/live-dns.py tests/deterministic-dns-server.py scripts/probe-stub.py; \
+		tests/live-dns.py tests/deterministic-dns-server.py tests/fake-varlink-resolve.py scripts/probe-stub.py; \
 	test "$$(grep -Fc 'ExecStart=@SYSTEMD_RESOLVED_RS@' packaging/systemd/systemd-resolved-replacement.service)" -eq 1; \
 	sed 's|@SYSTEMD_RESOLVED_RS@|/bin/true|g' \
 		packaging/systemd/systemd-resolved-replacement.service >"$$work/systemd-resolved.service"; \

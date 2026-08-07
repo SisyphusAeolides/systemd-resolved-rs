@@ -136,6 +136,21 @@ static void test_reverse(int family, const char *address)
         fail("invalid reverse hostent");
 }
 
+static void test_not_found(void)
+{
+    char buffer[8192];
+    struct hostent result;
+    int error = 0;
+    int host_error = 0;
+    enum nss_status status = _nss_resolve_gethostbyname2_r(
+        "missing.test", AF_INET, &result, buffer, sizeof buffer, &error, &host_error);
+    require_status(status, NSS_STATUS_NOTFOUND, "missing lookup", error, host_error);
+    if (!((error == ESRCH && host_error == HOST_NOT_FOUND) ||
+          (error == ENOENT && host_error == HOST_NOT_FOUND) ||
+          (error == ENODATA && host_error == NO_DATA)))
+        fail("missing lookup returned the wrong errors");
+}
+
 static void test_small_buffer(void)
 {
     char buffer[8];
@@ -156,6 +171,7 @@ int main(void)
     test_hostent_family(AF_INET6, "2001:db8::123");
     test_reverse(AF_INET, "192.0.2.123");
     test_reverse(AF_INET6, "2001:db8::123");
+    test_not_found();
     test_small_buffer();
     puts("NSS forward, reverse, legacy hostent, and buffer tests passed");
     return EXIT_SUCCESS;
