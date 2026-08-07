@@ -1,0 +1,127 @@
+name: Integrate native mDNS transport
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ffi/mdns.c
+      - ffi/mdns.h
+      - ffi/test_mdns.c
+      - .github/workflows/land-mdns-native.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: integrate-native-mdns
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends gfortran libssl-dev liburing-dev
+
+      - name: Wire the native source into both builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          build_path = Path('build.rs')
+          build = build_path.read_text(encoding='utf-8')
+          if 'ffi/mdns.c' not in build:
+              matches = list(re.finditer(r'(?m)^(?P<indent>\s*)\.file\("ffi/[^"\n]+\.c"\)', build))
+              if matches:
+                  match = matches[-1]
+                  insertion = f'\n{match.group("indent")}.file("ffi/mdns.c")'
+                  build = build[:match.end()] + insertion + build[match.end():]
+              else:
+                  literal = '"ffi/networkd.c"'
+                  if literal not in build:
+                      raise SystemExit('cannot locate native C source list in build.rs')
+                  build = build.replace(literal, literal + ',\n        "ffi/mdns.c"', 1)
+          if 'cargo:rerun-if-changed=ffi/mdns.c' not in build:
+              anchor = 'fn main() {'
+              if anchor not in build:
+                  raise SystemExit('cannot locate build.rs main function')
+              build = build.replace(
+                  anchor,
+                  anchor + '\n    println!("cargo:rerun-if-changed=ffi/mdns.c");\n'
+                  '    println!("cargo:rerun-if-changed=ffi/mdns.h");',
+                  1,
+              )
+          build_path.write_text(build, encoding='utf-8')
+
+          make_path = Path('Makefile')
+          make = make_path.read_text(encoding='utf-8')
+          compile_anchor = '\t$(CC) $(CFLAGS) -Iffi -c ffi/networkd.c -o build/networkd.o\n'
+          if 'ffi/mdns.c -o build/mdns.o' not in make:
+              if compile_anchor not in make:
+                  raise SystemExit('cannot locate native compilation block in Makefile')
+              make = make.replace(
+                  compile_anchor,
+                  compile_anchor
+                  + '\t$(CC) $(CFLAGS) -Iffi -c ffi/mdns.c -o build/mdns.o\n'
+                  + '\t$(CC) $(CFLAGS) -Iffi -c ffi/test_mdns.c -o build/test_mdns.o\n',
+                  1,
+              )
+          link_lines = [line for line in make.splitlines() if 'build/test_native.o' in line and ' -o build/test_native' in line]
+          if not link_lines:
+              raise SystemExit('cannot locate native test link command in Makefile')
+          old_link = link_lines[0]
+          if 'build/mdns.o' not in old_link:
+              new_link = old_link.replace(' build/routing.o ', ' build/mdns.o build/routing.o ')
+              make = make.replace(old_link, new_link, 1)
+          run_anchor = '\t./build/test_native\n'
+          if './build/test_mdns' not in make:
+              if run_anchor not in make:
+                  raise SystemExit('cannot locate native test execution in Makefile')
+              make = make.replace(
+                  run_anchor,
+                  run_anchor
+                  + '\t$(CC) build/test_mdns.o build/mdns.o -o build/test_mdns\n'
+                  + '\t./build/test_mdns\n',
+                  1,
+              )
+          make_path.write_text(make, encoding='utf-8')
+          PY
+
+      - name: Verify native and Rust integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          make check-native
+          cargo test --all-targets --all-features --locked
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          git diff --check
+
+      - name: Commit integration
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add build.rs Makefile ffi/mdns.c ffi/mdns.h ffi/test_mdns.c
+          git rm --force .github/workflows/land-mdns-native.yml
+          git diff --cached --check
+          git commit -m 'Integrate interface-scoped mDNS transport'
+          git push origin HEAD:main
