@@ -42,6 +42,7 @@ fn main() {
     println!("cargo:rerun-if-changed=ffi/native.c");
     println!("cargo:rerun-if-changed=ffi/interface.c");
     println!("cargo:rerun-if-changed=ffi/tls.c");
+    println!("cargo:rerun-if-changed=ffi/dnssec.c");
     println!("cargo:rerun-if-changed=ffi/netlink.c");
     println!("cargo:rerun-if-changed=ffi/networkd.c");
     println!("cargo:rerun-if-changed=ffi/native.h");
@@ -61,15 +62,24 @@ fn main() {
     let native_obj = object(&out_dir, "resolved_native");
     let interface_obj = object(&out_dir, "resolved_interface");
     let tls_obj = object(&out_dir, "resolved_tls");
+    let dnssec_obj = object(&out_dir, "resolved_dnssec");
     let netlink_obj = object(&out_dir, "resolved_netlink");
     let networkd_obj = object(&out_dir, "resolved_networkd");
     compile_c(&cc, "ffi/native.c", &native_obj);
     compile_c(&cc, "ffi/interface.c", &interface_obj);
     compile_c(&cc, "ffi/tls.c", &tls_obj);
+    compile_c(&cc, "ffi/dnssec.c", &dnssec_obj);
     compile_c(&cc, "ffi/netlink.c", &netlink_obj);
     compile_c(&cc, "ffi/networkd.c", &networkd_obj);
 
-    let mut objects = vec![native_obj, interface_obj, tls_obj, netlink_obj, networkd_obj];
+    let mut objects = vec![
+        native_obj,
+        interface_obj,
+        tls_obj,
+        dnssec_obj,
+        netlink_obj,
+        networkd_obj,
+    ];
     let fortran_enabled = env::var_os("CARGO_FEATURE_FORTRAN_ROUTING").is_some();
     if fortran_enabled {
         let fc = env::var_os("FC").unwrap_or_else(|| OsString::from("gfortran"));
