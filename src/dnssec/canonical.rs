@@ -117,9 +117,7 @@ fn label_offsets(name: &[u8]) -> Result<Vec<usize>, WireError> {
 
 fn canonical_rdata(packet: &[u8], record: &ResourceRecord) -> Result<Vec<u8>, WireError> {
     match record.rr_type {
-        2 | 3 | 4 | 5 | 7 | 8 | 9 | 12 | 23 | 30 | 39 => {
-            canonical_single_name(packet, record, 0)
-        }
+        2 | 3 | 4 | 5 | 7 | 8 | 9 | 12 | 23 | 30 | 39 => canonical_single_name(packet, record, 0),
         6 => canonical_soa(packet, record),
         14 | 17 => canonical_two_names(packet, record, 0),
         15 | 18 | 21 | 36 | 107 => canonical_single_name(packet, record, 2),
@@ -149,7 +147,9 @@ fn canonical_single_name(
     if next > record.next_offset {
         return Err(WireError::InvalidRecord);
     }
-    let suffix = packet.get(next..record.next_offset).ok_or(WireError::InvalidRecord)?;
+    let suffix = packet
+        .get(next..record.next_offset)
+        .ok_or(WireError::InvalidRecord)?;
     let mut output = record.rdata[..prefix].to_vec();
     output.extend_from_slice(name.canonical_wire());
     output.extend_from_slice(suffix);
@@ -282,9 +282,11 @@ mod tests {
         let first = parse_record(&rrset_packet, 0).expect("first RR");
         let second = parse_record(&rrset_packet, second_offset).expect("second RR");
         let rrsig = parse_record(&rrset_packet, rrsig_offset).expect("RRSIG");
-        let signed = canonical_signed_data(&rrset_packet, &rrsig, &[first, second])
-            .expect("signed data");
-        assert!(signed.windows(4).any(|window| window == 60_u32.to_be_bytes()));
+        let signed =
+            canonical_signed_data(&rrset_packet, &rrsig, &[first, second]).expect("signed data");
+        assert!(signed
+            .windows(4)
+            .any(|window| window == 60_u32.to_be_bytes()));
         let first_position = signed
             .windows(4)
             .position(|window| window == [192, 0, 2, 1])
