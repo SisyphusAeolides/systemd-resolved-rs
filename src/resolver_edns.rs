@@ -151,9 +151,9 @@ impl Resolver {
 
                                 if level == FeatureLevel::Udp {
                                     let (switched, _) =
-                                      self.record_transport_failure(server, TransportMode::Udp);
+                                        self.record_transport_failure(server, TransportMode::Udp);
                                     if switched == Some(TransportMode::Tcp)
-                                    && transport_retries < MAX_TRANSPORT_RETRIES
+                                        && transport_retries < MAX_TRANSPORT_RETRIES
                                     {
                                         transport_retries += 1;
                                         continue;
@@ -162,6 +162,7 @@ impl Resolver {
                                 return Err(error);
                             }
                         }
+                    }
                     TransportMode::Tcp => {
                         match self.exchange_tcp(server, &outbound.packet, remaining) {
                             Ok(response) => {
@@ -215,7 +216,7 @@ impl Resolver {
                     if dnssec_mode == ValidationMode::Yes {
                         return Err(ResolveError::Protocol(
                             "DNS server does not support the required EDNS version",
-                            ));
+                        ));
                     }
                     let lower = self.record_bad_opt(server, level);
                     if feature_retries < MAX_FEATURE_RETRIES {
