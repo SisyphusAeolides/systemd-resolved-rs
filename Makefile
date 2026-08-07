@@ -3,6 +3,7 @@ CC ?= cc
 FC ?= gfortran
 CFLAGS ?= -O2 -g -std=c17 -Wall -Wextra -Werror -fstack-protector-strong -D_FORTIFY_SOURCE=3
 FFLAGS ?= -O2 -g -std=f2018 -Wall -Wextra -Werror -fimplicit-none
+LDLIBS ?= -lssl -lcrypto
 PREFIX ?= /usr
 LIBEXECDIR ?= $(PREFIX)/lib/systemd
 UNITDIR ?= $(PREFIX)/lib/systemd/system
@@ -20,10 +21,11 @@ check-native:
 	$(FC) $(FFLAGS) -Jbuild -c ffi/routing.f90 -o build/routing.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/native.c -o build/native.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/interface.c -o build/interface.o
+	$(CC) $(CFLAGS) -Iffi -c ffi/tls.c -o build/tls.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/netlink.c -o build/netlink.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/networkd.c -o build/networkd.o
 	$(CC) $(CFLAGS) -Iffi -c ffi/test_native.c -o build/test_native.o
-	$(FC) build/test_native.o build/native.o build/interface.o build/netlink.o build/networkd.o build/routing.o -o build/test_native
+	$(FC) build/test_native.o build/native.o build/interface.o build/tls.o build/netlink.o build/networkd.o build/routing.o $(LDLIBS) -o build/test_native
 	./build/test_native
 
 check-rust:
