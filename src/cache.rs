@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+const STRANGE_RCODE_TTL: Duration = Duration::from_secs(10);
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CacheKey {
     pub name: Vec<u8>,
@@ -34,10 +36,16 @@ pub struct Cache {
     capacity: usize,
     maximum_ttl: Duration,
     stale_retention: Duration,
+    cache_negative: bool,
 }
 
 impl Cache {
-    pub fn new(capacity: usize, maximum_ttl: Duration, stale_retention: Duration) -> Self {
+    pub fn new(
+        capacity: usize,
+        maximum_ttl: Duration,
+        stale_retention: Duration,
+        cache_negative: bool,
+    ) -> Self {
         Self {
             state: Mutex::new(State {
                 entries: HashMap::new(),
@@ -46,6 +54,7 @@ impl Cache {
             capacity,
             maximum_ttl,
             stale_retention,
+            cache_negative,
         }
     }
 
@@ -93,13 +102,28 @@ impl Cache {
 
     pub fn insert(&self, key: CacheKey, response: &[u8]) -> Result<bool, WireError> {
         let header = Header::parse(response)?;
-        if !header.is_response() || header.truncated() || header.response_code() == 2 {
+        if !header.is_response() || header.truncated() {
             return Ok(false);
         }
-        let Some(ttl_seconds) = cache_lifetime(response)? else {
+
+        let rcode = header.response_code();
+        let negative = rcode != 0 || header.answer_count == 0;
+        if negative && !self.cache_negative {
             return Ok(false);
-        };
-        let ttl = Duration::from_secs(u64::from(ttl_seconds)).min(self.maximum_ttl);
+        }
+
+        let ttl = match rcode {
+            0 | 3 => {
+                let Some(ttl_seconds) = cache_lifetime(response)? else {
+                    return Ok(false);
+                };
+                Duration::from_secs(u64::from(ttl_seconds))
+            }
+            2 => STRANGE_RCODE_TTL,
+            _ => return Ok(false),
+        }
+        .min(self.maximum_ttl);
+
         if ttl.is_zero() || self.capacity == 0 {
             return Ok(false);
         }
@@ -167,9 +191,16 @@ mod tests {
         }
     }
 
+    fn servfail_response(id: u16) -> Vec<u8> {
+        let mut response = make_query("example", TYPE_A, id).expect("query");
+        response[2] |= 0x80;
+        response[3] = (response[3] & 0xf0) | 2;
+        response
+    }
+
     #[test]
     fn rewrites_transaction_identity() {
-        let cache = Cache::new(16, Duration::from_secs(60), Duration::ZERO);
+        let cache = Cache::new(16, Duration::from_secs(60), Duration::ZERO, true);
         let query = make_query("example", TYPE_A, 7).expect("query");
         let response = local_response(&query, &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))], 30)
             .expect("response");
@@ -180,7 +211,12 @@ mod tests {
 
     #[test]
     fn concurrent_hits_keep_transaction_ids_isolated() {
-        let cache = std::sync::Arc::new(Cache::new(16, Duration::from_secs(60), Duration::ZERO));
+        let cache = std::sync::Arc::new(Cache::new(
+            16,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            true,
+        ));
         let query = make_query("example", TYPE_A, 7).expect("query");
         let response = local_response(&query, &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))], 30)
             .expect("response");
@@ -201,7 +237,7 @@ mod tests {
 
     #[test]
     fn capacity_is_enforced() {
-        let cache = Cache::new(1, Duration::from_secs(60), Duration::ZERO);
+        let cache = Cache::new(1, Duration::from_secs(60), Duration::ZERO, true);
         let query = make_query("example", TYPE_A, 7).expect("query");
         let response = local_response(&query, &[LocalRecord::A(Ipv4Addr::new(192, 0, 2, 1))], 30)
             .expect("response");
@@ -210,5 +246,22 @@ mod tests {
         second.name = vec![6, b's', b'e', b'c', b'o', b'n', b'd', 0];
         assert!(cache.insert(second, &response).expect("second insert"));
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn servfail_is_cached_when_negative_caching_is_enabled() {
+        let cache = Cache::new(16, Duration::from_secs(60), Duration::ZERO, true);
+        let response = servfail_response(7);
+        assert!(cache.insert(key(), &response).expect("SERVFAIL insert"));
+        let hit = cache.get(&key(), 99, false).expect("SERVFAIL cache hit");
+        assert_eq!(Header::parse(&hit).expect("header").response_code(), 2);
+    }
+
+    #[test]
+    fn no_negative_mode_rejects_servfail() {
+        let cache = Cache::new(16, Duration::from_secs(60), Duration::ZERO, false);
+        let response = servfail_response(7);
+        assert!(!cache.insert(key(), &response).expect("SERVFAIL insert"));
+        assert!(cache.is_empty());
     }
 }
