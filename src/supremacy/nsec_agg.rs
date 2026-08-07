@@ -1,15 +1,15 @@
 //! Answer NXDOMAIN/NODATA from cached NSEC/NSEC3 ranges without upstream.
 #![allow(missing_debug_implementations)]
 
+use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::Instant;
 
 #[derive(Clone, Debug)]
 pub struct NsecRange {
-    pub zone: Vec<u8>,       // wire apex
-    pub owner: Vec<u8>,      // owner name wire or hash label parent
+    pub zone: Vec<u8>,  // wire apex
+    pub owner: Vec<u8>, // owner name wire or hash label parent
     pub next: Vec<u8>,
     pub types: bitflags_types::TypeBitmap, // see below simplified
     pub expires: Instant,
@@ -75,7 +75,7 @@ impl AggressiveNsec {
     pub fn lookup(&self, qname: &[u8], qtype: u16, now: Instant) -> AggAnswer {
         // Find best zone cut (longest apex match) — simplified: try all
         let g = self.zones.read();
-        for (_apex, ranges) in g.iter() {
+        for ranges in g.values() {
             for r in ranges {
                 if r.expires <= now || !r.secure {
                     continue;

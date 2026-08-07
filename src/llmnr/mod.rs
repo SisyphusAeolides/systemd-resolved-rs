@@ -2,13 +2,15 @@
 //! Modes match resolved: yes (resolve+respond), resolve (query only), no.
 #![allow(missing_debug_implementations)]
 
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
 use parking_lot::RwLock;
-use tokio::net::UdpSocket;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LlmnrMode { No, Resolve, Yes }
+pub enum LlmnrMode {
+    No,
+    Resolve,
+    Yes,
+}
 
 #[derive(Clone, Debug)]
 pub struct LlmnrLinkCfg {
@@ -69,4 +71,9 @@ impl LlmnrEngine {
 }
 
 #[derive(Debug)]
-pub enum LlmnrErr { Timeout, Disabled, Io(std::io::Error), Wire }
+pub enum LlmnrErr {
+    Timeout,
+    Disabled,
+    Io(std::io::Error),
+    Wire,
+}

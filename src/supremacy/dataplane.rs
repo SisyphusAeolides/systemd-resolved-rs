@@ -3,7 +3,6 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::os::unix::io::{AsRawFd, FromRawFd};
 
 use tokio::net::UdpSocket;
 use tracing::{error, info};
@@ -21,15 +20,13 @@ impl Default for DataplaneConfig {
     fn default() -> Self {
         Self {
             bind: "127.0.0.53:53".parse().unwrap(),
-            workers: std::thread::available_parallelism()
-                .map(|n| n.get().clamp(2, 16))
-                .unwrap_or(4),
+            workers: std::thread::available_parallelism().map_or(4, |n| n.get().clamp(2, 16)),
             recvmmsg_batch: 32,
         }
     }
 }
 
-/// Create SO_REUSEPORT UDP sockets — one per worker.
+/// Create `SO_REUSEPORT` UDP sockets — one per worker.
 pub fn open_reuseport_udp(addr: SocketAddr, n: usize) -> std::io::Result<Vec<std::net::UdpSocket>> {
     use socket2::{Domain, Protocol, Socket, Type};
     let domain = if addr.is_ipv4() {
@@ -87,7 +84,7 @@ impl Dataplane {
                 Ok(resp) => {
                     let _ = sock.send_to(&resp, peer).await;
                 }
-                Err(_) => {
+                Err(()) => {
                     if let Some(servfail) = make_servfail(pkt) {
                         let _ = sock.send_to(&servfail, peer).await;
                     }
@@ -96,11 +93,7 @@ impl Dataplane {
         }
     }
 
-    async fn handle_query(
-        &self,
-        pkt: &[u8],
-        budget: &QueryBudget,
-    ) -> Result<Vec<u8>, ()> {
+    async fn handle_query(&self, pkt: &[u8], budget: &QueryBudget) -> Result<Vec<u8>, ()> {
         if pkt.len() < 12 || pkt[2] & 0x80 != 0 {
             return Err(());
         }

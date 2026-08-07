@@ -27,7 +27,7 @@ pub const MANAGER_METHODS: &[&str] = &[
     "SetLinkDNSSECNegativeTrustAnchors",
     "SetLinkDefaultRoute",
     "RevertLink",
-    "RegisterService",   // DNS-SD publish if supported
+    "RegisterService", // DNS-SD publish if supported
     "UnregisterService",
     "Reload",
     // LogControl1 on separate iface
@@ -55,9 +55,16 @@ pub const MANAGER_PROPERTIES: &[&str] = &[
 ];
 
 pub const LINK_METHODS: &[&str] = &[
-    "SetDNS", "SetDNSEx", "SetDomains", "SetDefaultRoute",
-    "SetLLMNR", "SetMulticastDNS", "SetDNSOverTLS", "SetDNSSEC",
-    "SetDNSSECNegativeTrustAnchors", "Revert",
+    "SetDNS",
+    "SetDNSEx",
+    "SetDomains",
+    "SetDefaultRoute",
+    "SetLLMNR",
+    "SetMulticastDNS",
+    "SetDNSOverTLS",
+    "SetDNSSEC",
+    "SetDNSSECNegativeTrustAnchors",
+    "Revert",
 ];
 
 #[cfg(test)]

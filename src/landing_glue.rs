@@ -1,13 +1,12 @@
-//! landing_glue.rs — single place that starts a replaceable resolved.
+//! `landing_glue.rs` — single place that starts a replaceable resolved.
 //!
-//! Call: landing_glue::run(cfg).await
+//! Call: `landing_glue::run(cfg).await`
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 // Adjust paths to your real modules as you merge:
 // use crate::config::ResolvedConfig;

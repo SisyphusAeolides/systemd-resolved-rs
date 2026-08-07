@@ -1,8 +1,8 @@
 //! Daemon side: publish hot cache to POSIX shm for nss-resolve lock-free reads.
 //!
 //! Layout (lock-free RCU):
-//!   [ShmHeader]
-//!   [Bucket; N]  — each bucket: gen, key_hash, off, len, expires_unix_ms, flags
+//!   [`ShmHeader`]
+//!   [Bucket; N]  — each bucket: gen, `key_hash`, off, len, `expires_unix_ms`, flags
 //!   [Payload arena]
 //!
 //! Writer (daemon): update payload → publish new gen with Release.
@@ -52,7 +52,7 @@ pub struct ShmBucket {
 }
 
 /// Packed after bucket points into arena:
-/// [u8 owner_len][owner wire...][addrs: n * (u8 family, u8 plen, addr bytes)]
+/// [u8 `owner_len`][owner wire...][addrs: n * (u8 family, u8 plen, addr bytes)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ShmAddr {
@@ -85,8 +85,8 @@ impl ShmPublisher {
             std::fs::set_permissions(SHM_PATH, std::fs::Permissions::from_mode(0o644))?;
         }
         let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
-        let arena_off =
-            (std::mem::size_of::<ShmHeader>() + N_BUCKETS * std::mem::size_of::<ShmBucket>()) as u32;
+        let arena_off = (std::mem::size_of::<ShmHeader>()
+            + N_BUCKETS * std::mem::size_of::<ShmBucket>()) as u32;
         let hdr = ShmHeader {
             magic: SHM_MAGIC,
             version: SHM_VERSION,
@@ -98,9 +98,12 @@ impl ShmPublisher {
             _pad: 0,
         };
         unsafe {
-            let p = mmap.as_mut_ptr() as *mut ShmHeader;
+            let p = mmap.as_mut_ptr().cast::<ShmHeader>();
             std::ptr::write(p, hdr);
-            let b = mmap.as_mut_ptr().add(std::mem::size_of::<ShmHeader>()) as *mut ShmBucket;
+            let b = mmap
+                .as_mut_ptr()
+                .add(std::mem::size_of::<ShmHeader>())
+                .cast::<ShmBucket>();
             std::ptr::write_bytes(b, 0, N_BUCKETS);
         }
         Ok(Self {
@@ -110,13 +113,16 @@ impl ShmPublisher {
     }
 
     fn header_mut(&mut self) -> &mut ShmHeader {
-        unsafe { &mut *(self.mmap.as_mut_ptr() as *mut ShmHeader) }
+        unsafe { &mut *self.mmap.as_mut_ptr().cast::<ShmHeader>() }
     }
 
     fn buckets_mut(&mut self) -> &mut [ShmBucket] {
         unsafe {
             std::slice::from_raw_parts_mut(
-                self.mmap.as_mut_ptr().add(self.hdr_size) as *mut ShmBucket,
+                self.mmap
+                    .as_mut_ptr()
+                    .add(self.hdr_size)
+                    .cast::<ShmBucket>(),
                 N_BUCKETS,
             )
         }
@@ -145,7 +151,7 @@ impl ShmPublisher {
         let exp = system_now_ms() + ttl.as_millis() as u64;
 
         // allocate arena (bump; wrap on full)
-        let need = 1 + owner_wire.len() + addrs.len() * std::mem::size_of::<ShmAddr>();
+        let need = 1 + owner_wire.len() + std::mem::size_of_val(addrs);
         let hdr = self.header_mut();
         if hdr.arena_used as usize + need > hdr.arena_size as usize {
             hdr.arena_used = 0; // epoch wrap — readers retry on gen
@@ -158,12 +164,12 @@ impl ShmPublisher {
         let arena_off = hdr.arena_off as usize;
         let slot = &mut self.mmap[arena_off + off as usize..arena_off + off as usize + need];
         slot[0] = owner_wire.len() as u8;
-        slot[1..1 + owner_wire.len()].copy_from_slice(owner_wire);
+        slot[1..=owner_wire.len()].copy_from_slice(owner_wire);
         let mut p = 1 + owner_wire.len();
         for a in addrs {
             let bytes = unsafe {
                 std::slice::from_raw_parts(
-                    (a as *const ShmAddr) as *const u8,
+                    (a as *const ShmAddr).cast::<u8>(),
                     std::mem::size_of::<ShmAddr>(),
                 )
             };
@@ -204,12 +210,12 @@ impl ShmPublisher {
 pub fn hash_key(owner: &[u8], qtype: u16, qclass: u16) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
     for &b in owner {
-        h ^= b as u64;
+        h ^= u64::from(b);
         h = h.wrapping_mul(0x100000001b3);
     }
-    h ^= (qtype as u64) << 16;
+    h ^= u64::from(qtype) << 16;
     h = h.wrapping_mul(0x100000001b3);
-    h ^= qclass as u64;
+    h ^= u64::from(qclass);
     h ^= h >> 33;
     h = h.wrapping_mul(0xff51afd7ed558ccd);
     h ^= h >> 33;
@@ -219,8 +225,7 @@ pub fn hash_key(owner: &[u8], qtype: u16, qclass: u16) -> u64 {
 fn system_now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 /// NSS-side lookup (also usable from Rust tests).
@@ -244,7 +249,7 @@ impl ShmReader {
         if self.mmap.len() < std::mem::size_of::<ShmHeader>() {
             return None;
         }
-        let hdr = unsafe { &*(self.mmap.as_ptr() as *const ShmHeader) };
+        let hdr = unsafe { &*self.mmap.as_ptr().cast::<ShmHeader>() };
         if hdr.magic != SHM_MAGIC || hdr.version != SHM_VERSION {
             return None;
         }
@@ -253,7 +258,12 @@ impl ShmReader {
         let buck_base = std::mem::size_of::<ShmHeader>();
         for _ in 0..4 {
             let b = unsafe {
-                &*((self.mmap.as_ptr().add(buck_base) as *const ShmBucket).add(bi))
+                &*(self
+                    .mmap
+                    .as_ptr()
+                    .add(buck_base)
+                    .cast::<ShmBucket>()
+                    .add(bi))
             };
             let g1 = b.gen;
             std::sync::atomic::fence(Ordering::Acquire);
@@ -277,7 +287,7 @@ impl ShmReader {
             if 1 + olen > slice.len() {
                 return None;
             }
-            if &slice[1..1 + olen] != owner {
+            if &slice[1..=olen] != owner {
                 // hash collision
                 return None;
             }
@@ -288,13 +298,18 @@ impl ShmReader {
                 if p + asz > slice.len() {
                     break;
                 }
-                let a = unsafe { *(slice.as_ptr().add(p) as *const ShmAddr) };
+                let a = unsafe { *slice.as_ptr().add(p).cast::<ShmAddr>() };
                 addrs.push(a);
                 p += asz;
             }
             std::sync::atomic::fence(Ordering::Acquire);
             let g2 = unsafe {
-                &*((self.mmap.as_ptr().add(buck_base) as *const ShmBucket).add(bi))
+                &*(self
+                    .mmap
+                    .as_ptr()
+                    .add(buck_base)
+                    .cast::<ShmBucket>()
+                    .add(bi))
             }
             .gen;
             if g1 == g2 {

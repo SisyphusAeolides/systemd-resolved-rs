@@ -22,8 +22,8 @@ impl QueryBudget {
     pub fn new(class: QueryClass) -> Self {
         let total = match class {
             QueryClass::Interactive => Duration::from_millis(350),
-            QueryClass::Bulk => Duration::from_millis(2000),
-            QueryClass::Prefetch => Duration::from_millis(5000),
+            QueryClass::Bulk => Duration::from_secs(2),
+            QueryClass::Prefetch => Duration::from_secs(5),
         };
         Self {
             class,

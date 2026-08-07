@@ -57,7 +57,9 @@ impl SupremacyResolver {
 
     pub async fn resolve(&self, key: CKey, class: QueryClass) -> Result<CVal, SupremacyErr> {
         let start = Instant::now();
-        self.metrics.queries_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .queries_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let budget = QueryBudget::new(class);
         let now = Instant::now();
 
@@ -65,8 +67,10 @@ impl SupremacyResolver {
         let ent = self.cache.get_entry(&key);
         match decide_swr(ent.as_ref(), now, &self.swr, &budget) {
             SwrDecision::Serve(v, kick) => {
-                if ent.as_ref().map(|e| now >= e.expires).unwrap_or(false) {
-                    self.metrics.swr_served.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if ent.as_ref().is_some_and(|e| now >= e.expires) {
+                    self.metrics
+                        .swr_served
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 self.prefetch.record_hit(&key);
                 if kick {
@@ -81,7 +85,9 @@ impl SupremacyResolver {
         // 2) Aggressive NSEC
         match self.nsec.lookup(&key.owner, key.qtype, now) {
             AggAnswer::NxDomain => {
-                self.metrics.nsec_agg_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .nsec_agg_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let v = CVal {
                     rcode: 3,
                     answer: Bytes::new(),
@@ -93,7 +99,9 @@ impl SupremacyResolver {
                 return Ok(v);
             }
             AggAnswer::NoData => {
-                self.metrics.nsec_agg_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .nsec_agg_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let v = CVal {
                     rcode: 0,
                     answer: Bytes::new(),
@@ -107,10 +115,14 @@ impl SupremacyResolver {
         }
 
         if budget.expired() {
-            self.metrics.budget_expired.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.metrics
+                .budget_expired
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // last chance stale
             if let Some((v, true)) = self.cache.get(&key, now) {
-                self.metrics.swr_served.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .swr_served
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Ok(v);
             }
             return Err(SupremacyErr::Budget);
@@ -123,26 +135,32 @@ impl SupremacyResolver {
                 self.cache.put(
                     key.clone(),
                     v.clone(),
-                    Duration::from_secs(v.min_ttl as u64),
+                    Duration::from_secs(u64::from(v.min_ttl)),
                     Instant::now(),
                 );
                 self.publish_shm(&key, &v);
-                self.metrics.upstream_ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .upstream_ok
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.metrics.record_latency(start.elapsed());
                 Ok(v)
             }
             Err(e) => {
-                self.metrics.upstream_fail.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .upstream_fail
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // SWR fallback
                 if let Some((v, true)) = self.cache.get(&key, Instant::now()) {
-                    self.metrics.swr_served.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.metrics
+                        .swr_served
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return Ok(v);
                 }
                 self.flight.push(FlightEvent {
                     at: Instant::now(),
                     qname: format!("{:?}", key.owner),
                     qtype: key.qtype,
-                    err: format!("{:?}", e),
+                    err: format!("{e:?}"),
                     upstream: None,
                     budget_ms_left: budget.remaining().as_millis() as u64,
                     wire_hex_prefix: String::new(),
@@ -152,7 +170,11 @@ impl SupremacyResolver {
         }
     }
 
-    async fn fetch_upstream(&self, _key: &CKey, _budget: &QueryBudget) -> Result<CVal, SupremacyErr> {
+    async fn fetch_upstream(
+        &self,
+        _key: &CKey,
+        _budget: &QueryBudget,
+    ) -> Result<CVal, SupremacyErr> {
         // Hook: SpeculativePool + TransportPool + dnssec sigcache
         Err(SupremacyErr::Upstream)
     }

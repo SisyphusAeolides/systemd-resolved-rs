@@ -62,14 +62,12 @@ impl Metrics {
         let lc = self.latency_count.load(Ordering::Relaxed).max(1);
         let avg = self.latency_us_sum.load(Ordering::Relaxed) / lc;
         s.push_str(&format!(
-            "# TYPE resolvedrs_query_latency_us gauge\nresolvedrs_query_latency_us {}\n",
-            avg
+            "# TYPE resolvedrs_query_latency_us gauge\nresolvedrs_query_latency_us {avg}\n"
         ));
         let vc = self.dnssec_verify_count.load(Ordering::Relaxed).max(1);
         let vavg = self.dnssec_verify_us_sum.load(Ordering::Relaxed) / vc;
         s.push_str(&format!(
-            "# TYPE resolvedrs_dnssec_verify_us gauge\nresolvedrs_dnssec_verify_us {}\n",
-            vavg
+            "# TYPE resolvedrs_dnssec_verify_us gauge\nresolvedrs_dnssec_verify_us {vavg}\n"
         ));
         s
     }

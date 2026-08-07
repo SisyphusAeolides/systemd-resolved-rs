@@ -1,5 +1,5 @@
 //! Lock-free-ish sharded DNS positive/negative cache with:
-//! - per-shard parking_lot RwLock (or std::sync::RwLock)
+//! - per-shard `parking_lot` `RwLock` (or `std::sync::RwLock`)
 //! - epoch-based lazy eviction (no background sweeper storms)
 //! - singleflight coalescing for in-flight identical QNAME/QTYPE/QCLASS
 //! - label-aware FNV-1a mixed with wyhash finalizer for name keys
@@ -54,7 +54,7 @@ pub fn dns_name_hash(wire: &[u8]) -> u64 {
         for _ in 0..len {
             let b = wire[i];
             let folded = if b.is_ascii_uppercase() { b + 32 } else { b };
-            h ^= folded as u64;
+            h ^= u64::from(folded);
             h = h.wrapping_mul(PRIME);
             i += 1;
         }
@@ -161,7 +161,7 @@ impl GlobalCache {
 
     #[inline]
     fn shard_idx(&self, key: &CacheKey) -> usize {
-        (dns_name_hash(&key.owner) ^ ((key.qtype as u64) << 16) ^ key.qclass as u64) as usize
+        (dns_name_hash(&key.owner) ^ (u64::from(key.qtype) << 16) ^ u64::from(key.qclass)) as usize
             & self.shard_mask as usize
     }
 
@@ -217,7 +217,12 @@ impl GlobalCache {
     }
 
     /// Singleflight: only one task performs `fetch`; others await the result.
-    pub async fn get_or_fetch<F, Fut>(&self, key: CacheKey, now: Instant, fetch: F) -> Result<CacheEntry, FetchErr>
+    pub async fn get_or_fetch<F, Fut>(
+        &self,
+        key: CacheKey,
+        now: Instant,
+        fetch: F,
+    ) -> Result<CacheEntry, FetchErr>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<(u8, Arc<[u8]>, Duration, bool), FetchErr>>,
@@ -307,7 +312,10 @@ impl GlobalCache {
     }
 
     pub fn len(&self) -> usize {
-        self.shards.iter().map(|s| s.live.load(Ordering::Relaxed) as usize).sum()
+        self.shards
+            .iter()
+            .map(|s| s.live.load(Ordering::Relaxed) as usize)
+            .sum()
     }
 }
 
@@ -364,10 +372,8 @@ fn evict_expired_or_oldest(map: &mut HashMap<CacheKey, CacheEntry>, now: Instant
         return;
     }
     // Hard pressure: drop lowest insert_gen.
-    let mut gens: Vec<(u64, CacheKey)> = map
-        .iter()
-        .map(|(k, e)| (e.insert_gen, k.clone()))
-        .collect();
+    let mut gens: Vec<(u64, CacheKey)> =
+        map.iter().map(|(k, e)| (e.insert_gen, k.clone())).collect();
     gens.sort_by_key(|(g, _)| *g);
     for (_, k) in gens.into_iter().take(budget.saturating_sub(removed)) {
         map.remove(&k);

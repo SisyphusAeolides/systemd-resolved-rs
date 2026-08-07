@@ -1,4 +1,4 @@
-//! src/server_features.rs
+//! `src/server_features.rs`
 #![allow(missing_debug_implementations)]
 
 #[derive(Clone, Debug, Default)]
@@ -23,5 +23,8 @@ pub async fn probe_server(up: &Upstream, t: &dyn Transport) -> ServerFeatures {
     // 4) if DoT mode opportunistic: try TLS 853, fall back
     // 5) store in map hashed by ServerIdentity (addr|port|ifindex|sni)
     let _ = (up, t);
-    ServerFeatures { udp_payload: 1232, ..Default::default() }
+    ServerFeatures {
+        udp_payload: 1232,
+        ..Default::default()
+    }
 }

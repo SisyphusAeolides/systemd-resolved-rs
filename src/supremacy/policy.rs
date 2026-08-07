@@ -16,7 +16,7 @@ pub struct DnsView {
 
 #[derive(Clone, Debug)]
 pub struct DomainRule {
-    pub suffix: String, // "corp.example" or "." 
+    pub suffix: String, // "corp.example" or "."
     pub search: bool,
     pub route_only: bool,
 }
@@ -31,7 +31,12 @@ pub struct PolicyDb {
 }
 
 impl PolicyDb {
-    pub fn resolve_view(&self, cgroup: Option<&str>, netns: Option<u64>, uid: Option<u32>) -> &DnsView {
+    pub fn resolve_view(
+        &self,
+        cgroup: Option<&str>,
+        netns: Option<u64>,
+        uid: Option<u32>,
+    ) -> &DnsView {
         if let Some(ns) = netns {
             if let Some(vn) = self.by_netns.get(&ns) {
                 if let Some(v) = self.views.get(vn) {
@@ -43,10 +48,8 @@ impl PolicyDb {
             // longest prefix match on cgroup path
             let mut best: Option<(&str, &str)> = None;
             for (path, vn) in &self.by_cgroup {
-                if cg.starts_with(path) {
-                    if best.map(|(p, _)| path.len() > p.len()).unwrap_or(true) {
-                        best = Some((path.as_str(), vn.as_str()));
-                    }
+                if cg.starts_with(path) && best.map_or(true, |(p, _)| path.len() > p.len()) {
+                    best = Some((path.as_str(), vn.as_str()));
                 }
             }
             if let Some((_, vn)) = best {
@@ -75,7 +78,7 @@ pub fn pick_links_for_name(name: &str, rules: &[DomainRule], default_ok: bool) -
         if d.is_empty() || d == "." {
             continue;
         }
-        if n == d || n.ends_with(&format!(".{}", d)) {
+        if n == d || n.ends_with(&format!(".{d}")) {
             let len = d.len() as isize;
             if len > best {
                 best = len;

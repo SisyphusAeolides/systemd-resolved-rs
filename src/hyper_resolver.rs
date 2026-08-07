@@ -1,18 +1,18 @@
-//! hyper_resolver.rs — Einstein-tier concurrent DNS resolution core.
+//! `hyper_resolver.rs` — Einstein-tier concurrent DNS resolution core.
 //!
 //! Architecture:
 //!   ┌─────────────┐   singleflight    ┌──────────────────┐
-//!   │ Stub / DBus │ ───────────────► │  QueryScheduler   │
+//!   │ Stub / `DBus` │ ───────────────► │  `QueryScheduler`   │
 //!   └─────────────┘                   │  (work-stealing)  │
 //!                                     └────────┬─────────┘
 //!                          ┌───────────────────┼───────────────────┐
 //!                          ▼                   ▼                   ▼
-//!                   SpeculativePool      ArenaWireParser     DnssecPipeline
+//!                   `SpeculativePool`      `ArenaWireParser`     `DnssecPipeline`
 //!                   (N upstreams)        (bump / epoch)      (validate+AD)
 //!                          │                   │                   │
 //!                          └───────────────────┴───────────────────┘
 //!                                              ▼
-//!                                      HierarchicalCache
+//!                                      `HierarchicalCache`
 //!                                      (L1 shard / L2 cold)
 //!
 //! Features:
@@ -25,25 +25,23 @@
 //! - Serve-stale + background refresh with hysteresis
 //! - Per-link / per-scope routing tables (networkd parity)
 //!
-//! deps: tokio, parking_lot, crossbeam-queue, bytes, rand, thiserror, tracing
+//! deps: tokio, `parking_lot`, crossbeam-queue, bytes, rand, thiserror, tracing
 
 #![allow(dead_code)]
 #![allow(missing_debug_implementations)]
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{BufMut, Bytes, BytesMut};
-use crossbeam_queue::ArrayQueue;
 use parking_lot::{Mutex, RwLock};
 use rand::Rng;
 use thiserror::Error;
-use tokio::sync::{broadcast, oneshot, Semaphore};
-use tokio::time::{timeout, sleep};
+use tokio::sync::{broadcast, Semaphore};
+use tokio::time::{sleep, timeout};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Wire constants & types
@@ -211,7 +209,7 @@ impl WireArena {
         }
     }
 
-    /// Allocate `len` bytes in the current epoch; returns view + mutable ptr range via BytesMut split.
+    /// Allocate `len` bytes in the current epoch; returns view + mutable ptr range via `BytesMut` split.
     pub fn alloc(&self, len: usize) -> HResult<ArenaBytes> {
         if len > self.slab_size {
             return Err(HyperError::ArenaExhausted);
@@ -291,7 +289,7 @@ impl WireArena {
 
     /// Copy from slice into arena-backed buffer.
     pub fn copy_from(&self, src: &[u8]) -> HResult<ArenaBytes> {
-        let mut ab = self.alloc(src.len())?;
+        let ab = self.alloc(src.len())?;
         // ArenaBytes holds Bytes (immutable). Rebuild:
         let mut bm = BytesMut::with_capacity(src.len());
         bm.extend_from_slice(src);
@@ -349,7 +347,7 @@ impl NameKey {
             }
             for j in 0..l {
                 let b = wire[i + 1 + j];
-                out.put_u8(if (b'A'..=b'Z').contains(&b) { b + 32 } else { b });
+                out.put_u8(if b.is_ascii_uppercase() { b + 32 } else { b });
             }
             i += 1 + l;
         }
@@ -369,7 +367,7 @@ impl NameKey {
             }
             out.put_u8(lab.len() as u8);
             for &b in *lab {
-                out.put_u8(if (b'A'..=b'Z').contains(&b) { b + 32 } else { b });
+                out.put_u8(if b.is_ascii_uppercase() { b + 32 } else { b });
             }
         }
         out.put_u8(0);
@@ -403,7 +401,7 @@ pub fn name_hash64(wire: &[u8]) -> u64 {
     const P: u64 = 0x100000001b3;
     let mut h = OFF;
     for &b in wire {
-        h ^= b as u64;
+        h ^= u64::from(b);
         h = h.wrapping_mul(P);
     }
     h ^= h >> 33;
@@ -577,7 +575,7 @@ impl PacketView {
     }
 }
 
-/// Decompress name at `off` into NameKey; returns (name, offset_after).
+/// Decompress name at `off` into `NameKey`; returns (name, `offset_after`).
 pub fn decompress_name(msg: &[u8], off: usize) -> HResult<(NameKey, usize)> {
     let mut out = BytesMut::with_capacity(64);
     let mut o = off;
@@ -609,9 +607,7 @@ pub fn decompress_name(msg: &[u8], off: usize) -> HResult<(NameKey, usize)> {
                 return Err(HyperError::Wire("name too long".into()));
             }
             let next = if jumped { return_off } else { o + 1 };
-            let key = NameKey {
-                wire: out.freeze(),
-            };
+            let key = NameKey { wire: out.freeze() };
             return Ok((key, next));
         }
         if lab & 0xC0 == 0xC0 {
@@ -642,7 +638,7 @@ pub fn decompress_name(msg: &[u8], off: usize) -> HResult<(NameKey, usize)> {
         out.put_u8(lab);
         for j in 0..l {
             let b = msg[o + 1 + j];
-            out.put_u8(if (b'A'..=b'Z').contains(&b) { b + 32 } else { b });
+            out.put_u8(if b.is_ascii_uppercase() { b + 32 } else { b });
         }
         o += 1 + l;
     }
@@ -674,7 +670,7 @@ impl QueryBuilder {
         buf.put_u16(TYPE_OPT);
         buf.put_u16(DNS_MAX_UDP as u16);
         buf.put_u32(0); // version 0, DO bit set below
-        // set DO bit in OPT TTL (bit 15 of flags lower 16)
+                        // set DO bit in OPT TTL (bit 15 of flags lower 16)
         let opt_ttl_pos = buf.len() - 4;
         let do_flags: u32 = 0x0000_8000; // DO
         buf[opt_ttl_pos] = (do_flags >> 24) as u8;
@@ -768,9 +764,9 @@ impl HierarchicalCache {
 
     fn idx(&self, k: &CacheKey) -> usize {
         let h = name_hash64(k.name.wire())
-            ^ ((k.qtype as u64) << 17)
-            ^ ((k.qclass as u64) << 3)
-            ^ (k.cd as u64).wrapping_mul(0x9E3779B97F4A7C15);
+            ^ (u64::from(k.qtype) << 17)
+            ^ (u64::from(k.qclass) << 3)
+            ^ u64::from(k.cd).wrapping_mul(0x9E3779B97F4A7C15);
         (h & self.mask) as usize
     }
 
@@ -831,6 +827,12 @@ struct Flight {
 pub struct Singleflight {
     inner: Mutex<HashMap<CacheKey, Arc<Flight>>>,
     coalesced: AtomicU64,
+}
+
+impl Default for Singleflight {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Singleflight {
@@ -942,7 +944,8 @@ impl SpeculativePool {
             return Err(HyperError::AllUpstreamsFailed);
         }
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<HResult<(PacketView, Upstream, Duration)>>(1);
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<HResult<(PacketView, Upstream, Duration)>>(1);
         let cancel = tokio_util::sync::CancellationToken::new();
         let overall = self.overall;
         let per_try = self.per_try;
@@ -953,15 +956,17 @@ impl SpeculativePool {
             let tx = tx.clone();
             let child = cancel.child_token();
             let qbase = query_template.clone();
-            let transport_ptr_raw: (usize, usize) = unsafe { std::mem::transmute(transport as *const dyn Transport) };
+            let transport_ptr_raw: (usize, usize) =
+                unsafe { std::mem::transmute(transport as *const dyn Transport) };
             // SAFETY: transport lives for the race scope; we await all before return.
             let validate_dyn: &(dyn Fn(&[u8], &Upstream) -> HResult<()> + Send + Sync) = &validate;
-            let validate_ptr_raw: (usize, usize) = unsafe { std::mem::transmute(validate_dyn as *const _) };
+            let validate_ptr_raw: (usize, usize) =
+                unsafe { std::mem::transmute(validate_dyn as *const _) };
             tokio::spawn(async move {
                 if i > 0 {
                     tokio::select! {
-                        _ = sleep(stagger * i as u32) => {}
-                        _ = child.cancelled() => return,
+                        () = sleep(stagger * i as u32) => {}
+                        () = child.cancelled() => return,
                     }
                 }
                 if child.is_cancelled() {
@@ -975,12 +980,19 @@ impl SpeculativePool {
                 }
                 let q = q.freeze();
                 // transmute pointer back
-                let transport: &dyn Transport = unsafe { &*std::mem::transmute::<(usize, usize), *const dyn Transport>(transport_ptr_raw) };
-                let validate: &(dyn Fn(&[u8], &Upstream) -> HResult<()> + Send + Sync) = unsafe { &*std::mem::transmute::<(usize, usize), *const (dyn Fn(&[u8], &Upstream) -> HResult<()> + Send + Sync)>(validate_ptr_raw) };
+                let transport: &dyn Transport = unsafe {
+                    &*std::mem::transmute::<(usize, usize), *const dyn Transport>(transport_ptr_raw)
+                };
+                let validate: &(dyn Fn(&[u8], &Upstream) -> HResult<()> + Send + Sync) = unsafe {
+                    &*std::mem::transmute::<
+                        (usize, usize),
+                        *const (dyn Fn(&[u8], &Upstream) -> HResult<()> + Send + Sync),
+                    >(validate_ptr_raw)
+                };
                 let started = Instant::now();
                 let res = tokio::select! {
                     r = transport.exchange(&up, q, per_try) => r,
-                    _ = child.cancelled() => Err(HyperError::Cancelled),
+                    () = child.cancelled() => Err(HyperError::Cancelled),
                 };
                 match res {
                     Ok((raw, _rtt)) => {
@@ -1006,9 +1018,7 @@ impl SpeculativePool {
                             Ok(pv)
                         }) {
                             Ok(pv) => {
-                                let _ = tx
-                                    .send(Ok((pv, up, started.elapsed())))
-                                    .await;
+                                let _ = tx.send(Ok((pv, up, started.elapsed()))).await;
                             }
                             Err(e) => {
                                 let _ = tx.send(Err(e)).await;
@@ -1274,26 +1284,20 @@ impl HyperResolver {
             let (pv, up, rtt) = self
                 .cfg
                 .speculative
-                .race(
-                    self.transport.as_ref(),
-                    &ups,
-                    &scores,
-                    &q,
-                    |raw, u| {
-                        if raw.len() < DNS_HEADER_LEN {
-                            return Err(HyperError::Wire("short".into()));
-                        }
-                        if !raw[2] & 0x80 != 0 && raw[2] & 0x80 == 0 {
-                            // must be response
-                        }
-                        let qr = raw[2] & 0x80 != 0;
-                        if !qr {
-                            return Err(HyperError::Wire("not response".into()));
-                        }
-                        let _ = u;
-                        Ok(())
-                    },
-                )
+                .race(self.transport.as_ref(), &ups, &scores, &q, |raw, u| {
+                    if raw.len() < DNS_HEADER_LEN {
+                        return Err(HyperError::Wire("short".into()));
+                    }
+                    if !raw[2] & 0x80 != 0 && raw[2] & 0x80 == 0 {
+                        // must be response
+                    }
+                    let qr = raw[2] & 0x80 != 0;
+                    if !qr {
+                        return Err(HyperError::Wire("not response".into()));
+                    }
+                    let _ = u;
+                    Ok(())
+                })
                 .await
                 .map_err(|e| {
                     self.metrics.upstream_fail.fetch_add(1, Ordering::Relaxed);
@@ -1329,7 +1333,7 @@ impl HyperResolver {
             }
 
             let ttl = extract_min_ttl(pv.bytes()).unwrap_or(60);
-            let ttl = Duration::from_secs(ttl as u64)
+            let ttl = Duration::from_secs(u64::from(ttl))
                 .min(if pv.rcode() == RCODE_NXDOMAIN {
                     self.cfg.negative_max
                 } else {
@@ -1526,5 +1530,3 @@ fn extract_addrs(msg: &[u8], v6: bool) -> Vec<IpAddr> {
     }
     out
 }
-
-

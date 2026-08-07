@@ -1,4 +1,4 @@
-//! tests/varlink_golden.rs
+//! `tests/varlink_golden.rs`
 //! Parse upstream io.systemd.Resolve IDL; assert your methods match.
 //! Monitor interface: push DNS query logs for resolvectl monitor / JSON stream.
 

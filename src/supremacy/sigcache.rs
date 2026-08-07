@@ -1,11 +1,11 @@
 //! Don't re-verify the same RRSIG/DNSKEY thousands of times.
 #![allow(missing_debug_implementations)]
 
+use bytes::Bytes;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use parking_lot::Mutex;
-use bytes::Bytes;
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct SigCacheKey {
@@ -80,8 +80,14 @@ impl SigCache {
         );
     }
 
-    /// verify_fn called only on miss
-    pub fn get_or_verify<F>(&self, k: SigCacheKey, ttl: Duration, now: Instant, verify_fn: F) -> VerifyResult
+    /// `verify_fn` called only on miss
+    pub fn get_or_verify<F>(
+        &self,
+        k: SigCacheKey,
+        ttl: Duration,
+        now: Instant,
+        verify_fn: F,
+    ) -> VerifyResult
     where
         F: FnOnce() -> VerifyResult,
     {

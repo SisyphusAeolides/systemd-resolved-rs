@@ -2,7 +2,11 @@
 #![allow(missing_debug_implementations)]
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MdnsMode { No, Resolve, Yes }
+pub enum MdnsMode {
+    No,
+    Resolve,
+    Yes,
+}
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct ServiceType {
@@ -13,10 +17,10 @@ pub struct ServiceType {
 
 #[derive(Clone, Debug)]
 pub struct ServiceInstance {
-    pub instance: String,      // "My Printer"
+    pub instance: String, // "My Printer"
     pub service: ServiceType,
     pub port: u16,
-    pub target_host: String,   // "printer.local"
+    pub target_host: String, // "printer.local"
     pub txt: Vec<(String, Vec<u8>)>,
     pub ifindex: i32,
     pub ttl: u32,
@@ -38,12 +42,13 @@ impl MdnsEngine {
     pub const PORT: u16 = 5353;
 
     /// Probe → Announce → Defend (RFC 6762 probing)
-    pub async fn claim_hostname(&self, ifindex: i32, host_local: &str) { /* ... */ }
+    pub async fn claim_hostname(&self, _ifindex: i32, _host_local: &str) { /* ... */
+    }
 
-    /// ResolveService parity: instance or type browse.
+    /// `ResolveService` parity: instance or type browse.
     pub async fn resolve_service(
         &self,
-        name: &str,           // instance or type
+        name: &str, // instance or type
         stype: Option<&str>,
         domain: &str,
         ifindex: Option<i32>,
@@ -53,7 +58,11 @@ impl MdnsEngine {
         Err(MdnsErr::Timeout)
     }
 
-    pub async fn browse(&self, stype: &ServiceType, ifindex: i32) -> broadcast::Receiver<BrowseEvent> {
+    pub async fn browse(
+        &self,
+        stype: &ServiceType,
+        ifindex: i32,
+    ) -> broadcast::Receiver<BrowseEvent> {
         // Multicast PTR questions; emit Added/Removed on cache
         let (tx, rx) = tokio::sync::broadcast::channel(64);
         let _ = (stype, ifindex, tx);
@@ -70,7 +79,10 @@ impl MdnsEngine {
 #[derive(Clone, Debug)]
 pub enum BrowseEvent {
     Added(ServiceInstance),
-    Removed { instance: String, service: ServiceType },
+    Removed {
+        instance: String,
+        service: ServiceType,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -81,7 +93,16 @@ pub struct ResolvedService {
 
 // types omitted: MdnsQuestion, MdnsRr, MdnsCache, MdnsErr, broadcast import
 use tokio::sync::broadcast;
-#[derive(Debug)] pub enum MdnsErr { Timeout, Disabled, Conflict, Wire }
-#[derive(Clone, Debug)] pub struct MdnsQuestion;
-#[derive(Clone, Debug)] pub struct MdnsRr;
-#[derive(Default)] pub struct MdnsCache;
+#[derive(Debug)]
+pub enum MdnsErr {
+    Timeout,
+    Disabled,
+    Conflict,
+    Wire,
+}
+#[derive(Clone, Debug)]
+pub struct MdnsQuestion;
+#[derive(Clone, Debug)]
+pub struct MdnsRr;
+#[derive(Default)]
+pub struct MdnsCache;

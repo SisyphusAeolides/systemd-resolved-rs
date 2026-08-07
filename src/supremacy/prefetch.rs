@@ -59,9 +59,11 @@ impl PrefetchEngine {
                 if now >= ent.expires {
                     continue; // SWR path handles
                 }
-                let total = ent
-                    .expires
-                    .saturating_duration_since(ent.expires - Duration::from_secs(ent.value.min_ttl as u64));
+                let total = ent.expires.saturating_duration_since(
+                    ent.expires
+                        .checked_sub(Duration::from_secs(u64::from(ent.value.min_ttl)))
+                        .unwrap(),
+                );
                 let rem = ent.expires.saturating_duration_since(now);
                 if total.as_secs_f64() > 0.0
                     && (rem.as_secs_f64() / total.as_secs_f64()) < self.ttl_fraction

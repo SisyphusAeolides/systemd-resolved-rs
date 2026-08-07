@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-use crate::cache_x::{GlobalCache, CacheKey as XKey, Lookup};
+use crate::cache_x::{CacheKey as XKey, GlobalCache, Lookup};
 use crate::wire::{age_ttls, cache_lifetime, rewrite_id, Header, WireError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,7 +70,8 @@ impl Cache {
         let elapsed = u32::try_from(elapsed).unwrap_or(u32::MAX);
 
         let mut packet = entry.answer.to_vec();
-        if rewrite_id(&mut packet, id).is_err() || age_ttls(&mut packet, elapsed, is_stale).is_err() {
+        if rewrite_id(&mut packet, id).is_err() || age_ttls(&mut packet, elapsed, is_stale).is_err()
+        {
             return None;
         }
         Some(packet)
@@ -108,7 +109,14 @@ impl Cache {
         rewrite_id(&mut packet, 0)?;
 
         let xkey = Self::to_xkey(&key);
-        self.global.insert(xkey, rcode as u8, Arc::from(packet.into_boxed_slice()), ttl, false, Instant::now());
+        self.global.insert(
+            xkey,
+            rcode as u8,
+            Arc::from(packet.into_boxed_slice()),
+            ttl,
+            false,
+            Instant::now(),
+        );
 
         Ok(true)
     }

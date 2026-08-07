@@ -12,10 +12,14 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug)]
-pub enum ResolvConfMode { Stub, Uplink, Foreign }
+pub enum ResolvConfMode {
+    Stub,
+    Uplink,
+    Foreign,
+}
 
 pub struct ResolvConfPublisher {
     pub run_dir: PathBuf, // /run/systemd/resolve
@@ -42,7 +46,7 @@ impl ResolvConfPublisher {
             writeln!(f, "search {}", search.join(" "))?;
         }
         if !options.is_empty() {
-            writeln!(f, "options {}", options)?;
+            writeln!(f, "options {options}")?;
         }
         f.sync_all()?;
         fs::rename(tmp, p)?;
@@ -60,7 +64,7 @@ impl ResolvConfPublisher {
         let mut f = fs::File::create(&tmp)?;
         writeln!(f, "# Uplink resolv.conf from systemd-resolved-rs")?;
         for s in servers {
-            writeln!(f, "nameserver {}", s)?;
+            writeln!(f, "nameserver {s}")?;
         }
         if !search.is_empty() {
             writeln!(f, "search {}", search.join(" "))?;
@@ -70,14 +74,19 @@ impl ResolvConfPublisher {
         Ok(())
     }
 
-    pub fn write_netif(&self, ifindex: i32, servers: &[std::net::IpAddr], search: &[String]) -> std::io::Result<()> {
+    pub fn write_netif(
+        &self,
+        ifindex: i32,
+        servers: &[std::net::IpAddr],
+        search: &[String],
+    ) -> std::io::Result<()> {
         let p = self.run_dir.join("netif").join(ifindex.to_string());
         let mut tmp = p.clone();
         tmp.set_extension("tmp");
         let mut f = fs::File::create(&tmp)?;
-        writeln!(f, "# Link {} state", ifindex)?;
+        writeln!(f, "# Link {ifindex} state")?;
         for s in servers {
-            writeln!(f, "nameserver {}", s)?;
+            writeln!(f, "nameserver {s}")?;
         }
         if !search.is_empty() {
             writeln!(f, "search {}", search.join(" "))?;

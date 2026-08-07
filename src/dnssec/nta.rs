@@ -5,14 +5,18 @@ pub struct TrustAnchor {
     pub key: String,
 }
 
-pub enum DnssecMode { No, AllowDowngrade, Yes }
+pub enum DnssecMode {
+    No,
+    AllowDowngrade,
+    Yes,
+}
 
 pub struct NegativeTrustAnchor {
     pub domain: String, // insecure delegation island
 }
 
 pub struct ValidatorConfig {
-    pub mode: DnssecMode, // no | allow-downgrade | yes
+    pub mode: DnssecMode,                // no | allow-downgrade | yes
     pub trust_anchors: Vec<TrustAnchor>, // root DS/DNSKEY + custom
     pub ntas: Vec<NegativeTrustAnchor>,
 }
