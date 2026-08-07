@@ -7,7 +7,7 @@
 
 #define RESOLVED_IFNAME_MAX 16
 
-typedef struct resolved_link_snapshot {
+typedef struct resolved_link_info {
     int32_t ifindex;
     uint32_t flags;
     uint32_t mtu;
@@ -17,7 +17,7 @@ typedef struct resolved_link_snapshot {
     uint8_t has_ipv6_global;
     uint8_t has_ipv6_link_local;
     char ifname[RESOLVED_IFNAME_MAX];
-} resolved_link_snapshot;
+} resolved_link_info;
 
 int resolved_notify(const char *state);
 int resolved_listen_fds(void);
@@ -45,7 +45,7 @@ uint16_t resolved_dns_udp_payload_size(
     uint32_t received_udp_fragment_max
 );
 
-int64_t resolved_link_snapshot(resolved_link_snapshot *entries, size_t capacity);
+int64_t resolved_link_snapshot(resolved_link_info *entries, size_t capacity);
 int resolved_rtnl_open(void);
 int resolved_rtnl_wait(int fd, uint32_t timeout_msec);
 
