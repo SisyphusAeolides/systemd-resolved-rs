@@ -48,29 +48,48 @@ fn apply_optional_file(
 const MAX_CREDENTIAL_SIZE: usize = 1024 * 1024;
 const MAX_CREDENTIAL_READ: u64 = 1024 * 1024 + 1;
 
-fn apply_credentials_from_environment(config: &mut Config) -> bool {
+fn apply_credentials_from_environment(
+    config: &mut Config,
+    allow_dns: bool,
+    allow_domains: bool,
+) -> ConfigAssignments {
     let Some(directory) = std::env::var_os("CREDENTIALS_DIRECTORY") else {
-        return false;
+        return ConfigAssignments::default();
     };
     let directory = PathBuf::from(directory);
     if !directory.is_absolute() {
-        return false;
+        return ConfigAssignments::default();
     }
-    apply_credentials(config, &directory)
+    apply_credentials_selective(config, &directory, allow_dns, allow_domains)
 }
 
 fn apply_credentials(config: &mut Config, directory: &Path) -> bool {
-    let dns = read_credential(&directory.join("network.dns"));
-    let domains = read_credential(&directory.join("network.search_domains"));
-    let present = dns.is_some() || domains.is_some();
+    let assignments = apply_credentials_selective(config, directory, true, true);
+    assignments.dns || assignments.domains
+}
 
-    if let Some(dns) = dns {
-        let _ = apply_server_assignment(&mut config.upstreams, dns.trim());
+fn apply_credentials_selective(
+    config: &mut Config,
+    directory: &Path,
+    allow_dns: bool,
+    allow_domains: bool,
+) -> ConfigAssignments {
+    let mut assignments = ConfigAssignments::default();
+
+    if allow_dns {
+        if let Some(dns) = read_credential(&directory.join("network.dns")) {
+            assignments.dns = true;
+            let _ = apply_server_assignment(&mut config.upstreams, dns.trim());
+        }
     }
-    if let Some(domains) = domains {
-        let _ = apply_domain_assignment(&mut config.domains, domains.trim());
+    if allow_domains {
+        if let Some(domains) = read_credential(&directory.join("network.search_domains")) {
+            assignments.domains = true;
+            let _ = apply_domain_assignment(&mut config.domains, domains.trim());
+        }
     }
-    present
+
+    assignments
 }
 
 fn read_credential(path: &Path) -> Option<String> {
@@ -219,27 +238,52 @@ pub fn parse_server(value: &str) -> Result<SocketAddr, ConfigError> {
     Err(ConfigError::InvalidServer(value.to_owned()))
 }
 
-pub fn discover_resolv_conf(path: &Path) -> Result<Vec<SocketAddr>, ConfigError> {
+#[derive(Debug, Default)]
+struct ResolvConf {
+    servers: Vec<SocketAddr>,
+    domains: Vec<Domain>,
+}
+
+fn discover_resolv_conf_state(path: &Path) -> Result<ResolvConf, ConfigError> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(ResolvConf::default()),
         Err(error) => return Err(ConfigError::Io(error)),
     };
-    let mut output = Vec::new();
-    for line in text.lines() {
-        let mut fields = line.split_whitespace();
-        if fields.next() != Some("nameserver") {
+    let mut output = ResolvConf::default();
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
-        let Some(value) = fields.next() else {
-            continue;
-        };
-        let server = parse_server(value)?;
-        if !is_local_stub(server) && !output.contains(&server) {
-            output.push(server);
+        let mut fields = line.split_whitespace();
+        match fields.next() {
+            Some("nameserver") => {
+                let Some(value) = fields.next() else {
+                    continue;
+                };
+                let Ok(server) = parse_server(value) else {
+                    continue;
+                };
+                if !is_local_stub(server) && !output.servers.contains(&server) {
+                    output.servers.push(server);
+                }
+            }
+            Some("domain" | "search") => {
+                let value = fields.collect::<Vec<_>>().join(" ");
+                if value.is_empty() {
+                    continue;
+                }
+                let _ = apply_domain_assignment(&mut output.domains, &value);
+            }
+            _ => {}
         }
     }
     Ok(output)
+}
+
+pub fn discover_resolv_conf(path: &Path) -> Result<Vec<SocketAddr>, ConfigError> {
+    Ok(discover_resolv_conf_state(path)?.servers)
 }
 
 fn filtered_servers(servers: &[SocketAddr]) -> Vec<SocketAddr> {
