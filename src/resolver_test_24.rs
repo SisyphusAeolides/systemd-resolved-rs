@@ -2,7 +2,7 @@
 mod test_24_authenticated_dns_over_tls {
     use super::*;
     use std::fs;
-    use std::io::{BufRead, BufReader, Read};
+    use std::io::{BufRead, BufReader};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,7 +81,6 @@ mod test_24_authenticated_dns_over_tls {
 
             let script = r#"
 import socket, ssl, struct, sys
-
 cert, key, frames, expected_sni = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -96,26 +95,30 @@ listener.bind(("127.0.0.1", 0))
 listener.listen(1)
 print(listener.getsockname()[1], flush=True)
 raw, _ = listener.accept()
-with context.wrap_socket(raw, server_side=True) as stream:
-    wanted = None if expected_sni == "-" else expected_sni
+wanted = None if expected_sni == "-" else expected_sni
+try:
+    with context.wrap_socket(raw, server_side=True) as stream:
+        if seen["name"] != wanted:
+            raise RuntimeError(f"unexpected SNI: {seen['name']!r}, wanted {wanted!r}")
+        def read_exact(count):
+            data = b""
+            while len(data) < count:
+                chunk = stream.recv(count - len(data))
+                if not chunk:
+                    raise EOFError("TLS client closed")
+                data += chunk
+            return data
+        for _ in range(frames):
+            size = struct.unpack("!H", read_exact(2))[0]
+            query = bytearray(read_exact(size))
+            flags = struct.unpack("!H", query[2:4])[0] | 0x8080
+            query[2:4] = struct.pack("!H", flags & ~0x0200)
+            stream.sendall(struct.pack("!H", len(query)) + query)
+except ssl.SSLError:
+    if frames != 0:
+        raise
     if seen["name"] != wanted:
         raise RuntimeError(f"unexpected SNI: {seen['name']!r}, wanted {wanted!r}")
-    def read_exact(count):
-        data = b""
-        while len(data) < count:
-            chunk = stream.recv(count - len(data))
-            if not chunk:
-                raise EOFError("TLS client closed")
-            data += chunk
-        return data
-    for _ in range(frames):
-        size = struct.unpack("!H", read_exact(2))[0]
-        query = bytearray(read_exact(size))
-        flags = struct.unpack("!H", query[2:4])[0]
-        flags |= 0x8000 | 0x0080
-        flags &= ~0x0200
-        query[2:4] = struct.pack("!H", flags)
-        stream.sendall(struct.pack("!H", len(query)) + query)
 listener.close()
 "#;
 
@@ -135,7 +138,6 @@ listener.close()
                 .read_line(&mut line)
                 .expect("TLS server port");
             let port = line.trim().parse::<u16>().expect("TLS server port number");
-
             Self {
                 child: Some(child),
                 address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -144,7 +146,7 @@ listener.close()
             }
         }
 
-        fn address(&self) -> SocketAddr {
+        const fn address(&self) -> SocketAddr {
             self.address
         }
 
@@ -239,7 +241,6 @@ listener.close()
         let key = ServerKey::new(ScopeKind::Global, server.address());
         let query = make_query("opportunistic-encrypted.example", TYPE_A, 0x7b03)
             .expect("TLS DNS query");
-
         resolver
             .exchange_tls(key, &query, Duration::from_secs(2), false)
             .expect("opportunistic TLS response");
@@ -253,7 +254,6 @@ listener.close()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let server = TestTlsServer::spawn(0, Some("wrong.example"));
         let _certificate = EnvGuard::set("SSL_CERT_FILE", Some(server.certificate()));
-
         assert!(TlsStream::connect(
             server.address(),
             None,
@@ -272,7 +272,6 @@ listener.close()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let server = TestTlsServer::spawn(0, None);
         let _certificate = EnvGuard::set("SSL_CERT_FILE", Some(server.certificate()));
-
         TlsStream::connect(
             server.address(),
             None,
