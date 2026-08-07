@@ -69,6 +69,7 @@ impl Config {
             "DNS" => apply_server_assignment(&mut self.upstreams, value)?,
             "FallbackDNS" => apply_server_assignment(&mut self.fallback_upstreams, value)?,
             "Domains" => apply_domain_assignment(&mut self.domains, value)?,
+            "RefuseRecordTypes" => apply_refuse_record_types(&mut self.refuse_record_types, value),
             "Cache" => {
                 let (cache, cache_negative) = parse_cache_mode(value)?;
                 self.cache = cache;
