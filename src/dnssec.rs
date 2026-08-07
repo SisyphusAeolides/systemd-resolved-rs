@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
+pub mod canonical;
+
 use crate::wire::{dnskey_key_tag, parse_dnskey, parse_ds, ResourceRecord, WireError};
 use std::error::Error;
 use std::fmt;
