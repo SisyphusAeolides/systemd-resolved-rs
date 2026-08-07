@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 include!("config_types.rs");
+include!("config_record_types.rs");
 include!("config_impl.rs");
 include!("config_helpers.rs");
 include!("config_tests.rs");
