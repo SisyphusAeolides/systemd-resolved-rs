@@ -14,6 +14,7 @@ pub mod daemon;
 pub mod dbus;
 pub mod edns;
 pub mod hosts;
+pub mod interface;
 pub mod json;
 pub mod native;
 pub mod netlink;
