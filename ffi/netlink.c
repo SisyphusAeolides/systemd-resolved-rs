@@ -50,7 +50,7 @@ static uint8_t read_operstate(const char *ifname) {
     return IF_OPER_UNKNOWN;
 }
 
-static int find_snapshot(resolved_link_snapshot *entries, size_t length, unsigned int ifindex) {
+static int find_snapshot(resolved_link_info *entries, size_t length, unsigned int ifindex) {
     size_t index;
 
     for (index = 0; index < length; index++) {
@@ -74,7 +74,7 @@ static bool ipv4_is_usable_global(const struct in_addr *address) {
     return !ipv4_is_link_local(address);
 }
 
-static void collect_addresses(resolved_link_snapshot *entries, size_t length) {
+static void collect_addresses(resolved_link_info *entries, size_t length) {
     struct ifaddrs *addresses = NULL;
     struct ifaddrs *entry;
 
@@ -120,7 +120,7 @@ static void collect_addresses(resolved_link_snapshot *entries, size_t length) {
     freeifaddrs(addresses);
 }
 
-int64_t resolved_link_snapshot(resolved_link_snapshot *entries, size_t capacity) {
+int64_t resolved_link_snapshot(resolved_link_info *entries, size_t capacity) {
     struct if_nameindex *interfaces;
     struct if_nameindex *interface;
     size_t count = 0;
@@ -155,7 +155,7 @@ int64_t resolved_link_snapshot(resolved_link_snapshot *entries, size_t capacity)
          interface->if_index != 0U && interface->if_name != NULL && filled < capacity;
          interface++, filled++) {
         struct ifreq request;
-        resolved_link_snapshot *snapshot = &entries[filled];
+        resolved_link_info *snapshot = &entries[filled];
 
         memset(&request, 0, sizeof(request));
         snapshot->ifindex = (int32_t)interface->if_index;
