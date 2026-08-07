@@ -49,6 +49,9 @@ int64_t resolved_link_snapshot(resolved_link_info *entries, size_t capacity);
 int resolved_rtnl_open(void);
 int resolved_rtnl_wait(int fd, uint32_t timeout_msec);
 
+int resolved_networkd_open(void);
+int resolved_networkd_wait(int fd, uint32_t timeout_msec);
+
 int64_t resolved_route_score(
     const char *name,
     size_t name_len,
