@@ -48,48 +48,29 @@ fn apply_optional_file(
 const MAX_CREDENTIAL_SIZE: usize = 1024 * 1024;
 const MAX_CREDENTIAL_READ: u64 = 1024 * 1024 + 1;
 
-fn apply_credentials_from_environment(
-    config: &mut Config,
-    allow_dns: bool,
-    allow_domains: bool,
-) -> ConfigAssignments {
+fn apply_credentials_from_environment(config: &mut Config) -> bool {
     let Some(directory) = std::env::var_os("CREDENTIALS_DIRECTORY") else {
-        return ConfigAssignments::default();
+        return false;
     };
     let directory = PathBuf::from(directory);
     if !directory.is_absolute() {
-        return ConfigAssignments::default();
+        return false;
     }
-    apply_credentials_selective(config, &directory, allow_dns, allow_domains)
+    apply_credentials(config, &directory)
 }
 
 fn apply_credentials(config: &mut Config, directory: &Path) -> bool {
-    let assignments = apply_credentials_selective(config, directory, true, true);
-    assignments.dns || assignments.domains
-}
+    let dns = read_credential(&directory.join("network.dns"));
+    let domains = read_credential(&directory.join("network.search_domains"));
+    let present = dns.is_some() || domains.is_some();
 
-fn apply_credentials_selective(
-    config: &mut Config,
-    directory: &Path,
-    allow_dns: bool,
-    allow_domains: bool,
-) -> ConfigAssignments {
-    let mut assignments = ConfigAssignments::default();
-
-    if allow_dns {
-        if let Some(dns) = read_credential(&directory.join("network.dns")) {
-            assignments.dns = true;
-            let _ = apply_server_assignment(&mut config.upstreams, dns.trim());
-        }
+    if let Some(dns) = dns {
+        let _ = apply_server_assignment(&mut config.upstreams, dns.trim());
     }
-    if allow_domains {
-        if let Some(domains) = read_credential(&directory.join("network.search_domains")) {
-            assignments.domains = true;
-            let _ = apply_domain_assignment(&mut config.domains, domains.trim());
-        }
+    if let Some(domains) = domains {
+        let _ = apply_domain_assignment(&mut config.domains, domains.trim());
     }
-
-    assignments
+    present
 }
 
 fn read_credential(path: &Path) -> Option<String> {
