@@ -123,8 +123,16 @@ mod test_02_lookup_and_server_failover {
         });
         {
             let mut states = resolver.states();
-            states.entry(refused_server).or_default().metric.round_trip_ms = 1.0;
-            states.entry(success_server).or_default().metric.round_trip_ms = 1000.0;
+            states
+                .entry(ServerKey::new(ScopeKind::Global, refused_server))
+                .or_default()
+                .metric
+                .round_trip_ms = 1.0;
+            states
+                .entry(ServerKey::new(ScopeKind::Global, success_server))
+                .or_default()
+                .metric
+                .round_trip_ms = 1000.0;
         }
 
         let query = make_query("refused.example.test", TYPE_A, 0x7300).expect("client query");
