@@ -21,6 +21,13 @@ impl Resolver {
             }
 
             let response = self.query_on_link(&query, QueryMode::Full, ifindex)?;
+            let rcode = Header::parse(&response)?.response_code();
+            if rcode != 0 {
+                return Err(ResolveError::DnsError {
+                    rcode,
+                    query: current,
+                });
+            }
             match wire::classify_redirect_answer(&response)? {
                 wire::RedirectAnswer::Direct {
                     canonical_name,
