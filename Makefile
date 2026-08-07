@@ -29,6 +29,7 @@ check-rust:
 check-formal:
 	idris2 --build formal/idris/resolved-policy.ipkg
 	agda -i formal/agda formal/agda/Resolved/DNS/Name.agda
+	agda -i formal/agda formal/agda/Resolved/DNS/Transaction.agda
 
 test: check-native check-rust
 
