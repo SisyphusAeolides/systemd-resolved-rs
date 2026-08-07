@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-use resolved::config::{parse_server, Config};
+use resolved::config::{parse_server, Config, DnsStubListenerMode};
 use resolved::daemon::{install_signal_handlers, request_stop, run_stub};
 use resolved::dbus::DbusServer;
 use resolved::resolver::Resolver;
@@ -88,8 +88,7 @@ fn execute() -> Result<(), Box<dyn Error>> {
         rewrite_ports(&mut config.proxy_listeners, port);
     }
     if options.no_stub {
-        config.listeners.clear();
-        config.proxy_listeners.clear();
+        config.dns_stub_listener = DnsStubListenerMode::No;
     }
     config.validate()?;
 
@@ -97,7 +96,7 @@ fn execute() -> Result<(), Box<dyn Error>> {
         print_configuration(&config, options.no_varlink);
         return Ok(());
     }
-    if options.no_varlink && config.listeners.is_empty() && config.proxy_listeners.is_empty() {
+    if options.no_varlink && config.dns_stub_listener == DnsStubListenerMode::No {
         return Err("all resolver interfaces are disabled".into());
     }
 
@@ -142,10 +141,16 @@ fn execute() -> Result<(), Box<dyn Error>> {
     };
 
     for address in &config.listeners {
-        eprintln!("systemd-resolved: full stub listening on {address} (UDP/TCP)");
+        eprintln!(
+            "systemd-resolved: full stub listening on {address} ({})",
+            config.dns_stub_listener.as_str()
+        );
     }
     for address in &config.proxy_listeners {
-        eprintln!("systemd-resolved: proxy stub listening on {address} (UDP/TCP)");
+        eprintln!(
+            "systemd-resolved: proxy stub listening on {address} ({})",
+            config.dns_stub_listener.as_str()
+        );
     }
 
     let result = run_stub(&resolver);
@@ -178,6 +183,7 @@ fn print_configuration(config: &Config, no_varlink: bool) {
     println!("upstreams: {}", config.effective_upstreams().len());
     println!("full listeners: {}", config.listeners.len());
     println!("proxy listeners: {}", config.proxy_listeners.len());
+    println!("stub listener mode: {}", config.dns_stub_listener.as_str());
     if no_varlink {
         println!("varlink: disabled");
     } else {
