@@ -90,6 +90,30 @@ impl DnsStubListenerMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DnsStubListenerExtra {
+    address: SocketAddr,
+    mode: DnsStubListenerMode,
+}
+
+impl DnsStubListenerExtra {
+    pub const fn address(self) -> SocketAddr {
+        self.address
+    }
+
+    pub const fn udp_enabled(self) -> bool {
+        self.mode.udp_enabled()
+    }
+
+    pub const fn tcp_enabled(self) -> bool {
+        self.mode.tcp_enabled()
+    }
+
+    pub const fn mode(self) -> DnsStubListenerMode {
+        self.mode
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Domain {
     pub name: String,
@@ -117,6 +141,7 @@ pub struct Config {
     pub listeners: Vec<SocketAddr>,
     pub proxy_listeners: Vec<SocketAddr>,
     pub dns_stub_listener: DnsStubListenerMode,
+    pub dns_stub_listener_extra: Vec<DnsStubListenerExtra>,
     pub domains: Vec<Domain>,
     pub refuse_record_types: BTreeSet<u16>,
     pub varlink_path: PathBuf,
@@ -185,6 +210,7 @@ impl Default for Config {
                 53,
             )],
             dns_stub_listener: DnsStubListenerMode::Yes,
+            dns_stub_listener_extra: Vec::new(),
             domains: Vec::new(),
             refuse_record_types: BTreeSet::new(),
             varlink_path: PathBuf::from("/run/systemd/resolve/io.systemd.Resolve"),
