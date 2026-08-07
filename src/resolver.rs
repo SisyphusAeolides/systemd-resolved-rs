@@ -22,3 +22,4 @@ include!("resolver_test_12.rs");
 include!("resolver_test_13.rs");
 include!("resolver_test_14.rs");
 include!("resolver_test_15.rs");
+include!("resolver_test_16.rs");
