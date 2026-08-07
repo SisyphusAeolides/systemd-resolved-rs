@@ -37,7 +37,7 @@ struct sr_bucket {
     uint16_t pad;
 };
 
-_Static_assert(sizeof(struct sr_hdr) == 48, "unexpected shared-memory header layout");
+_Static_assert(sizeof(struct sr_hdr) == 40, "unexpected shared-memory header layout");
 _Static_assert(sizeof(struct sr_bucket) == 48, "unexpected shared-memory bucket layout");
 
 static uint64_t hash_key(const uint8_t *owner, size_t owner_length,
