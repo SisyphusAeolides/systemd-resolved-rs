@@ -53,6 +53,43 @@ impl TlsMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsStubListenerMode {
+    No,
+    Udp,
+    Tcp,
+    Yes,
+}
+
+impl DnsStubListenerMode {
+    fn parse(value: &str) -> Result<Self, ConfigError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "no" | "false" | "off" | "0" => Ok(Self::No),
+            "udp" => Ok(Self::Udp),
+            "tcp" => Ok(Self::Tcp),
+            "yes" | "true" | "on" | "1" => Ok(Self::Yes),
+            other => Err(ConfigError::InvalidValue(other.to_owned())),
+        }
+    }
+
+    pub const fn udp_enabled(self) -> bool {
+        matches!(self, Self::Udp | Self::Yes)
+    }
+
+    pub const fn tcp_enabled(self) -> bool {
+        matches!(self, Self::Tcp | Self::Yes)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::No => "no",
+            Self::Udp => "udp",
+            Self::Tcp => "tcp",
+            Self::Yes => "yes",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Domain {
     pub name: String,
@@ -79,6 +116,7 @@ pub struct Config {
     pub fallback_upstreams: Vec<SocketAddr>,
     pub listeners: Vec<SocketAddr>,
     pub proxy_listeners: Vec<SocketAddr>,
+    pub dns_stub_listener: DnsStubListenerMode,
     pub domains: Vec<Domain>,
     pub refuse_record_types: BTreeSet<u16>,
     pub varlink_path: PathBuf,
@@ -146,6 +184,7 @@ impl Default for Config {
                 IpAddr::V4(Ipv4Addr::new(127, 0, 0, 54)),
                 53,
             )],
+            dns_stub_listener: DnsStubListenerMode::Yes,
             domains: Vec::new(),
             refuse_record_types: BTreeSet::new(),
             varlink_path: PathBuf::from("/run/systemd/resolve/io.systemd.Resolve"),
