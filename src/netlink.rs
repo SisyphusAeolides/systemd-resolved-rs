@@ -69,9 +69,9 @@ mod tests {
         let resolver = Resolver::new(Config::default());
         synchronize(&resolver).expect("kernel link synchronization");
         assert!(!resolver.links().is_empty());
-        assert!(resolver
-            .links()
-            .iter()
-            .all(|link| link.kernel.as_ref().is_some_and(|kernel| !kernel.ifname.is_empty())));
+        assert!(resolver.links().iter().all(|link| link
+            .kernel
+            .as_ref()
+            .is_some_and(|kernel| !kernel.ifname.is_empty())));
     }
 }
