@@ -2,8 +2,10 @@
 #include "native.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 
 int main(void) {
     const char *name = "api.eu.example.com";
@@ -12,6 +14,7 @@ int main(void) {
     const char *miss = "example.net";
     int64_t parent_score;
     int64_t child_score;
+    int fd;
 
     parent_score = resolved_route_score(name, strlen(name), parent, strlen(parent), 0, 1, 2);
     child_score = resolved_route_score(name, strlen(name), child, strlen(child), 1, 0, 3);
@@ -24,6 +27,13 @@ int main(void) {
                                 strlen(parent), 0, 0, 0) == -1);
     assert(resolved_route_score(name, strlen(name), "", 0, 0, 0, 0) == 0);
     assert(resolved_notify(NULL) < 0);
+
+    assert(resolved_udp_connect(NULL, 53, 0, 0) < 0);
+    assert(resolved_tcp_connect(NULL, 53, 0, 0, 100) < 0);
+    fd = resolved_udp_connect("127.0.0.1", 53, 0, INT_MAX);
+    assert(fd >= 0);
+    assert(close(fd) == 0);
+    assert(resolved_udp_connect("192.0.2.53", 53, 0, INT_MAX) < 0);
 
     assert(resolved_udp_path_mtu(-1, 0) < 0);
     assert(resolved_udp_enable_recvfragsize(-1, 0) < 0);
