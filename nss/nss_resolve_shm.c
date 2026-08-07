@@ -54,8 +54,6 @@ static uint64_t hash_key(const uint8_t *owner, size_t owner_length,
     hash ^= hash >> 33;
     hash *= 0xff51afd7ed558ccdULL;
     hash ^= hash >> 33;
-    hash *= 0xc4ceb9fe1a85ec53ULL;
-    hash ^= hash >> 33;
     return hash;
 }
 
