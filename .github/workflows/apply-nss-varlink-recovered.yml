@@ -70,6 +70,25 @@ jobs:
               else:
                   raise SystemExit(f"unexpected indentation in historical workflow: {line!r}")
           script = "\n".join(body) + "\n"
+
+          # The historical workflow embedded its final Makefile match across a
+          # YAML-indented Python string, making the matcher depend on whitespace
+          # that never existed in the Makefile. Replace only that final edit with
+          # an idempotent token replacement; the generated feature code remains
+          # byte-for-byte the historical implementation.
+          block_start = script.index('path = Path("Makefile")')
+          block_end = script.index("\nPY\n", block_start)
+          replacement = '''path = Path("Makefile")
+          text = path.read_text()
+          old = "tests/live-dns.py tests/deterministic-dns-server.py scripts/probe-stub.py"
+          new = "tests/live-dns.py tests/deterministic-dns-server.py tests/fake-varlink-resolve.py scripts/probe-stub.py"
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit("packaging Python list mismatch")
+          path.write_text(text)
+          '''
+          script = script[:block_start] + replacement + script[block_end:]
           Path("/tmp/apply-nss-varlink.sh").write_text(script, encoding="utf-8")
           PY
           bash -n /tmp/apply-nss-varlink.sh
