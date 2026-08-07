@@ -29,13 +29,9 @@ impl Resolver {
         }
 
         let address = server.server();
-        let bind_address = if address.is_ipv4() {
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
-        } else {
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
-        };
-        let socket = UdpSocket::bind(bind_address)?;
-        socket.connect(address)?;
+        let fd = native::udp_connect(address, server.ifindex())?;
+        // SAFETY: the native connector returns a fresh owned UDP socket descriptor on success.
+        let socket = unsafe { <UdpSocket as std::os::fd::FromRawFd>::from_raw_fd(fd) };
         let _ = native::enable_udp_fragment_size(socket.as_raw_fd(), address.is_ipv6());
         Ok(socket)
     }
@@ -103,8 +99,10 @@ impl Resolver {
         result
     }
 
-    fn new_tcp_stream(server: SocketAddr, timeout: Duration) -> Result<TcpStream, ResolveError> {
-        let stream = TcpStream::connect_timeout(&server, timeout)?;
+    fn new_tcp_stream(server: ServerKey, timeout: Duration) -> Result<TcpStream, ResolveError> {
+        let fd = native::tcp_connect(server.server(), server.ifindex(), timeout)?;
+        // SAFETY: the native connector returns a fresh owned TCP socket descriptor on success.
+        let stream = unsafe { <TcpStream as std::os::fd::FromRawFd>::from_raw_fd(fd) };
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         Ok(stream)
@@ -125,7 +123,7 @@ impl Resolver {
         let reused = pooled.is_some();
         let stream = match pooled {
             Some(stream) => stream,
-            None => Self::new_tcp_stream(server.server(), timeout)?,
+            None => Self::new_tcp_stream(server, timeout)?,
         };
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
@@ -193,7 +191,7 @@ impl Resolver {
         if timeout.is_zero() {
             return result;
         }
-        let mut fresh = Self::new_tcp_stream(server.server(), timeout)?;
+        let mut fresh = Self::new_tcp_stream(server, timeout)?;
         let result = Self::exchange_tcp_stream(&mut fresh, query);
         if result.is_ok() {
             self.recycle_tcp_stream(server, fresh);
