@@ -13,3 +13,4 @@ include!("config_record_types.rs");
 include!("config_impl.rs");
 include!("config_helpers.rs");
 include!("config_tests.rs");
+include!("config_stub_tests.rs");
