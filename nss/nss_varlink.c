@@ -1,99 +1,78 @@
-/*
- * Minimal line protocol fallback if full varlink not ready:
- * Connect to UNIX socket and use DNS stub 127.0.0.53 instead —
- * most reliable landing path for NSS miss.
- */
 #define _GNU_SOURCE
+#include "nss_resolve_shm.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
-#include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <unistd.h>
 
-/* Query stub resolver with a tiny DNS A/AAAA question; fill dotted IPs. */
-static int stub_query(const char *name, int want_aaaa,
-                      char out[][64], int max, int *n_out)
+static int encode_qname(const char *name, uint8_t *out, size_t cap, size_t *olen)
 {
-    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -1;
+    return sr_encode_name(name, out, cap, olen);
+}
 
-    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-
-    struct sockaddr_in dst = {0};
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(53);
-    dst.sin_addr.s_addr = htonl(0x7f000035); /* 127.0.0.53 */
-
-    uint8_t pkt[512];
-    memset(pkt, 0, sizeof pkt);
-    pkt[0] = 0x12; pkt[1] = 0x34; /* id */
-    pkt[2] = 0x01; pkt[3] = 0x00; /* RD */
-    pkt[4] = 0x00; pkt[5] = 0x01; /* qd=1 */
-    size_t off = 12;
-    /* encode name */
-    const char *p = name;
-    while (*p) {
-        const char *dot = strchr(p, '.');
-        size_t lab = dot ? (size_t)(dot - p) : strlen(p);
-        if (lab == 0 || lab > 63 || off + 1 + lab >= sizeof pkt) {
-            close(fd); return -1;
-        }
-        pkt[off++] = (uint8_t)lab;
-        memcpy(pkt + off, p, lab);
-        off += lab;
-        if (!dot) break;
-        p = dot + 1;
-    }
-    pkt[off++] = 0;
-    uint16_t qt = want_aaaa ? 28 : 1;
-    pkt[off++] = (uint8_t)(qt >> 8); pkt[off++] = (uint8_t)qt;
-    pkt[off++] = 0; pkt[off++] = 1; /* IN */
-
-    if (sendto(fd, pkt, off, 0, (struct sockaddr *)&dst, sizeof dst) < 0) {
-        close(fd); return -1;
-    }
-    uint8_t resp[2048];
-    ssize_t rn = recv(fd, resp, sizeof resp, 0);
-    close(fd);
-    if (rn < 12) return -1;
-    if ((resp[3] & 0x0f) != 0) return -1; /* rcode */
+static int parse_addrs_from_response(const uint8_t *resp, size_t rn,
+                                     char out[][64], int max, int *n_out)
+{
+    if (rn < 12)
+        return -1;
+    uint8_t rcode = resp[3] & 0x0f;
+    if (rcode != 0)
+        return -1;
     uint16_t an = ((uint16_t)resp[6] << 8) | resp[7];
-    /* skip question */
     size_t o = 12;
-    while (o < (size_t)rn && resp[o] != 0) {
-        if ((resp[o] & 0xC0) == 0xC0) { o += 2; goto qtype; }
-        o += 1 + resp[o];
-    }
-    if (o >= (size_t)rn) return -1;
-    o += 1 + 4; /* root + qtype qclass */
-qtype: ;
-    int n = 0;
-    for (uint16_t i = 0; i < an && n < max && o + 10 <= (size_t)rn; i++) {
-        if ((resp[o] & 0xC0) == 0xC0) o += 2;
-        else {
-            while (o < (size_t)rn && resp[o] != 0) {
-                if ((resp[o] & 0xC0) == 0xC0) { o += 2; break; }
-                o += 1 + resp[o];
+    /* skip questions */
+    uint16_t qd = ((uint16_t)resp[4] << 8) | resp[5];
+    for (uint16_t qi = 0; qi < qd; qi++) {
+        while (o < rn) {
+            if (resp[o] == 0) {
+                o++;
+                break;
             }
-            if (o < (size_t)rn && resp[o] == 0) o++;
+            if ((resp[o] & 0xC0) == 0xC0) {
+                o += 2;
+                break;
+            }
+            o += 1u + resp[o];
         }
-        if (o + 10 > (size_t)rn) break;
-        uint16_t typ = ((uint16_t)resp[o] << 8) | resp[o+1];
-        uint16_t rdlen = ((uint16_t)resp[o+8] << 8) | resp[o+9];
+        o += 4;
+        if (o > rn)
+            return -1;
+    }
+
+    int n = *n_out;
+    for (uint16_t ai = 0; ai < an && n < max; ai++) {
+        if (o >= rn)
+            break;
+        if ((resp[o] & 0xC0) == 0xC0)
+            o += 2;
+        else {
+            while (o < rn && resp[o] != 0) {
+                if ((resp[o] & 0xC0) == 0xC0) {
+                    o += 2;
+                    goto after_name;
+                }
+                o += 1u + resp[o];
+            }
+            if (o < rn && resp[o] == 0)
+                o++;
+        }
+    after_name:
+        if (o + 10 > rn)
+            break;
+        uint16_t typ = ((uint16_t)resp[o] << 8) | resp[o + 1];
+        uint16_t rdlen = ((uint16_t)resp[o + 8] << 8) | resp[o + 9];
         o += 10;
-        if (o + rdlen > (size_t)rn) break;
+        if (o + rdlen > rn)
+            break;
         if (typ == 1 && rdlen == 4) {
-            snprintf(out[n], 64, "%u.%u.%u.%u",
-                     resp[o], resp[o+1], resp[o+2], resp[o+3]);
+            snprintf(out[n], 64, "%u.%u.%u.%u", resp[o], resp[o + 1], resp[o + 2], resp[o + 3]);
             n++;
         } else if (typ == 28 && rdlen == 16) {
-            char buf[64];
+            char buf[INET6_ADDRSTRLEN];
             if (inet_ntop(AF_INET6, resp + o, buf, sizeof buf)) {
                 snprintf(out[n], 64, "%s", buf);
                 n++;
@@ -105,31 +84,94 @@ qtype: ;
     return n > 0 ? 0 : -1;
 }
 
-int sr_varlink_resolve_hostname(const char *name,
-                                char out[][64], int max, int *n_out)
+static int stub_once(const char *name, int aaaa, char out[][64], int max, int *n_out)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return -1;
+
+    struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof dst);
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(53);
+    dst.sin_addr.s_addr = htonl(0x7f000035); /* 127.0.0.53 */
+
+    uint8_t pkt[512];
+    memset(pkt, 0, sizeof pkt);
+    pkt[0] = 0xAB;
+    pkt[1] = 0xCD;
+    pkt[2] = 0x01; /* RD */
+    pkt[5] = 1;    /* qdcount */
+    size_t off = 12;
+    uint8_t wire[256];
+    size_t wlen = 0;
+    if (encode_qname(name, wire, sizeof wire, &wlen) != 0) {
+        close(fd);
+        return -1;
+    }
+    if (off + wlen + 4 > sizeof pkt) {
+        close(fd);
+        return -1;
+    }
+    memcpy(pkt + off, wire, wlen);
+    off += wlen;
+    uint16_t qt = aaaa ? 28 : 1;
+    pkt[off++] = (uint8_t)(qt >> 8);
+    pkt[off++] = (uint8_t)qt;
+    pkt[off++] = 0;
+    pkt[off++] = 1;
+
+    if (sendto(fd, pkt, off, 0, (struct sockaddr *)&dst, sizeof dst) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    uint8_t resp[4096];
+    ssize_t rn = recv(fd, resp, sizeof resp, 0);
+    close(fd);
+    if (rn < 12)
+        return -1;
+    /* id check optional */
+    return parse_addrs_from_response(resp, (size_t)rn, out, max, n_out);
+}
+
+int sr_stub_resolve_hostname(const char *name, char out[][64], int max, int *n_out)
 {
     if (!name || !out || !n_out || max <= 0) {
         errno = EINVAL;
         return -1;
     }
     *n_out = 0;
-    char tmp[16][64];
-    int n = 0, n6 = 0;
-    if (stub_query(name, 0, tmp, 16, &n) == 0) {
-        for (int i = 0; i < n && *n_out < max; i++) {
-            snprintf(out[*n_out], 64, "%s", tmp[i]);
-            (*n_out)++;
+    int n = 0;
+    char tmp[32][64];
+    int tn = 0;
+    if (stub_once(name, 0, tmp, 32, &tn) == 0) {
+        for (int i = 0; i < tn && n < max; i++) {
+            snprintf(out[n], 64, "%s", tmp[i]);
+            n++;
         }
     }
-    if (stub_query(name, 1, tmp, 16, &n6) == 0) {
-        for (int i = 0; i < n6 && *n_out < max; i++) {
-            snprintf(out[*n_out], 64, "%s", tmp[i]);
-            (*n_out)++;
+    tn = 0;
+    if (stub_once(name, 1, tmp, 32, &tn) == 0) {
+        for (int i = 0; i < tn && n < max; i++) {
+            snprintf(out[n], 64, "%s", tmp[i]);
+            n++;
         }
     }
-    if (*n_out == 0) {
+    *n_out = n;
+    if (n == 0) {
         errno = ENOENT;
         return -1;
     }
     return 0;
+}
+
+/* Back-compat name used by earlier glue */
+int sr_varlink_resolve_hostname(const char *name, char out[][64], int max, int *n_out)
+{
+    return sr_stub_resolve_hostname(name, out, max, n_out);
 }

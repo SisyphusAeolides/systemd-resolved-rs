@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$(dirname "$0")/check_dbus_abi.sh"
+ROOT=$(cd "$(dirname "$0")" && pwd)
+exec bash "$ROOT/check_dbus_abi.sh"

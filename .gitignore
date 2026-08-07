@@ -10,3 +10,8 @@ nss/*.o
 nss/libnss_resolve.so.2
 *.so
 *.so.*
+
+nss/*.o
+nss/libnss_resolve.so.2
+target/
+**/*.tmp

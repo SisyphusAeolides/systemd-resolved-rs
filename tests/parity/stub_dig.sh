@@ -1,3 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-dig @127.0.0.53 example.com +time=2 +tries=1 +short | grep -E '^[0-9.]+$'
+out=$(dig @127.0.0.53 example.com A +time=3 +tries=2 +short)
+echo "$out" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' >/dev/null
+echo "OK stub_dig: $out"
