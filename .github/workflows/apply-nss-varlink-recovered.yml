@@ -87,6 +87,19 @@ jobs:
           PY
           bash -n /tmp/apply-nss-varlink.sh
           bash /tmp/apply-nss-varlink.sh
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/fake-varlink-resolve.py")
+          text = path.read_text(encoding="utf-8")
+          malformed = "TEST_V6 = [0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x23]"
+          corrected = "TEST_V6 = [0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x23]"
+          if malformed in text:
+              text = text.replace(malformed, corrected, 1)
+          elif corrected not in text:
+              raise SystemExit("NSS Varlink IPv6 fixture anchor mismatch")
+          path.write_text(text, encoding="utf-8")
+          PY
           tar --create --gzip --file=/tmp/generated-nss-varlink.tar.gz \
             nss Makefile tests/fake-varlink-resolve.py
 
