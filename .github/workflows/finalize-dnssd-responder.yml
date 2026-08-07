@@ -1,0 +1,322 @@
+name: Finalize DNS-SD responder integration
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-dnssd-responder.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 95
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize with current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install verification dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran iproute2 libssl-dev liburing-dev openssl python3 systemd
+
+      - name: Integrate layered DNS-SD services
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          mdns_path = Path('src/mdns.rs')
+          mdns = mdns_path.read_text(encoding='utf-8')
+          for marker in (
+              '#[path = "dnssd_config.rs"]\npub mod dnssd_config;\n',
+              '#[path = "dnssd_runtime.rs"]\npub mod dnssd_runtime;\n',
+          ):
+              if marker not in mdns:
+                  if not mdns.endswith('\n'):
+                      mdns += '\n'
+                  mdns += '\n' + marker
+          mdns_path.write_text(mdns, encoding='utf-8')
+
+          responder_path = Path('src/mdns_responder.rs')
+          responder = responder_path.read_text(encoding='utf-8')
+
+          old_generation_check = '''            if state.generation != name.generation {
+                state.restart_probe(&name, now);
+            }
+'''
+          new_generation_check = '''            if state.generation != responder_generation(&name) {
+                state.restart_probe(&name, now);
+            }
+'''
+          responder = responder.replace(old_generation_check, new_generation_check)
+          responder = responder.replace(
+              '        self.generation = name.generation;\n',
+              '        self.generation = responder_generation(name);\n',
+          )
+          responder = responder.replace(
+              '                        generation: name.generation,\n',
+              '                        generation: responder_generation(name),\n',
+          )
+
+          conflict_anchor = '''                if detect_conflict(state, &name, &parsed, validated.kind, now) {
+'''
+          service_conflict = '''                if detect_service_conflict(state, &name, &parsed, validated.kind) {
+                    state.restart_probe(&name, now);
+                    continue;
+                }
+                if detect_conflict(state, &name, &parsed, validated.kind, now) {
+'''
+          if 'detect_service_conflict(state, &name' not in responder:
+              if conflict_anchor not in responder:
+                  raise SystemExit('cannot locate mDNS conflict dispatch')
+              responder = responder.replace(conflict_anchor, service_conflict, 1)
+
+          sort_anchor = '''    output.sort();
+    output
+}
+
+fn reverse_owner'''
+          service_records = '''    match super::dnssd_runtime::records_for(
+        interface,
+        addresses,
+        &name.label(),
+        false,
+    ) {
+        Ok(records) => output.extend(records.into_iter().map(|record| LocalRecord {
+            owner: record.owner,
+            rr_type: record.rr_type,
+            class: record.class,
+            ttl: record.ttl,
+            cache_flush: record.cache_flush,
+            rdata: record.rdata,
+        })),
+        Err(error) => eprintln!("systemd-resolved: DNS-SD record generation failed: {error}"),
+    }
+    output.sort();
+    output.dedup();
+    output
+}
+
+fn reverse_owner'''
+          if 'DNS-SD record generation failed' not in responder:
+              if sort_anchor not in responder:
+                  raise SystemExit('cannot locate local mDNS record completion')
+              responder = responder.replace(sort_anchor, service_records, 1)
+
+          answer_anchor = '''    if !unicast.is_empty() {
+'''
+          related = '''    add_related_records(&mut multicast, &all_records);
+    add_related_records(&mut unicast, &all_records);
+
+    if !unicast.is_empty() {
+'''
+          if 'add_related_records(&mut multicast' not in responder:
+              if answer_anchor not in responder:
+                  raise SystemExit('cannot locate mDNS answer emission')
+              responder = responder.replace(answer_anchor, related, 1)
+
+          insertion_anchor = '''fn response_packet(
+'''
+          helpers = r'''fn responder_generation(name: &NameState) -> u64 {
+    name.generation ^ super::dnssd_runtime::generation().rotate_left(17)
+}
+
+fn detect_service_conflict(
+    state: &InterfaceState,
+    name: &NameState,
+    message: &ParsedMessage,
+    kind: MdnsMessageKind,
+) -> bool {
+    let owners = match super::dnssd_runtime::instance_owners(
+        state.interface,
+        &state.addresses,
+        &name.label(),
+    ) {
+        Ok(owners) => owners,
+        Err(error) => {
+            eprintln!("systemd-resolved: DNS-SD conflict lookup failed: {error}");
+            return false;
+        }
+    };
+    if owners.is_empty() {
+        return false;
+    }
+    let ours = state.records(name);
+    for owner in owners.keys() {
+        for rr_type in [TYPE_SRV, TYPE_TXT] {
+            let our_data = ours
+                .iter()
+                .filter(|record| {
+                    record.owner == *owner
+                        && record.rr_type == rr_type
+                        && record.class == CLASS_IN
+                })
+                .map(|record| record.rdata.clone())
+                .collect::<Vec<_>>();
+            if our_data.is_empty() {
+                continue;
+            }
+            let their_data = message
+                .records
+                .iter()
+                .filter(|record| {
+                    record.owner == *owner
+                        && record.rr_type == rr_type
+                        && record.class == CLASS_IN
+                        && (kind == MdnsMessageKind::Response
+                            || record.section == ParsedSection::Authority)
+                })
+                .map(|record| record.rdata.clone())
+                .collect::<Vec<_>>();
+            if their_data.is_empty() || sets_equal(&our_data, &their_data) {
+                continue;
+            }
+            if !state.probe.is_established()
+                && kind == MdnsMessageKind::Query
+                && probe_tie_break(&our_data, &their_data) != MdnsTieBreak::WeLose
+            {
+                continue;
+            }
+            match super::dnssd_runtime::rename_conflicting_owner(
+                owner,
+                rr_type,
+                state.interface,
+                &state.addresses,
+                &name.label(),
+            ) {
+                Ok(Some(service)) => {
+                    eprintln!(
+                        "systemd-resolved: renamed conflicting DNS-SD service {service}"
+                    );
+                    return true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("systemd-resolved: DNS-SD conflict rename failed: {error}");
+                }
+            }
+        }
+    }
+    false
+}
+
+fn add_related_records(
+    selected: &mut BTreeSet<LocalRecord>,
+    all_records: &[LocalRecord],
+) {
+    loop {
+        let before = selected.len();
+        let current = selected.iter().cloned().collect::<Vec<_>>();
+        for record in current {
+            if record.rr_type == TYPE_PTR {
+                for related in all_records.iter().filter(|candidate| {
+                    candidate.owner == record.rdata
+                        && matches!(candidate.rr_type, TYPE_SRV | TYPE_TXT)
+                }) {
+                    selected.insert(related.clone());
+                }
+            } else if record.rr_type == TYPE_SRV && record.rdata.len() >= 7 {
+                let target = &record.rdata[6..];
+                for related in all_records.iter().filter(|candidate| {
+                    candidate.owner == target
+                        && matches!(candidate.rr_type, TYPE_A | TYPE_AAAA)
+                }) {
+                    selected.insert(related.clone());
+                }
+            }
+        }
+        if selected.len() == before {
+            break;
+        }
+    }
+}
+
+'''
+          if 'fn responder_generation(name: &NameState)' not in responder:
+              if insertion_anchor not in responder:
+                  raise SystemExit('cannot locate response_packet for helper insertion')
+              responder = responder.replace(insertion_anchor, helpers + insertion_anchor, 1)
+          responder_path.write_text(responder, encoding='utf-8')
+
+          daemon_path = Path('src/daemon.rs')
+          daemon = daemon_path.read_text(encoding='utf-8')
+          reload_anchor = '''            if let Err(error) = resolver.reload_hosts() {
+                eprintln!("systemd-resolved: failed to reload hosts database: {error}");
+            }
+'''
+          reload_block = reload_anchor + '''            if let Err(error) = crate::mdns::dnssd_runtime::force_reload() {
+                eprintln!("systemd-resolved: failed to reload DNS-SD services: {error}");
+            }
+'''
+          if 'failed to reload DNS-SD services' not in daemon:
+              if reload_anchor not in daemon:
+                  raise SystemExit('cannot locate daemon reload block')
+              daemon = daemon.replace(reload_anchor, reload_block, 1)
+          daemon_path.write_text(daemon, encoding='utf-8')
+          PY
+
+      - name: Verify DNS-SD parser and responder integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          make check-native
+          make check-packaging
+          make check-nss
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+          python3 tests/live-dns.py \
+            target/release/systemd-resolved \
+            target/release/resolvectl
+          python3 tests/live-mdns.py target/release/systemd-resolved
+          python3 tests/live-mdns-responder.py target/release/systemd-resolved
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          git diff --check
+
+      - name: Commit only the verified DNS-SD integration
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git rm --force .github/workflows/finalize-dnssd-responder.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'Integrate layered DNS-SD service publication'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
