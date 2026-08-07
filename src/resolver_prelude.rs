@@ -30,6 +30,45 @@ use std::time::{Duration, Instant};
 
 const UDP_POOL_PER_SERVER_MAX: usize = 8;
 const TCP_POOL_PER_SERVER_MAX: usize = 4;
+const DNS_TRANSACTION_ATTEMPTS_MAX: usize = 24;
+const DNS_QUERY_TIMEOUT: Duration = Duration::from_secs(120);
+const DNS_TRANSACTION_UDP_TIMEOUT: Duration = Duration::from_secs(5);
+const DNS_TRANSACTION_TCP_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug)]
+struct DnsAttemptBudget {
+    attempts: usize,
+    deadline: Instant,
+}
+
+impl DnsAttemptBudget {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            attempts: 0,
+            deadline: now.checked_add(DNS_QUERY_TIMEOUT).unwrap_or(now),
+        }
+    }
+
+    fn begin_attempt(&mut self) -> Result<Duration, ResolveError> {
+        if self.attempts >= DNS_TRANSACTION_ATTEMPTS_MAX {
+            return Err(ResolveError::Protocol(
+                "maximum DNS transaction attempts reached",
+            ));
+        }
+        let remaining = self
+            .deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "DNS query timed out"))?;
+        self.attempts += 1;
+        Ok(remaining)
+    }
+
+    const fn attempts(&self) -> usize {
+        self.attempts
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryMode {
