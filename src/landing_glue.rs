@@ -3,19 +3,25 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use parking_lot::RwLock;
 use tracing::{error, info, warn};
 
+use crate::config::Config;
+use crate::daemon::stop_requested;
+use crate::dbus::DbusServer;
 use crate::lifecycle;
 use crate::resolvconf_publish::{GlobalDnsState, ResolvConfMode, ResolvConfPublisher};
+use crate::resolver::Resolver;
 use crate::server_features::FeatureTable;
 use crate::split_dns::SplitDnsTable;
 use crate::supremacy::dataplane::{Dataplane, DataplaneConfig};
 use crate::supremacy::obs::{serve_metrics, FlightRecorder, Metrics};
 use crate::supremacy::resolver::SupremacyResolver;
 use crate::synthetic::HostsTable;
+use crate::varlink::VarlinkServer;
 
 #[derive(Clone, Debug)]
 pub struct LandingConfig {
@@ -44,14 +50,27 @@ impl Default for LandingConfig {
         let hostname = std::fs::read_to_string("/etc/hostname")
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "localhost".into());
+        let stub_addr = std::env::var("RESOLVED_RS_STUB_ADDR")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| SocketAddr::from((Ipv4Addr::new(127, 0, 0, 53), 53)));
+        let stub_addr_alt = std::env::var("RESOLVED_RS_STUB_ADDR_ALT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map(Some)
+            .unwrap_or_else(|| Some(SocketAddr::from((Ipv4Addr::new(127, 0, 0, 54), 53))));
+        let run_dir = std::env::var("RESOLVED_RS_RUN_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/run/systemd/resolve"));
         Self {
-            stub_addr: SocketAddr::from((Ipv4Addr::new(127, 0, 0, 53), 53)),
-            stub_addr_alt: Some(SocketAddr::from((Ipv4Addr::new(127, 0, 0, 54), 53))),
+            stub_addr,
+            stub_addr_alt,
             workers: std::env::var("RESOLVED_RS_WORKERS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
-            run_dir: PathBuf::from("/run/systemd/resolve"),
+            run_dir,
             metrics_addr: metrics,
             shm_l1: shm,
             swr: std::env::var("RESOLVED_RS_SWR")
@@ -155,23 +174,41 @@ pub async fn run(landing: LandingConfig) -> anyhow::Result<()> {
         });
     }
 
-    // Control-plane tasks (enable as modules accept Arc<DaemonState>)
+    // Control-plane tasks: D-Bus server
     {
-        let st = Arc::clone(&state);
-        tokio::spawn(async move {
-            // crate::dbus::run_manager(st).await
-            let _ = st;
-            std::future::pending::<()>().await
-        });
+        let dbus_resolver = Arc::new(Resolver::new(Config::default()));
+        let dbus_server = DbusServer::new(Arc::clone(&dbus_resolver));
+        info!("spawning D-Bus server");
+        thread::Builder::new()
+            .name("resolved-dbus".to_owned())
+            .spawn(move || {
+                if let Err(error) = dbus_server.run() {
+                    error!(error = %error, "D-Bus server failed");
+                    stop_requested();
+                }
+            })
+            .expect("failed to spawn D-Bus server thread");
     }
+
+    // Control-plane tasks: Varlink server
     {
-        let st = Arc::clone(&state);
-        tokio::spawn(async move {
-            // crate::varlink::run(st, path).await
-            let _ = st;
-            std::future::pending::<()>().await
-        });
+        let varlink_path = landing.run_dir.join("io.systemd.Resolve");
+        info!("spawning Varlink server at {}", varlink_path.display());
+        let varlink_resolver = Arc::new(Resolver::new(Config::default()));
+        let varlink_server = VarlinkServer::new(varlink_path, Arc::clone(&varlink_resolver))
+            .expect("failed to create Varlink server");
+        thread::Builder::new()
+            .name("resolved-varlink".to_owned())
+            .spawn(move || {
+                if let Err(error) = varlink_server.run() {
+                    error!(error = %error, "Varlink server failed");
+                    stop_requested();
+                }
+            })
+            .expect("failed to spawn Varlink server thread");
     }
+
+    // Networkd watch (stub)
     {
         let st = Arc::clone(&state);
         tokio::spawn(async move {
