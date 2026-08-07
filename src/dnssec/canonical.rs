@@ -124,16 +124,16 @@ fn label_offsets(name: &[u8]) -> Result<Vec<usize>, WireError> {
 
 fn canonical_rdata(packet: &[u8], record: &ResourceRecord) -> Result<Vec<u8>, WireError> {
     match record.rr_type {
-        2 | 3 | 4 | 5 | 7 | 8 | 9 | 12 | 23 | 30 | 39 => canonical_single_name(packet, record, 0),
+        2 | 3 | 4 | 5 | 7 | 8 | 9 | 12 | 23 | 30 | 39 | 47 => {
+            canonical_single_name(packet, record, 0)
+        }
         6 => canonical_soa(packet, record),
         14 | 17 => canonical_two_names(packet, record, 0),
-        15 | 18 | 21 | 36 | 107 => canonical_single_name(packet, record, 2),
+        15 | 18 | 21 | 36 | 64 | 65 | 107 => canonical_single_name(packet, record, 2),
         24 | 46 => canonical_single_name(packet, record, 18),
         26 => canonical_two_names(packet, record, 2),
         33 => canonical_single_name(packet, record, 6),
         35 => canonical_naptr(packet, record),
-        47 => canonical_single_name(packet, record, 0),
-        64 | 65 => canonical_single_name(packet, record, 2),
         _ => Ok(record.rdata.clone()),
     }
 }
@@ -260,8 +260,8 @@ mod tests {
 
     #[test]
     fn signed_data_uses_original_ttl_and_sorted_rrs() {
-        let (packet, first) = record("example.", TYPE_A, 5, &[192, 0, 2, 2]);
-        let (_, second) = record("example.", TYPE_A, 999, &[192, 0, 2, 1]);
+        let (packet, _) = record("example.", TYPE_A, 5, &[192, 0, 2, 2]);
+        let (_, _) = record("example.", TYPE_A, 999, &[192, 0, 2, 1]);
         let mut rrsig_rdata = Vec::new();
         rrsig_rdata.extend_from_slice(&TYPE_A.to_be_bytes());
         rrsig_rdata.extend_from_slice(&[15, 1]);
@@ -271,7 +271,7 @@ mod tests {
         rrsig_rdata.extend_from_slice(&1234_u16.to_be_bytes());
         rrsig_rdata.extend_from_slice(&encode_name("example.").expect("signer"));
         rrsig_rdata.push(1);
-        let (rrsig_packet, rrsig) = record("example.", TYPE_RRSIG, 60, &rrsig_rdata);
+        let (rrsig_packet, _) = record("example.", TYPE_RRSIG, 60, &rrsig_rdata);
 
         let mut combined = packet;
         combined.extend_from_slice(&rrsig_packet);
@@ -303,7 +303,6 @@ mod tests {
             .position(|window| window == [192, 0, 2, 2])
             .expect("second address");
         assert!(first_position < second_position);
-        let _ = (first, second, rrsig);
     }
 
     #[test]
