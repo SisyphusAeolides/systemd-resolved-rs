@@ -23,6 +23,7 @@ pub mod policy;
 pub mod resolver;
 pub mod routing;
 pub mod static_records;
+pub mod tls;
 pub mod transport;
 #[cfg_attr(test, allow(unused_imports))]
 pub mod varlink;
