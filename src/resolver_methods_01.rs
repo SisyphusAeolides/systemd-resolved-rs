@@ -3,8 +3,15 @@ impl Resolver {
         let global_servers = config.configured_upstreams();
         let fallback_servers = config.configured_fallback_upstreams();
         let mut states = HashMap::new();
-        for server in global_servers.iter().chain(fallback_servers.iter()) {
-            states.entry(*server).or_default();
+        for server in &global_servers {
+            states
+                .entry(ServerKey::new(ScopeKind::Global, *server))
+                .or_default();
+        }
+        for server in &fallback_servers {
+            states
+                .entry(ServerKey::new(ScopeKind::Fallback, *server))
+                .or_default();
         }
         let hosts = if config.read_etc_hosts {
             Hosts::load(&config.hosts_path).unwrap_or_default()
@@ -37,7 +44,7 @@ impl Resolver {
         &self.config
     }
 
-    fn states(&self) -> MutexGuard<'_, HashMap<SocketAddr, ServerState>> {
+    fn states(&self) -> MutexGuard<'_, HashMap<ServerKey, ServerState>> {
         self.states
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
