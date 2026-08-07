@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-mod resolvectl_dbus;
-
 use resolved::json::{self, Value};
 use std::collections::BTreeMap;
 use std::env;
@@ -45,8 +43,8 @@ fn execute() -> Result<(), Box<dyn Error>> {
         "reset-server-features" => {
             control(&options.socket, "io.systemd.Resolve.ResetServerFeatures")
         }
-        command if resolvectl_dbus::is_command(command) => {
-            resolvectl_dbus::execute(command, &options.arguments)
+        command if resolved::resolvectl_dbus::is_command(command) => {
+            resolved::resolvectl_dbus::execute(command, &options.arguments)
         }
         command => Err(format!("unknown command: {command}").into()),
     }
