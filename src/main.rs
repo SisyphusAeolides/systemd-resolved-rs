@@ -68,7 +68,7 @@ fn execute() -> Result<(), Box<dyn Error>> {
         print_configuration(&config, options.no_varlink);
         return Ok(());
     }
-    run_resolver(config, &options)
+    run_resolver(&config, &options)
 }
 
 fn configured_resolver(options: &Options) -> Result<Config, Box<dyn Error>> {
@@ -84,10 +84,10 @@ fn configured_resolver(options: &Options) -> Result<Config, Box<dyn Error>> {
         config.fallback_upstreams.clear();
     }
     if let Some(path) = &options.varlink {
-        config.varlink_path = path.clone();
+        config.varlink_path.clone_from(path);
     }
     if let Some(path) = &options.runtime_directory {
-        config.runtime_directory = path.clone();
+        config.runtime_directory.clone_from(path);
     }
     if let Some(workers) = options.workers {
         config.workers = workers;
@@ -103,7 +103,7 @@ fn configured_resolver(options: &Options) -> Result<Config, Box<dyn Error>> {
     Ok(config)
 }
 
-fn run_resolver(config: Config, options: &Options) -> Result<(), Box<dyn Error>> {
+fn run_resolver(config: &Config, options: &Options) -> Result<(), Box<dyn Error>> {
     let stub_enabled = config.dns_stub_listener != DnsStubListenerMode::No
         && (!config.listeners.is_empty() || !config.proxy_listeners.is_empty());
     if options.no_varlink && options.no_dbus && !stub_enabled {
@@ -120,8 +120,8 @@ fn run_resolver(config: Config, options: &Options) -> Result<(), Box<dyn Error>>
     }
 
     let dbus_thread = spawn_dbus(&resolver, options.no_dbus)?;
-    let varlink_thread = spawn_varlink(&resolver, &config, options.no_varlink)?;
-    log_stub_listeners(&config, stub_enabled);
+    let varlink_thread = spawn_varlink(&resolver, config, options.no_varlink)?;
+    log_stub_listeners(config, stub_enabled);
 
     let result = run_stub(&resolver);
     request_stop();
