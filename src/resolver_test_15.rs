@@ -27,7 +27,11 @@ mod test_15_tcp_pool {
         });
         let query = make_query("tcp-truncated.example", TYPE_A, 0x72e0).expect("client query");
         let error = resolver
-            .exchange_tcp(server_address, &query, Duration::from_millis(500))
+            .exchange_tcp(
+                ServerKey::new(ScopeKind::Global, server_address),
+                &query,
+                Duration::from_millis(500),
+            )
             .expect_err("truncated TCP response must be rejected");
         assert!(matches!(error, ResolveError::Protocol(_)));
         server.join().expect("mock TCP thread");
