@@ -11,18 +11,16 @@ for command in busctl dbus-run-session python3; do
     command -v "$command" >/dev/null
 done
 
-dbus-run-session -- bash -euo pipefail <<'ENDSCRIPT'
-BINARY="$BINARY"
-WORK="$WORK"
-ROOT="$ROOT"
-
+# Use a heredoc that allows variable expansion for BINARY, WORK, ROOT
+# but escape $! so it's evaluated in the subshell
+dbus-run-session -- bash -euo pipefail <<ENDSCRIPT
 export DBUS_SYSTEM_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS"
 export RESOLVED_RS_STUB_ADDR="127.0.0.1:10531"
 export RESOLVED_RS_STUB_ADDR_ALT="127.0.0.1:10532"
 export RESOLVED_RS_RUN_DIR="$WORK/runtime"
 
 "$BINARY" >"$WORK/daemon.log" 2>&1 &
-daemon_pid=$!
+daemon_pid=\$!
 
 cleanup() {
     status=$?
