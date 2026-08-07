@@ -92,8 +92,12 @@ impl TlsStream {
         if result < 0 {
             return Err(io::Error::from_raw_os_error(-result));
         }
-        let raw = NonNull::new(raw)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "TLS connector returned null"))?;
+        let raw = NonNull::new(raw).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "TLS connector returned a null stream",
+            )
+        })?;
         Ok(Self { raw })
     }
 
