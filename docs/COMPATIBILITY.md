@@ -78,8 +78,8 @@ The pinned D-Bus signatures live in `compat/`.
 - [ ] netlink synchronization of per-link state
 - [x] longest-suffix routing integrated with per-link scopes
 - [x] default-route link inference
-- [ ] split-DNS parallel scope behavior
-- [ ] interface binding and scoped IPv6 upstreams
+- [x] split-DNS parallel scope behavior
+- [x] interface binding and scoped IPv6 upstreams
 - [x] credential-based `network.dns` and `network.search_domains` configuration with explicit-setting precedence
 - [x] exact-name static `.rr` A, AAAA, PTR, NS, CNAME, and DNAME records with drop-in precedence, `/dev/null` masking, bounded reads, and two-second rechecks
 - [x] `ReadStaticRecords=` text-configuration toggle
