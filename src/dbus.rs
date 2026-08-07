@@ -11,7 +11,8 @@ use crate::daemon::stop_requested;
 use crate::resolver::{AddressLookup, NameLookup, ResolveError, Resolver};
 use crate::routing::{LinkError, LinkState};
 use crate::wire::{
-    extract_answer_records, extract_service_records, Header, CLASS_IN, TYPE_SRV, TYPE_TXT,
+    extract_answer_records, extract_service_records, Header, CLASS_IN, TYPE_A, TYPE_AAAA, TYPE_SRV,
+    TYPE_TXT,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::convert::TryFrom;
@@ -85,6 +86,42 @@ enum DbusError {
     NetworkDown(String),
     InvalidArgs(String),
     NotSupported(String),
+    #[dbus_error(name = "DnsError.FORMERR")]
+    DnsFormErr(String),
+    #[dbus_error(name = "DnsError.SERVFAIL")]
+    DnsServFail(String),
+    #[dbus_error(name = "DnsError.NXDOMAIN")]
+    DnsNxDomain(String),
+    #[dbus_error(name = "DnsError.NOTIMP")]
+    DnsNotImp(String),
+    #[dbus_error(name = "DnsError.REFUSED")]
+    DnsRefused(String),
+    #[dbus_error(name = "DnsError.YXDOMAIN")]
+    DnsYxDomain(String),
+    #[dbus_error(name = "DnsError.YRRSET")]
+    DnsYrrset(String),
+    #[dbus_error(name = "DnsError.NXRRSET")]
+    DnsNxrrset(String),
+    #[dbus_error(name = "DnsError.NOTAUTH")]
+    DnsNotAuth(String),
+    #[dbus_error(name = "DnsError.NOTZONE")]
+    DnsNotZone(String),
+    #[dbus_error(name = "DnsError.BADVERS")]
+    DnsBadVers(String),
+    #[dbus_error(name = "DnsError.BADKEY")]
+    DnsBadKey(String),
+    #[dbus_error(name = "DnsError.BADTIME")]
+    DnsBadTime(String),
+    #[dbus_error(name = "DnsError.BADMODE")]
+    DnsBadMode(String),
+    #[dbus_error(name = "DnsError.BADNAME")]
+    DnsBadName(String),
+    #[dbus_error(name = "DnsError.BADALG")]
+    DnsBadAlg(String),
+    #[dbus_error(name = "DnsError.BADTRUNC")]
+    DnsBadTrunc(String),
+    #[dbus_error(name = "DnsError.BADCOOKIE")]
+    DnsBadCookie(String),
 }
 
 impl From<DbusError> for zbus::fdo::Error {
@@ -884,6 +921,17 @@ fn response_flags(response: &[u8]) -> u64 {
     })
 }
 
+fn service_flags_for_refused_types(resolver: &Resolver, mut flags: u64) -> u64 {
+    let refused = &resolver.config().refuse_record_types;
+    if refused.contains(&TYPE_A) && refused.contains(&TYPE_AAAA) {
+        flags |= SD_RESOLVED_NO_ADDRESS;
+    }
+    if refused.contains(&TYPE_TXT) {
+        flags |= SD_RESOLVED_NO_TXT;
+    }
+    flags
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn resolve_service_reply(
     resolver: &Resolver,
@@ -904,6 +952,7 @@ fn resolve_service_reply(
     ),
     DbusError,
 > {
+    let flags = service_flags_for_refused_types(resolver, flags);
     let (owner, canonical_name, canonical_type, canonical_domain) =
         service_owner(name, service_type, domain)?;
     let response = resolver
@@ -988,7 +1037,7 @@ fn resolve_service_reply(
         canonical_name,
         canonical_type,
         canonical_domain,
-        response_flags(&response),
+        response_flags(&response) | (flags & (SD_RESOLVED_NO_ADDRESS | SD_RESOLVED_NO_TXT)),
     ))
 }
 
@@ -1118,10 +1167,35 @@ fn map_link_error(error: LinkError) -> DbusError {
     }
 }
 
+fn map_dns_error(rcode: u16, message: String) -> DbusError {
+    match rcode {
+        1 => DbusError::DnsFormErr(message),
+        2 => DbusError::DnsServFail(message),
+        3 => DbusError::DnsNxDomain(message),
+        4 => DbusError::DnsNotImp(message),
+        5 => DbusError::DnsRefused(message),
+        6 => DbusError::DnsYxDomain(message),
+        7 => DbusError::DnsYrrset(message),
+        8 => DbusError::DnsNxrrset(message),
+        9 => DbusError::DnsNotAuth(message),
+        10 => DbusError::DnsNotZone(message),
+        16 => DbusError::DnsBadVers(message),
+        17 => DbusError::DnsBadKey(message),
+        18 => DbusError::DnsBadTime(message),
+        19 => DbusError::DnsBadMode(message),
+        20 => DbusError::DnsBadName(message),
+        21 => DbusError::DnsBadAlg(message),
+        22 => DbusError::DnsBadTrunc(message),
+        23 => DbusError::DnsBadCookie(message),
+        _ => DbusError::InvalidReply(message),
+    }
+}
+
 fn map_resolve_error(error: ResolveError) -> DbusError {
     match error {
         ResolveError::NoNameServers => DbusError::NoNameServers(error.to_string()),
         ResolveError::NoSuchResourceRecord => DbusError::NoSuchResourceRecord(error.to_string()),
+        ResolveError::DnsError { rcode, .. } => map_dns_error(rcode, error.to_string()),
         ResolveError::Link(link) => map_link_error(link),
         ResolveError::UnsupportedFamily(_) => DbusError::InvalidArgs(error.to_string()),
         ResolveError::Io(_) => DbusError::NetworkDown(error.to_string()),
@@ -1137,6 +1211,7 @@ fn map_resolve_error(error: ResolveError) -> DbusError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     #[test]
     fn object_paths_match_systemd_bus_label_encoding() {
@@ -1187,5 +1262,37 @@ mod tests {
     fn cname_loops_keep_the_dbus_error_contract() {
         let error = map_resolve_error(ResolveError::Wire(crate::wire::WireError::CnameLoop));
         assert!(matches!(error, DbusError::CNameLoop(_)));
+    }
+
+    #[test]
+    fn refused_dns_errors_keep_the_dbus_error_contract() {
+        let error = map_resolve_error(ResolveError::DnsError {
+            rcode: 5,
+            query: "localhost".to_owned(),
+        });
+        assert!(matches!(error, DbusError::DnsRefused(_)));
+    }
+
+    #[test]
+    fn service_refusals_set_implicit_auxiliary_flags() {
+        let mut config = Config::default();
+        config
+            .apply_text("[Resolve]\nRefuseRecordTypes=A AAAA TXT\n")
+            .expect("refuse record configuration");
+        let resolver = Resolver::new(config);
+        let flags = service_flags_for_refused_types(&resolver, 0);
+        assert_ne!(flags & SD_RESOLVED_NO_ADDRESS, 0);
+        assert_ne!(flags & SD_RESOLVED_NO_TXT, 0);
+    }
+
+    #[test]
+    fn one_refused_address_family_keeps_service_addresses_enabled() {
+        let mut config = Config::default();
+        config
+            .apply_text("[Resolve]\nRefuseRecordTypes=AAAA\n")
+            .expect("refuse record configuration");
+        let resolver = Resolver::new(config);
+        let flags = service_flags_for_refused_types(&resolver, 0);
+        assert_eq!(flags & SD_RESOLVED_NO_ADDRESS, 0);
     }
 }
