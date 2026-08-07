@@ -5,6 +5,35 @@ mod test_15_tcp_pool {
     use std::net::TcpListener;
 
     #[test]
+    fn rejects_truncated_dns_over_tcp_reply() {
+        let stream_listener = TcpListener::bind("127.0.0.1:0").expect("mock TCP bind");
+        let server_address = stream_listener.local_addr().expect("mock DNS address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = stream_listener.accept().expect("mock TCP accept");
+            let query = read_tcp_query(&mut stream);
+            write_tcp_response(&mut stream, &truncated_response(&query));
+        });
+
+        let resolver = Resolver::new(Config {
+            upstreams: vec![server_address],
+            fallback_upstreams: Vec::new(),
+            cache: false,
+            attempts: 1,
+            query_timeout: Duration::from_millis(500),
+            read_etc_hosts: false,
+            read_static_records: false,
+            dnssec: ValidationMode::No,
+            ..Config::default()
+        });
+        let query = make_query("tcp-truncated.example", TYPE_A, 0x72e0).expect("client query");
+        let error = resolver
+            .exchange_tcp(server_address, &query, Duration::from_millis(500))
+            .expect_err("truncated TCP response must be rejected");
+        assert!(matches!(error, ResolveError::Protocol(_)));
+        server.join().expect("mock TCP thread");
+    }
+
+    #[test]
     fn reuses_idle_tcp_stream_after_udp_truncation() {
         let stream_listener = TcpListener::bind("127.0.0.1:0").expect("mock TCP bind");
         let server_address = stream_listener.local_addr().expect("mock DNS address");
