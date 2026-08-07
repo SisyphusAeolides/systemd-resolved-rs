@@ -19,6 +19,28 @@ typedef struct resolved_link_info {
     char ifname[RESOLVED_IFNAME_MAX];
 } resolved_link_info;
 
+typedef struct resolved_mdns_packet_info {
+    int32_t ifindex;
+    uint16_t source_port;
+    uint8_t family;
+    uint8_t destination_multicast;
+    int32_t hop_limit;
+    uint32_t scope_id;
+    uint8_t source[16];
+    uint8_t destination[16];
+} resolved_mdns_packet_info;
+
+typedef struct resolved_address_info {
+    int32_t ifindex;
+    uint32_t flags;
+    uint8_t family;
+    uint8_t prefix_length;
+    uint8_t scope;
+    uint8_t _pad;
+    uint32_t scope_id;
+    uint8_t address[16];
+} resolved_address_info;
+
 typedef struct resolved_tls_stream resolved_tls_stream;
 
 int resolved_notify(const char *state);
@@ -28,6 +50,26 @@ int resolved_take_reload(void);
 int resolved_should_stop(void);
 int resolved_peer_credentials(int fd, uint32_t *pid, uint32_t *uid, uint32_t *gid);
 int resolved_ifindex_from_name(const char *name);
+
+int resolved_mdns_open(int family, uint16_t port);
+int resolved_mdns_join(int fd, int family, int ifindex, int join);
+int64_t resolved_mdns_recv(
+    int fd,
+    void *buffer,
+    size_t capacity,
+    resolved_mdns_packet_info *packet_info
+);
+int64_t resolved_mdns_send(
+    int fd,
+    const void *buffer,
+    size_t length,
+    int family,
+    int ifindex,
+    const uint8_t destination[16],
+    uint16_t port,
+    uint32_t scope_id
+);
+int64_t resolved_address_snapshot(resolved_address_info *entries, size_t capacity);
 
 int resolved_udp_connect(const char *address, uint16_t port, uint32_t scope_id, int ifindex);
 int resolved_tcp_connect(

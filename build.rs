@@ -46,6 +46,7 @@ fn main() {
     println!("cargo:rerun-if-changed=ffi/dnssec.c");
     println!("cargo:rerun-if-changed=ffi/netlink.c");
     println!("cargo:rerun-if-changed=ffi/networkd.c");
+    println!("cargo:rerun-if-changed=ffi/mdns.c");
     println!("cargo:rerun-if-changed=ffi/native.h");
     println!("cargo:rerun-if-changed=ffi/routing.f90");
     println!("cargo:rerun-if-changed=ffi/iouring_dns.c");
@@ -68,6 +69,7 @@ fn main() {
     let dnssec_obj = object(&out_dir, "resolved_dnssec");
     let netlink_obj = object(&out_dir, "resolved_netlink");
     let networkd_obj = object(&out_dir, "resolved_networkd");
+    let mdns_obj = object(&out_dir, "resolved_mdns");
     let iouring_dns_obj = object(&out_dir, "resolved_iouring_dns");
     let llmnr_mcast_obj = object(&out_dir, "resolved_llmnr_mcast");
     let nss_resolve_shm_obj = object(&out_dir, "resolved_nss_resolve_shm");
@@ -77,6 +79,7 @@ fn main() {
     compile_c(&cc, "ffi/dnssec.c", &dnssec_obj);
     compile_c(&cc, "ffi/netlink.c", &netlink_obj);
     compile_c(&cc, "ffi/networkd.c", &networkd_obj);
+    compile_c(&cc, "ffi/mdns.c", &mdns_obj);
     compile_c(&cc, "ffi/iouring_dns.c", &iouring_dns_obj);
     compile_c(&cc, "ffi/llmnr_mcast.c", &llmnr_mcast_obj);
     compile_c(&cc, "nss/nss_resolve_shm.c", &nss_resolve_shm_obj);
@@ -88,6 +91,7 @@ fn main() {
         dnssec_obj,
         netlink_obj,
         networkd_obj,
+        mdns_obj,
         iouring_dns_obj,
         llmnr_mcast_obj,
         nss_resolve_shm_obj,

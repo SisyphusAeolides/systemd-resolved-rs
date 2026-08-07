@@ -1,12 +1,110 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "native.h"
 
+#include <arpa/inet.h>
 #include <assert.h>
+#include <errno.h>
 #include <limits.h>
+#include <netinet/in.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
+
+static void test_mdns_native(void) {
+    static const uint8_t request[] = { 0x52, 0x53, 0x4d, 0x44 };
+    static const uint8_t reply[] = { 0x4d, 0x44, 0x4e, 0x53 };
+    struct sockaddr_in listener_address;
+    struct sockaddr_in sender_address;
+    socklen_t address_length;
+    resolved_mdns_packet_info packet;
+    resolved_address_info *addresses;
+    uint8_t buffer[32];
+    uint8_t destination[16] = { 0 };
+    int64_t address_count;
+    int64_t filled;
+    int listener;
+    int sender;
+    int loopback_index;
+    int ttl = 255;
+    ssize_t length;
+    size_t i;
+    int found_loopback = 0;
+
+    assert(resolved_mdns_open(0, 0) < 0);
+    assert(resolved_mdns_join(-1, 4, 1, 1) < 0);
+    assert(resolved_mdns_recv(-1, buffer, sizeof(buffer), &packet) < 0);
+    assert(resolved_mdns_send(-1, request, sizeof(request), 4, 0, destination, 5353, 0) < 0);
+
+    loopback_index = resolved_ifindex_from_name("lo");
+    assert(loopback_index > 0);
+    listener = resolved_mdns_open(4, 0);
+    assert(listener >= 0);
+    assert(resolved_mdns_join(listener, 4, loopback_index, 1) == 0);
+
+    memset(&listener_address, 0, sizeof(listener_address));
+    address_length = sizeof(listener_address);
+    assert(getsockname(listener, (struct sockaddr *)&listener_address, &address_length) == 0);
+    assert(listener_address.sin_family == AF_INET);
+    assert(listener_address.sin_port != 0);
+
+    sender = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    assert(sender >= 0);
+    assert(setsockopt(sender, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)) == 0);
+    memset(&sender_address, 0, sizeof(sender_address));
+    sender_address.sin_family = AF_INET;
+    sender_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sender_address.sin_port = 0;
+    assert(bind(sender, (const struct sockaddr *)&sender_address, sizeof(sender_address)) == 0);
+    address_length = sizeof(sender_address);
+    assert(getsockname(sender, (struct sockaddr *)&sender_address, &address_length) == 0);
+
+    listener_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(sendto(sender, request, sizeof(request), 0,
+                  (const struct sockaddr *)&listener_address, sizeof(listener_address)) ==
+           (ssize_t)sizeof(request));
+
+    memset(&packet, 0, sizeof(packet));
+    length = (ssize_t)resolved_mdns_recv(listener, buffer, sizeof(buffer), &packet);
+    assert(length == (ssize_t)sizeof(request));
+    assert(memcmp(buffer, request, sizeof(request)) == 0);
+    assert(packet.family == 4);
+    assert(packet.ifindex == loopback_index);
+    assert(packet.hop_limit == 255);
+    assert(packet.source_port == ntohs(sender_address.sin_port));
+    assert(packet.destination_multicast == 0);
+    assert(memcmp(packet.destination, &listener_address.sin_addr, sizeof(listener_address.sin_addr)) == 0);
+
+    memcpy(destination, packet.source, 4);
+    assert(resolved_mdns_send(listener, reply, sizeof(reply), 4, packet.ifindex, destination,
+                              packet.source_port, 0) == (int64_t)sizeof(reply));
+    length = recv(sender, buffer, sizeof(buffer), 0);
+    assert(length == (ssize_t)sizeof(reply));
+    assert(memcmp(buffer, reply, sizeof(reply)) == 0);
+
+    assert(resolved_mdns_join(listener, 4, loopback_index, 0) == 0);
+    assert(close(sender) == 0);
+    assert(close(listener) == 0);
+
+    assert(resolved_address_snapshot(NULL, 1) < 0);
+    address_count = resolved_address_snapshot(NULL, 0);
+    assert(address_count > 0);
+    addresses = calloc((size_t)address_count, sizeof(*addresses));
+    assert(addresses != NULL);
+    filled = resolved_address_snapshot(addresses, (size_t)address_count);
+    assert(filled >= address_count);
+    for (i = 0; i < (size_t)address_count; i++) {
+        assert(addresses[i].ifindex > 0);
+        assert(addresses[i].family == 4 || addresses[i].family == 6);
+        assert(addresses[i].prefix_length <= (addresses[i].family == 4 ? 32 : 128));
+        if (addresses[i].ifindex == loopback_index) {
+            found_loopback = 1;
+        }
+    }
+    assert(found_loopback != 0);
+    free(addresses);
+}
 
 int main(void) {
     static const uint8_t sha256_abc[32] = {
@@ -141,5 +239,7 @@ int main(void) {
     assert(fd >= 0);
     assert(resolved_networkd_wait(fd, 0) >= 0);
     assert(close(fd) == 0);
+
+    test_mdns_native();
     return 0;
 }

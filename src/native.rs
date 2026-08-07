@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 use std::ffi::CString;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::os::fd::RawFd;
 use std::os::raw::{c_char, c_int, c_void};
 use std::time::Duration;
 
 const IFNAME_MAX: usize = 16;
 const LINK_SNAPSHOT_RETRIES: usize = 4;
+const ADDRESS_SNAPSHOT_RETRIES: usize = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -39,6 +40,32 @@ impl Default for NativeLinkSnapshot {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct NativeMdnsPacketInfo {
+    ifindex: i32,
+    source_port: u16,
+    family: u8,
+    destination_multicast: u8,
+    hop_limit: i32,
+    scope_id: u32,
+    source: [u8; 16],
+    destination: [u8; 16],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct NativeAddressInfo {
+    ifindex: i32,
+    flags: u32,
+    family: u8,
+    prefix_length: u8,
+    scope: u8,
+    _pad: u8,
+    scope_id: u32,
+    address: [u8; 16],
+}
+
 extern "C" {
     fn resolved_notify(state: *const c_char) -> c_int;
     fn resolved_listen_fds() -> c_int;
@@ -46,6 +73,25 @@ extern "C" {
     fn resolved_take_reload() -> c_int;
     fn resolved_should_stop() -> c_int;
     fn resolved_peer_credentials(fd: c_int, pid: *mut u32, uid: *mut u32, gid: *mut u32) -> c_int;
+    fn resolved_mdns_open(family: c_int, port: u16) -> c_int;
+    fn resolved_mdns_join(fd: c_int, family: c_int, ifindex: c_int, join: c_int) -> c_int;
+    fn resolved_mdns_recv(
+        fd: c_int,
+        buffer: *mut c_void,
+        capacity: usize,
+        packet_info: *mut NativeMdnsPacketInfo,
+    ) -> i64;
+    fn resolved_mdns_send(
+        fd: c_int,
+        buffer: *const c_void,
+        length: usize,
+        family: c_int,
+        ifindex: c_int,
+        destination: *const u8,
+        port: u16,
+        scope_id: u32,
+    ) -> i64;
+    fn resolved_address_snapshot(entries: *mut NativeAddressInfo, capacity: usize) -> i64;
     fn resolved_udp_connect(
         address: *const c_char,
         port: u16,
@@ -102,6 +148,25 @@ pub struct LinkInfo {
     pub has_ipv6_link_local: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MdnsPacketInfo {
+    pub ifindex: i32,
+    pub source: SocketAddr,
+    pub destination: IpAddr,
+    pub hop_limit: i32,
+    pub destination_multicast: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AddressInfo {
+    pub ifindex: i32,
+    pub flags: u32,
+    pub address: IpAddr,
+    pub prefix_length: u8,
+    pub scope: u8,
+    pub scope_id: u32,
+}
+
 pub fn install_signal_handlers() -> io::Result<()> {
     // SAFETY: the function takes no pointers and returns an errno-style integer.
     result(unsafe { resolved_install_signal_handlers() }).map(|_| ())
@@ -128,6 +193,107 @@ pub fn notify(state: &str) -> io::Result<bool> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "notification contains NUL"))?;
     // SAFETY: CString guarantees a non-null, NUL-terminated pointer for this call.
     result(unsafe { resolved_notify(state.as_ptr()) }).map(|value| value != 0)
+}
+
+pub fn mdns_open(ipv6: bool, port: u16) -> io::Result<RawFd> {
+    let family = if ipv6 { 10 } else { 2 };
+    // SAFETY: all arguments are plain values and a successful return is an owned descriptor.
+    result(unsafe { resolved_mdns_open(family, port) })
+}
+
+pub fn mdns_join(fd: RawFd, ipv6: bool, ifindex: i32, join: bool) -> io::Result<()> {
+    let family = if ipv6 { 10 } else { 2 };
+    // SAFETY: the descriptor is borrowed and the remaining arguments are plain values.
+    result(unsafe { resolved_mdns_join(fd, family, ifindex, bool_to_c_int(join)) }).map(|_| ())
+}
+
+pub fn mdns_recv(fd: RawFd, buffer: &mut [u8]) -> io::Result<(usize, MdnsPacketInfo)> {
+    if buffer.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mDNS receive buffer must not be empty",
+        ));
+    }
+    let mut packet = NativeMdnsPacketInfo::default();
+    // SAFETY: the buffer and packet-info outputs are valid and writable for the call.
+    let length = signed_result(unsafe {
+        resolved_mdns_recv(
+            fd,
+            buffer.as_mut_ptr().cast::<c_void>(),
+            buffer.len(),
+            &mut packet,
+        )
+    })?;
+    let length =
+        usize::try_from(length).map_err(|_| io::Error::from_raw_os_error(libc_einval()))?;
+    if length > buffer.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native mDNS receive exceeded the supplied buffer",
+        ));
+    }
+    Ok((length, mdns_packet_info(packet)?))
+}
+
+pub fn mdns_send(
+    fd: RawFd,
+    buffer: &[u8],
+    destination: SocketAddr,
+    ifindex: i32,
+) -> io::Result<usize> {
+    if buffer.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mDNS packet must not be empty",
+        ));
+    }
+    let mut address = [0; 16];
+    let (family, scope_id) = match destination {
+        SocketAddr::V4(destination) => {
+            address[..4].copy_from_slice(&destination.ip().octets());
+            (2, 0)
+        }
+        SocketAddr::V6(destination) => {
+            address.copy_from_slice(&destination.ip().octets());
+            (10, destination.scope_id())
+        }
+    };
+    // SAFETY: buffer and address remain valid for the duration of the send call.
+    let length = signed_result(unsafe {
+        resolved_mdns_send(
+            fd,
+            buffer.as_ptr().cast::<c_void>(),
+            buffer.len(),
+            family,
+            ifindex,
+            address.as_ptr(),
+            destination.port(),
+            scope_id,
+        )
+    })?;
+    usize::try_from(length).map_err(|_| io::Error::from_raw_os_error(libc_einval()))
+}
+
+pub fn address_snapshot() -> io::Result<Vec<AddressInfo>> {
+    let mut capacity = address_snapshot_count()?;
+    for _ in 0..ADDRESS_SNAPSHOT_RETRIES {
+        let mut entries = vec![NativeAddressInfo::default(); capacity.max(1)];
+        // SAFETY: entries points to `entries.len()` writable, correctly aligned ABI records.
+        let count = signed_result(unsafe {
+            resolved_address_snapshot(entries.as_mut_ptr(), entries.len())
+        })?;
+        let count =
+            usize::try_from(count).map_err(|_| io::Error::from_raw_os_error(libc_einval()))?;
+        if count > entries.len() {
+            capacity = count;
+            continue;
+        }
+        entries.truncate(count);
+        return entries.into_iter().map(address_info).collect();
+    }
+    Err(io::Error::other(
+        "kernel address set changed repeatedly during snapshot",
+    ))
 }
 
 pub fn udp_connect(server: SocketAddr, ifindex: Option<i32>) -> io::Result<RawFd> {
@@ -282,6 +448,97 @@ pub fn peer_credentials(fd: c_int) -> io::Result<PeerCredentials> {
         pid: process_id,
         uid: user_id,
         gid: group_id,
+    })
+}
+
+fn address_snapshot_count() -> io::Result<usize> {
+    // SAFETY: a null pointer with zero capacity requests the required record count.
+    let count = signed_result(unsafe { resolved_address_snapshot(std::ptr::null_mut(), 0) })?;
+    usize::try_from(count).map_err(|_| io::Error::from_raw_os_error(libc_einval()))
+}
+
+fn mdns_packet_info(packet: NativeMdnsPacketInfo) -> io::Result<MdnsPacketInfo> {
+    if packet.ifindex <= 0 || packet.source_port == 0 || !(0..=255).contains(&packet.hop_limit) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native mDNS packet metadata is invalid",
+        ));
+    }
+    let (source, destination) = match packet.family {
+        4 => {
+            let source = Ipv4Addr::new(
+                packet.source[0],
+                packet.source[1],
+                packet.source[2],
+                packet.source[3],
+            );
+            let destination = Ipv4Addr::new(
+                packet.destination[0],
+                packet.destination[1],
+                packet.destination[2],
+                packet.destination[3],
+            );
+            (
+                SocketAddr::new(IpAddr::V4(source), packet.source_port),
+                IpAddr::V4(destination),
+            )
+        }
+        6 => {
+            let source = Ipv6Addr::from(packet.source);
+            let destination = Ipv6Addr::from(packet.destination);
+            let source = SocketAddr::V6(SocketAddrV6::new(
+                source,
+                packet.source_port,
+                0,
+                packet.scope_id,
+            ));
+            (source, IpAddr::V6(destination))
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native mDNS packet has an unsupported address family",
+            ));
+        }
+    };
+    Ok(MdnsPacketInfo {
+        ifindex: packet.ifindex,
+        source,
+        destination,
+        hop_limit: packet.hop_limit,
+        destination_multicast: packet.destination_multicast != 0,
+    })
+}
+
+fn address_info(entry: NativeAddressInfo) -> io::Result<AddressInfo> {
+    if entry.ifindex <= 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kernel returned an invalid address interface index",
+        ));
+    }
+    let address = match entry.family {
+        4 if entry.prefix_length <= 32 => IpAddr::V4(Ipv4Addr::new(
+            entry.address[0],
+            entry.address[1],
+            entry.address[2],
+            entry.address[3],
+        )),
+        6 if entry.prefix_length <= 128 => IpAddr::V6(Ipv6Addr::from(entry.address)),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "kernel returned an invalid address family or prefix length",
+            ));
+        }
+    };
+    Ok(AddressInfo {
+        ifindex: entry.ifindex,
+        flags: entry.flags,
+        address,
+        prefix_length: entry.prefix_length,
+        scope: entry.scope,
+        scope_id: entry.scope_id,
     })
 }
 
