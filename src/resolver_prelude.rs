@@ -29,6 +29,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const UDP_POOL_PER_SERVER_MAX: usize = 8;
+const TCP_POOL_PER_SERVER_MAX: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryMode {
@@ -197,6 +198,7 @@ pub struct Resolver {
     fallback_servers: Vec<SocketAddr>,
     states: Mutex<HashMap<SocketAddr, ServerState>>,
     udp_sockets: Mutex<HashMap<SocketAddr, Vec<UdpSocket>>>,
+    tcp_streams: Mutex<HashMap<SocketAddr, Vec<TcpStream>>>,
     routing: RwLock<RoutingTable>,
     routing_generation: AtomicU64,
     inflight: Inflight,
