@@ -516,7 +516,7 @@ impl Error for LinkError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::net::Ipv6Addr;
 
     fn server(octet: u8) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet)), 53)
@@ -712,7 +712,10 @@ mod tests {
         let link = table.link(2).expect("kernel link survives revert");
         assert!(link.dns_servers.is_empty());
         assert!(link.domains.is_empty());
-        assert_eq!(link.kernel.as_ref().map(|kernel| kernel.ifname.as_str()), Some("test2"));
+        assert_eq!(
+            link.kernel.as_ref().map(|kernel| kernel.ifname.as_str()),
+            Some("test2")
+        );
     }
 
     #[test]
