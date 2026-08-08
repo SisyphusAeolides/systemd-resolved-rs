@@ -1,0 +1,211 @@
+name: Certify monitor parity phase
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/certify-monitor-parity-phase.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  certify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/monitor-phase-certification","description":"Monitor parity phase certification in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+          rm -f .github/workflows/certify-monitor-parity-phase.yml
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Verify source and workflow hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in \
+            src/varlink_monitor.rs \
+            src/varlink_browse.rs \
+            src/bin/resolvectl_monitor.rs \
+            src/bin/resolvectl_log_control.rs \
+            src/log_control.rs \
+            tests/pinned_query_result_subscription.rs \
+            tests/pinned_dns_configuration_subscription.rs \
+            tests/pinned_browse_services.rs \
+            tests/pinned_log_control.rs; do
+            test -f "$path"
+          done
+          test -z "$(find .github/workflows -maxdepth 1 -type f \
+            \( -name 'integrate-*' -o -name 'finalize-*' -o -name 'repair-*' \) -print)"
+          cargo fmt --all --check
+          git diff --check
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts and exact remaining inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(Path("/tmp/upstream-surface-audit.json").read_text(encoding="utf-8"))
+          remaining = {
+              "dbus": sorted(item["name"] for item in report["missing"]["dbus"]),
+              "varlink_methods": sorted(report["missing"]["varlink_methods"]),
+              "varlink_errors": sorted(report["missing"]["varlink_errors"]),
+              "configuration_keys": sorted(report["missing"]["configuration_keys"]),
+              "resolvectl_verbs": sorted(report["missing"]["resolvectl_verbs"]),
+          }
+          expected = {
+              "dbus": ["Conflicted"],
+              "varlink_methods": ["QueryFilter"],
+              "varlink_errors": [],
+              "configuration_keys": [],
+              "resolvectl_verbs": [],
+          }
+          if remaining != expected:
+              raise SystemExit(
+                  "unexpected remaining parity inventory:\n"
+                  + json.dumps(remaining, indent=2, sort_keys=True)
+              )
+
+          status = {
+              "schema": 1,
+              "source_commit": os.environ["GITHUB_SHA"],
+              "pinned_upstream_commit": report["upstream_commit"],
+              "named_missing_total": 2,
+              "remaining": remaining,
+              "completed": {
+                  "resolve_monitor_socket": True,
+                  "monitor_dump_cache": True,
+                  "monitor_dump_server_state": True,
+                  "monitor_dump_statistics": True,
+                  "subscribe_dns_configuration": True,
+                  "subscribe_query_results": True,
+                  "browse_services": True,
+                  "resolvectl_show_cache": True,
+                  "resolvectl_show_server_state": True,
+                  "resolvectl_log_level": True,
+                  "log_control_dbus": True,
+                  "live_cache_projection": True,
+                  "live_server_telemetry": True,
+              },
+              "verification": {
+                  "native_abi": "passed",
+                  "packaging": "passed",
+                  "nss": "passed",
+                  "rust_clippy": "passed",
+                  "rust_tests": "passed",
+                  "release_build": "passed",
+                  "live_dns": "passed",
+                  "live_dbus": "passed",
+                  "pinned_surface_audit": "passed",
+              },
+          }
+          output = Path("compat/current-parity-status.json")
+          output.write_text(json.dumps(status, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+
+      - name: Commit certified phase snapshot
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Certify Resolve monitor parity phase'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Monitor parity phase certification passed' || 'Monitor parity phase certification failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/monitor-phase-certification","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
