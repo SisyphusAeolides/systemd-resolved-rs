@@ -1,0 +1,145 @@
+name: Replacement security proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  prove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Collect successful security evidence for this SHA
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["GITHUB_SHA"]
+          token = os.environ["GH_TOKEN"]
+          api = os.environ["GITHUB_API_URL"]
+
+          def request(path: str) -> dict:
+              target = api + path
+              req = urllib.request.Request(
+                  target,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          runs = request(
+              f"/repos/{repository}/actions/runs?head_sha={sha}&status=success&per_page=100"
+          ).get("workflow_runs", [])
+          evidence = []
+          for run in runs:
+              jobs = request(
+                  f"/repos/{repository}/actions/runs/{run['id']}/jobs?filter=latest&per_page=100"
+              ).get("jobs", [])
+              for job in jobs:
+                  if job.get("conclusion") != "success":
+                      continue
+                  successful_steps = [
+                      step.get("name", "")
+                      for step in job.get("steps", [])
+                      if step.get("conclusion") == "success"
+                  ]
+                  evidence.append(
+                      {
+                          "workflow_id": run["workflow_id"],
+                          "workflow_name": run["name"],
+                          "run_id": run["id"],
+                          "run_attempt": run.get("run_attempt"),
+                          "html_url": run["html_url"],
+                          "event": run["event"],
+                          "head_sha": run["head_sha"],
+                          "created_at": run["created_at"],
+                          "updated_at": run["updated_at"],
+                          "job_id": job["id"],
+                          "job_name": job["name"],
+                          "steps": successful_steps,
+                      }
+                  )
+
+          categories = {
+              "fuzz": re.compile(r"fuzz|libfuzzer", re.I),
+              "asan": re.compile(r"address sanitizer|asan", re.I),
+              "ubsan": re.compile(r"undefined behavior sanitizer|ubsan", re.I),
+              "miri": re.compile(r"miri", re.I),
+              "tsan": re.compile(r"thread sanitizer|tsan", re.I),
+              "valgrind": re.compile(r"valgrind", re.I),
+          }
+          matched: dict[str, list[dict]] = {name: [] for name in categories}
+          for item in evidence:
+              searchable = "\n".join(
+                  [item["workflow_name"], item["job_name"], *item["steps"]]
+              )
+              for name, pattern in categories.items():
+                  if pattern.search(searchable):
+                      matched[name].append(item)
+
+          missing = [name for name, values in matched.items() if not values]
+          payload = {
+              "schema": 1,
+              "repository": repository,
+              "source_commit": sha,
+              "required_categories": sorted(categories),
+              "matched": matched,
+              "all_successful_job_evidence": evidence,
+              "missing": missing,
+          }
+          Path("security-evidence.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          if missing:
+              raise SystemExit(
+                  "missing successful security evidence for: " + ", ".join(missing)
+              )
+          PY
+
+      - name: Write bound proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof
+          cp security-evidence.json proof/security-evidence.json
+          python3 scripts/write-replacement-proof.py \
+            --gate security-suite \
+            --result pass \
+            --output proof/security-suite.json \
+            --artifact proof/security-evidence.json \
+            --metadata profiles=fuzz,asan,ubsan,miri,tsan,valgrind \
+            --summary 'All required security profiles passed on this exact Git tree.'
+
+      - name: Upload security proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: replacement-security-proof-${{ github.sha }}
+          path: proof
+          if-no-files-found: error
+          retention-days: 30
