@@ -114,6 +114,23 @@ def main() -> None:
     )
     assert not missing_errors, f"missing pinned Resolve Varlink errors: {missing_errors}"
 
+    required_monitor_surfaces = {
+        "DumpCache",
+        "DumpServerState",
+        "DumpStatistics",
+        "show-cache",
+        "show-server-state",
+    }
+    missing_monitor_surfaces = sorted(
+        name
+        for name in required_monitor_surfaces
+        if not module.mentioned(local, name)
+    )
+    assert not missing_monitor_surfaces, (
+        "missing pinned Resolve monitor surfaces: "
+        f"{missing_monitor_surfaces}"
+    )
+
     print("upstream resolver surface parser tests passed")
 
 
