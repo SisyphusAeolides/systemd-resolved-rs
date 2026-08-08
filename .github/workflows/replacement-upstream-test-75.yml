@@ -1,0 +1,114 @@
+name: Replacement upstream TEST-75 proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-75:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install candidate and upstream test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            btrfs-progs \
+            cryptsetup-bin \
+            dbus \
+            debootstrap \
+            dosfstools \
+            gfortran \
+            git \
+            gperf \
+            libacl1-dev \
+            libaudit-dev \
+            libblkid-dev \
+            libcap-dev \
+            libcryptsetup-dev \
+            libcurl4-openssl-dev \
+            libgcrypt20-dev \
+            liblz4-dev \
+            libmount-dev \
+            libpam0g-dev \
+            libseccomp-dev \
+            libselinux1-dev \
+            libssl-dev \
+            liburing-dev \
+            libzstd-dev \
+            meson \
+            mtools \
+            ninja-build \
+            ovmf \
+            pipx \
+            pkg-config \
+            python3-jinja2 \
+            python3-lxml \
+            python3-pyelftools \
+            qemu-system-x86 \
+            qemu-utils \
+            squashfs-tools \
+            systemd-boot-efi
+          pipx install 'git+https://github.com/systemd/mkosi.git'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify pinned baseline
+        run: bash scripts/verify-upstream-resolved-baseline.sh
+
+      - name: Build release candidate
+        run: cargo build --release --all-features --locked
+
+      - name: Run unmodified pinned TEST-75-RESOLVED
+        id: suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          bash scripts/run-upstream-test-75.sh \
+            --binary target/release/systemd-resolved \
+            --client target/release/resolvectl \
+            --output target/upstream-test-75
+
+      - name: Write bound upstream proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof
+          cp target/upstream-test-75/TEST-75-RESOLVED.log proof/
+          cp target/upstream-test-75/evidence.json proof/
+          python3 scripts/write-replacement-proof.py \
+            --gate upstream-test-75 \
+            --result pass \
+            --output proof/upstream-test-75.json \
+            --artifact proof/TEST-75-RESOLVED.log \
+            --artifact proof/evidence.json \
+            --metadata suite=TEST-75-RESOLVED \
+            --metadata unmodified-recorded-files=true \
+            --summary 'Pinned upstream TEST-75-RESOLVED passed with the candidate daemon and client.'
+
+      - name: Upload bound upstream proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: replacement-upstream-test-75-proof-${{ github.sha }}
+          path: proof
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload upstream failure evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: replacement-upstream-test-75-failure-${{ github.sha }}
+          path: target/upstream-test-75
+          if-no-files-found: ignore
+          retention-days: 14
