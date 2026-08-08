@@ -154,6 +154,13 @@ fn parse_bool(value: &str) -> Result<bool, ConfigError> {
     }
 }
 
+fn parse_cache_size(value: &str) -> Result<usize, ConfigError> {
+    value
+        .trim()
+        .parse()
+        .map_err(|_| ConfigError::InvalidValue(value.to_owned()))
+}
+
 fn parse_cache_mode(value: &str) -> Result<(bool, bool), ConfigError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "yes" | "true" | "on" | "1" => Ok((true, true)),
