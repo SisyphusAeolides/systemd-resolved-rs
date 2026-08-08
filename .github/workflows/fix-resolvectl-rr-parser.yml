@@ -78,6 +78,7 @@ jobs:
           path.write_text(text, encoding="utf-8")
           PY
           cargo fmt --all
+          rm -f .github/workflows/fix-resolvectl-rr-parser.yml
           git diff --check
 
       - name: Verify native and package contracts
@@ -112,7 +113,6 @@ jobs:
           GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
         run: |
           set -euo pipefail
-          git rm --force .github/workflows/fix-resolvectl-rr-parser.yml
           git add -A
           git diff --cached --check
           git commit -m 'Fix resolvectl resource record parser'
