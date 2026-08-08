@@ -101,15 +101,17 @@ jobs:
 
           path = Path("src/varlink_dns_configuration.rs")
           text = path.read_text(encoding="utf-8")
-          old = '''            flags: 0,
-                      mtu: 1500,
-                      operstate: 6,'''
-          new = '''            flags: 0x1_0001,
-                      mtu: 1500,
-                      operstate: 6,'''
-          if text.count(old) != 1:
-              raise SystemExit("kernel-link reachability fixture anchor mismatch")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          fixture = text.index("ifindex: 7,")
+          flags = text.index("flags:", fixture)
+          end = text.index("\n", flags)
+          current = text[flags:end]
+          if current.strip() != "flags: 0,":
+              raise SystemExit(
+                  f"unexpected kernel-link reachability fixture: {current.strip()!r}"
+              )
+          indentation = current[: len(current) - len(current.lstrip())]
+          replacement = f"{indentation}flags: 0x1_0001,"
+          path.write_text(text[:flags] + replacement + text[end:], encoding="utf-8")
           PY
           rm -f .github/workflows/retry-varlink-dns-configuration-test.yml
           cargo fmt --all
