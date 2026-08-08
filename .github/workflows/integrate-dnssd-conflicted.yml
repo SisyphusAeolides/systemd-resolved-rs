@@ -1,0 +1,520 @@
+name: Integrate DNS-SD Conflicted signal parity
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/integrate-dnssd-conflicted.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/dnssd-conflicted","description":"DNS-SD Conflicted signal parity in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+          test -f compat/dnssd-conflicted-upstream.json
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Implement D-Bus signal and registration conflict monitor
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > src/dnssd_conflict.rs <<'EOF'
+          // SPDX-License-Identifier: LGPL-2.1-or-later
+          use std::collections::{BTreeMap, BTreeSet};
+          use std::fs;
+          use std::path::{Path, PathBuf};
+          use std::thread;
+          use std::time::Duration;
+
+          const DNSSD_INTERFACE: &str = "org.freedesktop.resolve1.DnssdService";
+          const DNSSD_OBJECT_PREFIX: &str = "/org/freedesktop/resolve1/dnssd/";
+          const SEARCH_PATHS: &[&str] = &[
+              "/etc/systemd/dnssd",
+              "/run/systemd/dnssd",
+              "/usr/local/lib/systemd/dnssd",
+              "/usr/lib/systemd/dnssd",
+          ];
+
+          #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+          struct ServiceIdentity {
+              name: String,
+              service_type: String,
+              domain: String,
+          }
+
+          #[derive(Clone, Debug, Eq, PartialEq)]
+          struct ServiceRegistration {
+              basename: String,
+              path: PathBuf,
+              identity: ServiceIdentity,
+          }
+
+          pub fn spawn(connection: zbus::Connection) {
+              let _ = thread::Builder::new()
+                  .name("resolved-dnssd-conflicts".to_owned())
+                  .spawn(move || monitor(connection));
+          }
+
+          fn monitor(connection: zbus::Connection) {
+              let mut active = BTreeSet::new();
+              loop {
+                  let current = conflict_paths(&load_registrations(SEARCH_PATHS));
+                  for path in current.difference(&active) {
+                      let path = path.clone();
+                      let result = futures_lite::future::block_on(connection.emit_signal(
+                          None::<&str>,
+                          path.as_str(),
+                          DNSSD_INTERFACE,
+                          "Conflicted",
+                          &(),
+                      ));
+                      if let Err(error) = result {
+                          eprintln!(
+                              "systemd-resolved: failed to emit DNS-SD conflict for {path}: {error}"
+                          );
+                      }
+                  }
+                  active = current;
+                  thread::sleep(Duration::from_secs(2));
+              }
+          }
+
+          fn load_registrations(search_paths: &[&str]) -> Vec<ServiceRegistration> {
+              let mut selected = BTreeMap::new();
+              for directory in search_paths {
+                  let Ok(entries) = fs::read_dir(directory) else {
+                      continue;
+                  };
+                  for entry in entries.flatten() {
+                      let path = entry.path();
+                      if path.extension().and_then(|extension| extension.to_str()) != Some("dnssd") {
+                          continue;
+                      }
+                      let Some(basename) = path
+                          .file_name()
+                          .and_then(|name| name.to_str())
+                          .map(str::to_owned)
+                      else {
+                          continue;
+                      };
+                      if selected.contains_key(&basename) {
+                          continue;
+                      }
+                      if is_masked(&path) {
+                          selected.insert(basename, None);
+                          continue;
+                      }
+                      selected.insert(basename, parse_registration(&path));
+                  }
+              }
+              selected.into_values().flatten().collect()
+          }
+
+          fn is_masked(path: &Path) -> bool {
+              let Ok(metadata) = fs::symlink_metadata(path) else {
+                  return false;
+              };
+              if !metadata.file_type().is_symlink() {
+                  return false;
+              }
+              fs::read_link(path).is_ok_and(|target| target == Path::new("/dev/null"))
+          }
+
+          fn parse_registration(path: &Path) -> Option<ServiceRegistration> {
+              let text = fs::read_to_string(path).ok()?;
+              let mut in_service = false;
+              let mut name = None;
+              let mut service_type = None;
+              let mut domain = None;
+              for raw_line in text.lines() {
+                  let line = raw_line.trim();
+                  if line.is_empty() || line.starts_with(['#', ';']) {
+                      continue;
+                  }
+                  if line.starts_with('[') && line.ends_with(']') {
+                      in_service = line[1..line.len() - 1].eq_ignore_ascii_case("Service");
+                      continue;
+                  }
+                  if !in_service {
+                      continue;
+                  }
+                  let Some((key, value)) = line.split_once('=') else {
+                      continue;
+                  };
+                  let value = value.trim().trim_matches('"');
+                  match key.trim().to_ascii_lowercase().as_str() {
+                      "name" => name = nonempty(value),
+                      "type" => service_type = nonempty(value),
+                      "domain" => domain = nonempty(value),
+                      _ => {}
+                  }
+              }
+              let basename = path.file_name()?.to_str()?.to_owned();
+              Some(ServiceRegistration {
+                  basename,
+                  path: path.to_path_buf(),
+                  identity: ServiceIdentity {
+                      name: name?,
+                      service_type: service_type?,
+                      domain: domain.unwrap_or_else(|| "local".to_owned()),
+                  },
+              })
+          }
+
+          fn nonempty(value: &str) -> Option<String> {
+              let value = value.trim().trim_matches('.');
+              (!value.is_empty()).then(|| value.to_owned())
+          }
+
+          fn conflict_paths(registrations: &[ServiceRegistration]) -> BTreeSet<String> {
+              let mut identities: BTreeMap<&ServiceIdentity, Vec<&ServiceRegistration>> =
+                  BTreeMap::new();
+              for registration in registrations {
+                  identities
+                      .entry(&registration.identity)
+                      .or_default()
+                      .push(registration);
+              }
+              identities
+                  .into_values()
+                  .filter(|registrations| registrations.len() > 1)
+                  .flat_map(|registrations| registrations.into_iter())
+                  .map(|registration| {
+                      format!(
+                          "{DNSSD_OBJECT_PREFIX}{}",
+                          bus_label_escape(
+                              registration
+                                  .basename
+                                  .strip_suffix(".dnssd")
+                                  .unwrap_or(&registration.basename)
+                          )
+                      )
+                  })
+                  .collect()
+          }
+
+          fn bus_label_escape(value: &str) -> String {
+              let mut output = String::new();
+              for byte in value.bytes() {
+                  if byte.is_ascii_alphanumeric() && !(output.is_empty() && byte.is_ascii_digit()) {
+                      output.push(char::from(byte));
+                  } else {
+                      output.push('_');
+                      output.push_str(&format!("{byte:02x}"));
+                  }
+              }
+              if output.is_empty() {
+                  "_00".to_owned()
+              } else {
+                  output
+              }
+          }
+
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+              use std::io::Write;
+
+              #[test]
+              fn duplicate_service_identities_become_conflicted_paths() {
+                  let registrations = vec![
+                      ServiceRegistration {
+                          basename: "one.dnssd".to_owned(),
+                          path: PathBuf::from("one.dnssd"),
+                          identity: ServiceIdentity {
+                              name: "Printer".to_owned(),
+                              service_type: "_ipp._tcp".to_owned(),
+                              domain: "local".to_owned(),
+                          },
+                      },
+                      ServiceRegistration {
+                          basename: "two.dnssd".to_owned(),
+                          path: PathBuf::from("two.dnssd"),
+                          identity: ServiceIdentity {
+                              name: "Printer".to_owned(),
+                              service_type: "_ipp._tcp".to_owned(),
+                              domain: "local".to_owned(),
+                          },
+                      },
+                  ];
+                  assert_eq!(
+                      conflict_paths(&registrations),
+                      BTreeSet::from([
+                          "/org/freedesktop/resolve1/dnssd/one".to_owned(),
+                          "/org/freedesktop/resolve1/dnssd/two".to_owned(),
+                      ])
+                  );
+              }
+
+              #[test]
+              fn parser_reads_service_identity() {
+                  let directory = tempfile::tempdir().expect("temporary directory");
+                  let path = directory.path().join("printer.dnssd");
+                  let mut file = fs::File::create(&path).expect("service file");
+                  writeln!(
+                      file,
+                      "[Service]\nName=Printer\nType=_ipp._tcp\nDomain=local"
+                  )
+                  .expect("service definition");
+                  let registration = parse_registration(&path).expect("registration");
+                  assert_eq!(registration.identity.name, "Printer");
+                  assert_eq!(registration.identity.service_type, "_ipp._tcp");
+                  assert_eq!(registration.identity.domain, "local");
+              }
+
+              #[test]
+              fn bus_label_escape_matches_systemd_style() {
+                  assert_eq!(bus_label_escape("one_two"), "one_5ftwo");
+                  assert_eq!(bus_label_escape("7service"), "_37service");
+              }
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          cargo = Path("Cargo.toml")
+          text = cargo.read_text(encoding="utf-8")
+          dependency = re.search(r"(?m)^futures-lite\s*=", text)
+          if dependency is None:
+              section = re.search(r"(?m)^\[dependencies\]\s*$", text)
+              if section is None:
+                  raise SystemExit("Cargo dependencies section is missing")
+              next_section = re.search(r"(?m)^\[", text[section.end():])
+              end = section.end() + next_section.start() if next_section else len(text)
+              text = text[:end].rstrip() + '\nfutures-lite = "2"\n\n' + text[end:].lstrip()
+              cargo.write_text(text, encoding="utf-8")
+
+          declared = False
+          for path in [Path("src/lib.rs"), Path("src/landing_glue.rs")]:
+              if not path.is_file():
+                  continue
+              source = path.read_text(encoding="utf-8")
+              if re.search(r"(?m)^pub\(crate\) mod dnssd_conflict;\s*$", source):
+                  declared = True
+                  break
+              modules = list(re.finditer(r"(?m)^(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z0-9_]+;\s*$", source))
+              if modules:
+                  position = modules[-1].end()
+                  source = source[:position] + "\npub(crate) mod dnssd_conflict;" + source[position:]
+                  path.write_text(source, encoding="utf-8")
+                  declared = True
+                  break
+          if not declared:
+              raise SystemExit("cannot declare dnssd_conflict module")
+
+          candidates = []
+          for path in Path("src").glob("*.rs"):
+              source = path.read_text(encoding="utf-8")
+              if "org.freedesktop.resolve1.DnssdService" in source:
+                  candidates.append(path)
+          if len(candidates) != 1:
+              raise SystemExit(f"expected one DnssdService interface source, found {candidates}")
+          path = candidates[0]
+          source = path.read_text(encoding="utf-8")
+          if "fn conflicted(" not in source:
+              marker = "org.freedesktop.resolve1.DnssdService"
+              interface = source.index(marker)
+              impl_start = source.rfind("impl ", 0, interface)
+              if impl_start < 0:
+                  impl_start = source.index("impl ", interface)
+              brace = source.index("{", impl_start)
+              depth = 0
+              index = brace
+              while index < len(source):
+                  if source[index] == "{":
+                      depth += 1
+                  elif source[index] == "}":
+                      depth -= 1
+                      if depth == 0:
+                          impl_end = index
+                          break
+                  index += 1
+              else:
+                  raise SystemExit("unterminated DnssdService interface impl")
+              signal = '''
+                  #[dbus_interface(signal, name = "Conflicted")]
+                  async fn conflicted(
+                      signal_context: &zbus::SignalContext<'_>,
+                  ) -> zbus::Result<()>;
+              '''
+              source = source[:impl_end] + signal + source[impl_end:]
+              path.write_text(source, encoding="utf-8")
+
+          builders = []
+          for path in Path("src").glob("*.rs"):
+              source = path.read_text(encoding="utf-8")
+              if "org.freedesktop.resolve1" in source and ".build()" in source and "serve_at" in source:
+                  builders.append(path)
+          if len(builders) != 1:
+              raise SystemExit(f"expected one resolved D-Bus builder, found {builders}")
+          path = builders[0]
+          source = path.read_text(encoding="utf-8")
+          if "dnssd_conflict::spawn" not in source:
+              pattern = re.compile(
+                  r"let\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<builder>[^;]*?\.build\(\)\.await\?);",
+                  re.S,
+              )
+              matches = [
+                  match
+                  for match in pattern.finditer(source)
+                  if "org.freedesktop.resolve1" in match.group("builder")
+              ]
+              if len(matches) != 1:
+                  raise SystemExit("cannot locate resolved D-Bus connection binding")
+              match = matches[0]
+              insertion = (
+                  match.group(0)
+                  + f"\n    crate::dnssd_conflict::spawn({match.group('name')}.clone());"
+              )
+              source = source[:match.start()] + insertion + source[match.end():]
+              path.write_text(source, encoding="utf-8")
+          PY
+
+          cat > tests/pinned_dnssd_conflicted.rs <<'EOF'
+          // SPDX-License-Identifier: LGPL-2.1-or-later
+          const CONFLICT: &str = include_str!("../src/dnssd_conflict.rs");
+
+          #[test]
+          fn dnssd_conflicts_remain_transition_driven_dbus_signals() {
+              for symbol in [
+                  "org.freedesktop.resolve1.DnssdService",
+                  "Conflicted",
+                  "current.difference(&active)",
+                  "connection.emit_signal",
+                  "/etc/systemd/dnssd",
+                  "/run/systemd/dnssd",
+                  "/dev/null",
+                  "bus_label_escape",
+              ] {
+                  assert!(CONFLICT.contains(symbol), "missing conflict symbol {symbol}");
+              }
+          }
+          EOF
+
+          rm -f .github/workflows/integrate-dnssd-conflicted.yml
+          cargo fmt --all
+          git diff --check
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts and surface reduction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("/tmp/upstream-surface-audit.json").read_text(encoding="utf-8"))
+          missing = [item["name"] for item in report["missing"]["dbus"]]
+          if "Conflicted" in missing:
+              raise SystemExit("DnssdService.Conflicted remains missing")
+          PY
+
+      - name: Commit verified conflict signal
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Emit DNS-SD registration conflict signals'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'DNS-SD Conflicted signal parity passed' || 'DNS-SD Conflicted signal parity failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/dnssd-conflicted","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
