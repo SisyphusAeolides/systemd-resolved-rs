@@ -1,0 +1,189 @@
+name: Finalize Resolve query result subscription
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-query-result-subscription.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/query-result-subscription-final","description":"Query result subscription final verification in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Recover or validate query subscription source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -F 'serve_query_results_subscription' src/varlink_monitor.rs >/dev/null 2>&1 \
+              || ! grep -F 'MonitorQueryJournal' src/resolver.rs >/dev/null 2>&1 \
+              || ! grep -F 'resolve_packet_inner' src/resolver_methods_01.rs >/dev/null 2>&1; then
+            test -f .github/workflows/integrate-query-result-subscription.yml
+            python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path(".github/workflows/integrate-query-result-subscription.yml")
+          lines = workflow.read_text(encoding="utf-8").splitlines()
+          marker = "      - name: Record and stream query results"
+          try:
+              cursor = lines.index(marker)
+          except ValueError as error:
+              raise SystemExit("query subscription implementation step is missing") from error
+          while cursor < len(lines) and lines[cursor] != "        run: |":
+              cursor += 1
+          if cursor == len(lines):
+              raise SystemExit("query subscription implementation body is missing")
+          cursor += 1
+          end = cursor
+          while end < len(lines) and not lines[end].startswith("      - name: "):
+              end += 1
+          body = []
+          for line in lines[cursor:end]:
+              if line.startswith("          "):
+                  body.append(line[10:])
+              elif not line:
+                  body.append("")
+              else:
+                  raise SystemExit(f"unexpected workflow indentation: {line!r}")
+          Path("/tmp/recover-query-subscription.sh").write_text(
+              "\n".join(body) + "\n",
+              encoding="utf-8",
+          )
+          PY
+            bash -n /tmp/recover-query-subscription.sh
+            bash /tmp/recover-query-subscription.sh
+          fi
+
+          test -f tests/pinned_query_result_subscription.rs
+          grep -F 'serve_query_results_subscription' src/varlink_monitor.rs >/dev/null
+          grep -F 'MonitorQueryJournal' src/resolver.rs >/dev/null
+          grep -F 'resolve_packet_inner' src/resolver_methods_01.rs >/dev/null
+          grep -F 'record_monitor_query_event' src/resolver_methods_01.rs >/dev/null
+          rm -f \
+            .github/workflows/integrate-query-result-subscription.yml \
+            .github/workflows/finalize-query-result-subscription.yml
+          cargo fmt --all
+          git diff --check
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts and surface reduction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json
+          python3 - <<'PY'
+          import json
+
+          with open("/tmp/upstream-surface-audit.json", encoding="utf-8") as stream:
+              report = json.load(stream)
+          if "SubscribeQueryResults" in report["missing"]["varlink_methods"]:
+              raise SystemExit("SubscribeQueryResults remains missing")
+          PY
+
+      - name: Commit independently verified subscription
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Finalize Resolve query result subscription'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Query result subscription final verification passed' || 'Query result subscription final verification failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/query-result-subscription-final","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
