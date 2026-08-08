@@ -49,7 +49,10 @@ check-packaging:
 	trap 'rm -rf "$$work"' EXIT HUP INT TERM; \
 	PYTHONPYCACHEPREFIX="$$work/pycache" python3 -m py_compile \
 		tests/live-dns.py tests/deterministic-dns-server.py tests/fake-varlink-resolve.py \
-		scripts/check-workflow-fleet.py scripts/probe-stub.py; \
+		tests/test-upstream-surface-audit.py \
+		scripts/audit-upstream-resolver-surfaces.py scripts/check-workflow-fleet.py \
+		scripts/probe-stub.py; \
+	PYTHONPYCACHEPREFIX="$$work/pycache" python3 tests/test-upstream-surface-audit.py; \
 	python3 scripts/check-workflow-fleet.py; \
 	test "$$(grep -Fc 'ExecStart=@SYSTEMD_RESOLVED_RS@' packaging/systemd/systemd-resolved-replacement.service)" -eq 1; \
 	sed 's|@SYSTEMD_RESOLVED_RS@|/bin/true|g' \
