@@ -1,0 +1,113 @@
+name: Fix resolvectl resource record parser
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/fix-resolvectl-rr-parser.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolved-ci-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Repair and canonicalize parser
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/bin/resolvectl_rr.rs")
+          text = path.read_text(encoding="utf-8")
+          broken = '''        .ok_or_else(|| invalid_data("record is truncated")?
+                  .try_into()'''
+          fixed = '''        .ok_or_else(|| invalid_data("record is truncated"))?
+                  .try_into()'''
+          if broken in text:
+              text = text.replace(broken, fixed, 1)
+          elif fixed not in text:
+              raise SystemExit("resolvectl parser repair anchor is missing")
+          path.write_text(text, encoding="utf-8")
+          PY
+          cargo fmt --all
+          git diff --check
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+
+      - name: Commit verified repair
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git rm --force .github/workflows/fix-resolvectl-rr-parser.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'Fix resolvectl resource record parser'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
