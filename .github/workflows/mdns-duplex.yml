@@ -1,0 +1,46 @@
+name: Live simultaneous mDNS resolver and responder
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-mdns-duplex-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Detect integrated multicast stack
+        id: integrated
+        shell: bash
+        run: |
+          if grep -Fq '#[path = "mdns_responder.rs"]' src/mdns.rs; then
+            echo 'value=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'value=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install build and namespace tools
+        if: ${{ steps.integrated.outputs.value == 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            gfortran iproute2 libssl-dev liburing-dev
+      - name: Build release daemon
+        if: ${{ steps.integrated.outputs.value == 'true' }}
+        run: cargo build --release --all-features --locked
+      - name: Exercise both directions concurrently
+        if: ${{ steps.integrated.outputs.value == 'true' }}
+        run: python3 tests/live-mdns-duplex.py target/release/systemd-resolved
+      - name: Explain staged multicast code
+        if: ${{ steps.integrated.outputs.value != 'true' }}
+        run: echo 'The multicast stack is staged but has not passed its atomic integration gate.'
