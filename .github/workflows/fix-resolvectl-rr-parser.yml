@@ -27,7 +27,7 @@ jobs:
           STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          payload=$(printf '{"state":"pending","context":"ci-repair/resolvectl","description":"Resolver parser verification in progress","target_url":"%s"}' "$STATUS_URL")
+          payload=$(printf '{"state":"pending","context":"ci-repair/resolvectl","description":"Resolver module verification in progress","target_url":"%s"}' "$STATUS_URL")
           curl --fail-with-body --silent --show-error \
             --request POST \
             --header "Accept: application/vnd.github+json" \
@@ -58,12 +58,21 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
 
-      - name: Repair and canonicalize parser
+      - name: Repair and canonicalize resolver module
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
+
+          cargo_path = Path("Cargo.toml")
+          cargo = cargo_path.read_text(encoding="utf-8")
+          if "autobins = false" not in cargo:
+              anchor = 'build = "build.rs"\n'
+              if cargo.count(anchor) != 1:
+                  raise SystemExit("Cargo package anchor is missing")
+              cargo = cargo.replace(anchor, anchor + "autobins = false\n", 1)
+          cargo_path.write_text(cargo, encoding="utf-8")
 
           path = Path("src/bin/resolvectl_rr.rs")
           text = path.read_text(encoding="utf-8")
@@ -75,6 +84,22 @@ jobs:
               text = text.replace(broken, fixed, 1)
           elif fixed not in text:
               raise SystemExit("resolvectl parser repair anchor is missing")
+
+          text = text.replace("use std::collections::BTreeMap;\n", "", 1)
+          sha_anchor = "fn sha256(input: &[u8]) -> [u8; 32] {"
+          sha_allowed = "#[allow(clippy::too_many_lines)]\n" + sha_anchor
+          if sha_allowed not in text:
+              if text.count(sha_anchor) != 1:
+                  raise SystemExit("SHA-256 implementation anchor is missing")
+              text = text.replace(sha_anchor, sha_allowed, 1)
+
+          old_zip = ".zip([a, b, c, d, e, f, g, h].into_iter())"
+          new_zip = ".zip([a, b, c, d, e, f, g, h])"
+          if old_zip in text:
+              text = text.replace(old_zip, new_zip, 1)
+          elif new_zip not in text:
+              raise SystemExit("SHA-256 state update anchor is missing")
+
           path.write_text(text, encoding="utf-8")
           PY
           cargo fmt --all
@@ -115,7 +140,7 @@ jobs:
           set -euo pipefail
           git add -A
           git diff --cached --check
-          git commit -m 'Fix resolvectl resource record parser'
+          git commit -m 'Fix resolvectl resource record module'
           for attempt in 1 2 3 4 5; do
             git fetch origin main
             if ! git rebase origin/main; then
@@ -135,7 +160,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
-          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Resolver parser verification passed' || 'Resolver parser verification failed' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Resolver module verification passed' || 'Resolver module verification failed' }}
           STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
