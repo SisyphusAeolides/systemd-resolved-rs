@@ -1,0 +1,256 @@
+name: Analyze pinned QueryFilter contract
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/analyze-query-filter-contract.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/query-filter-analysis","description":"Pinned QueryFilter analysis in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+          test -f compat/current-parity-status.json
+
+      - name: Clone pinned systemd source
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit=$(cat compat/upstream-systemd/commit)
+          git clone --filter=blob:none --no-checkout https://github.com/systemd/systemd.git /tmp/systemd
+          git -C /tmp/systemd fetch --depth 1 origin "$commit"
+          git -C /tmp/systemd checkout --detach "$commit"
+          test "$(git -C /tmp/systemd rev-parse HEAD)" = "$commit"
+
+      - name: Extract role schema and call sites
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+          import re
+
+          root = Path("/tmp/systemd")
+          interface_sources = sorted(
+              list((root / "src" / "shared").glob("varlink-io.systemd.Resolve*.c"))
+              + list((root / "src" / "resolve").glob("varlink-*.c"))
+          )
+          definition = None
+          definition_path = None
+          for path in interface_sources:
+              text = path.read_text(encoding="utf-8", errors="replace")
+              match = re.search(
+                  r"(?:static\s+)?SD_VARLINK_DEFINE_METHOD(?:_[A-Z_]+)?\(\s*QueryFilter\s*,(?P<body>.*?)\n\s*\);",
+                  text,
+                  re.S,
+              )
+              if match:
+                  definition = match.group(0)
+                  definition_path = path.relative_to(root).as_posix()
+                  break
+          if definition is None or definition_path is None:
+              raise SystemExit("pinned QueryFilter definition is missing")
+
+          field_pattern = re.compile(
+              r"SD_VARLINK_DEFINE_(?P<direction>INPUT|OUTPUT)(?:_BY_TYPE)?\(\s*"
+              r"(?P<name>[A-Za-z0-9_]+)\s*,\s*"
+              r"(?P<type>[A-Za-z0-9_.]+)\s*,\s*"
+              r"(?P<flags>[^)]+)\)"
+          )
+          fields = [
+              {
+                  "direction": match.group("direction").lower(),
+                  "name": match.group("name"),
+                  "type": match.group("type"),
+                  "flags": " ".join(match.group("flags").split()),
+              }
+              for match in field_pattern.finditer(definition)
+          ]
+          if not fields:
+              raise SystemExit("pinned QueryFilter fields were not parsed")
+
+          references = []
+          server_bind = []
+          client_call = []
+          for path in sorted((root / "src").rglob("*.[ch]")):
+              text = path.read_text(encoding="utf-8", errors="replace")
+              if "QueryFilter" not in text:
+                  continue
+              lines = text.splitlines()
+              for index, line in enumerate(lines):
+                  if "QueryFilter" not in line:
+                      continue
+                  start = max(0, index - 4)
+                  end = min(len(lines), index + 5)
+                  excerpt = "\n".join(lines[start:end])
+                  item = {
+                      "path": path.relative_to(root).as_posix(),
+                      "line": index + 1,
+                      "excerpt": excerpt,
+                  }
+                  references.append(item)
+                  lowered = excerpt.lower()
+                  if "server_bind_method" in lowered or "bind_method_many" in lowered:
+                      server_bind.append(item)
+                  if any(
+                      token in lowered
+                      for token in (
+                          "sd_varlink_call",
+                          "sd_varlink_invoke",
+                          "sd_varlink_observe",
+                          "sd_varlink_send",
+                          "sd_varlink_collect",
+                      )
+                  ):
+                      client_call.append(item)
+
+          non_definition_references = [
+              item for item in references if item["path"] != definition_path
+          ]
+          if not non_definition_references:
+              raise SystemExit("pinned QueryFilter has no implementation references")
+
+          role = (
+              "both"
+              if server_bind and client_call
+              else "server"
+              if server_bind
+              else "client"
+              if client_call
+              else "unclassified"
+          )
+          if role == "unclassified":
+              for item in non_definition_references:
+                  lowered = item["excerpt"].lower()
+                  if "varlink" in lowered and "connect" in lowered:
+                      role = "client"
+                      client_call.append(item)
+                      break
+          if role == "unclassified":
+              raise SystemExit(
+                  "could not classify QueryFilter role from pinned source:\n"
+                  + json.dumps(non_definition_references, indent=2)
+              )
+
+          report = {
+              "schema": 1,
+              "upstream_commit": (root / ".git" / "HEAD").read_text(
+                  encoding="utf-8", errors="replace"
+              ).strip(),
+              "definition_path": definition_path,
+              "role": role,
+              "fields": fields,
+              "server_bind_sites": server_bind,
+              "client_call_sites": client_call,
+              "references": references,
+              "definition": definition,
+          }
+          report["upstream_commit"] = __import__("subprocess").check_output(
+              ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+          ).strip()
+          output = Path("compat/query-filter-upstream.json")
+          output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+          status_path = Path("compat/current-parity-status.json")
+          status = json.loads(status_path.read_text(encoding="utf-8"))
+          status["query_filter_contract"] = {
+              "role": role,
+              "definition_path": definition_path,
+              "input_fields": [
+                  field for field in fields if field["direction"] == "input"
+              ],
+              "output_fields": [
+                  field for field in fields if field["direction"] == "output"
+              ],
+          }
+          status_path.write_text(
+              json.dumps(status, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          rm -f .github/workflows/analyze-query-filter-contract.yml
+          git diff --check
+
+      - name: Commit pinned contract analysis
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Record pinned QueryFilter contract'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Pinned QueryFilter analysis passed' || 'Pinned QueryFilter analysis failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/query-filter-analysis","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
