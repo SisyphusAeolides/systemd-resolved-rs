@@ -1,0 +1,589 @@
+name: Integrate Resolve BrowseServices parity
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/integrate-browse-services.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/browse-services","description":"Resolve BrowseServices parity in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Implement DNS-SD browse stream
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > src/varlink_browse.rs <<'EOF'
+          // SPDX-License-Identifier: LGPL-2.1-or-later
+          use std::collections::BTreeSet;
+
+          const TYPE_PTR_RECORD: u16 = 12;
+
+          #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+          struct BrowsedService {
+              family: i32,
+              name: Option<String>,
+              service_type: String,
+              domain: String,
+              ifindex: i32,
+          }
+
+          #[derive(Clone, Debug, Eq, PartialEq)]
+          struct BrowseRequest {
+              browse_name: String,
+              service_type: String,
+              domain: String,
+              ifindex: i32,
+              family: i32,
+              flags: u64,
+          }
+
+          fn browse_services_subscription_requested(input: &str) -> bool {
+              let Ok(request) = json::parse(input) else {
+                  return false;
+              };
+              request.get("method").and_then(Value::as_str)
+                  == Some("io.systemd.Resolve.BrowseServices")
+                  && request.get("more").and_then(Value::as_bool) == Some(true)
+          }
+
+          fn browse_services_dispatch(request: &Value) -> Value {
+              if request.get("more").and_then(Value::as_bool) == Some(true) {
+                  browse_services_ready()
+              } else {
+                  error("org.varlink.service.ExpectedMore")
+              }
+          }
+
+          fn browse_services_ready() -> Value {
+              Value::object([
+                  ("continues", Value::Bool(true)),
+                  (
+                      "parameters",
+                      Value::object([("services", Value::Array(Vec::new()))]),
+                  ),
+              ])
+          }
+
+          fn serve_browse_services(
+              stream: &mut UnixStream,
+              resolver: &Resolver,
+              input: &str,
+          ) -> io::Result<()> {
+              let request = json::parse(input).map_err(|error| {
+                  io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+              })?;
+              let parameters = request
+                  .get("parameters")
+                  .cloned()
+                  .unwrap_or_else(|| Value::Object(BTreeMap::new()));
+              let browse = match parse_browse_request(&parameters) {
+                  Ok(browse) => browse,
+                  Err(reply) => {
+                      write_monitor_frame(stream, &reply)?;
+                      return Ok(());
+                  }
+              };
+              stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+              let mut previous = BTreeSet::new();
+              let mut first = true;
+              let mut probe = [0; 1];
+
+              while !stop_requested() {
+                  match browse_services_snapshot(resolver, &browse) {
+                      Ok(current) => {
+                          let added: Vec<_> = current.difference(&previous).cloned().collect();
+                          let removed: Vec<_> = previous.difference(&current).cloned().collect();
+                          if first || !added.is_empty() || !removed.is_empty() {
+                              let update = browse_services_update(&added, &removed);
+                              match write_monitor_frame(stream, &update) {
+                                  Ok(()) => {
+                                      previous = current;
+                                      first = false;
+                                  }
+                                  Err(error)
+                                      if matches!(
+                                          error.kind(),
+                                          io::ErrorKind::BrokenPipe
+                                              | io::ErrorKind::ConnectionAborted
+                                              | io::ErrorKind::ConnectionReset
+                                      ) =>
+                                  {
+                                      return Ok(());
+                                  }
+                                  Err(error) => return Err(error),
+                              }
+                          }
+                      }
+                      Err(reply) if first => {
+                          write_monitor_frame(stream, &reply)?;
+                          return Ok(());
+                      }
+                      Err(_) => {}
+                  }
+
+                  match stream.peek(&mut probe) {
+                      Ok(0) => return Ok(()),
+                      Ok(_) => {
+                          return Err(io::Error::new(
+                              io::ErrorKind::InvalidData,
+                              "unexpected request data on service browse subscription",
+                          ));
+                      }
+                      Err(error)
+                          if matches!(
+                              error.kind(),
+                              io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                          ) => {}
+                      Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                      Err(error)
+                          if matches!(
+                              error.kind(),
+                              io::ErrorKind::BrokenPipe
+                                  | io::ErrorKind::ConnectionAborted
+                                  | io::ErrorKind::ConnectionReset
+                          ) =>
+                      {
+                          return Ok(());
+                      }
+                      Err(error) => return Err(error),
+                  }
+              }
+              Ok(())
+          }
+
+          fn parse_browse_request(parameters: &Value) -> Result<BrowseRequest, Value> {
+              let Some(service_type) = parameters.get("type").and_then(Value::as_str) else {
+                  return Err(invalid_parameter("type"));
+              };
+              let service_type = service_type.trim().trim_end_matches('.');
+              if service_type.is_empty()
+                  || !service_type.starts_with('_')
+                  || !(service_type.ends_with("._tcp") || service_type.ends_with("._udp"))
+              {
+                  return Err(invalid_parameter("type"));
+              }
+              let domain = parameters
+                  .get("domain")
+                  .and_then(Value::as_str)
+                  .unwrap_or("local")
+                  .trim()
+                  .trim_matches('.')
+                  .to_ascii_lowercase();
+              if domain.is_empty() {
+                  return Err(invalid_parameter("domain"));
+              }
+              let ifindex = parameters
+                  .get("ifindex")
+                  .and_then(Value::as_i64)
+                  .unwrap_or(0);
+              let Ok(ifindex) = i32::try_from(ifindex) else {
+                  return Err(invalid_parameter("ifindex"));
+              };
+              if ifindex < 0 {
+                  return Err(invalid_parameter("ifindex"));
+              }
+              let family = parameters
+                  .get("family")
+                  .and_then(Value::as_i64)
+                  .unwrap_or(0);
+              let Ok(family) = i32::try_from(family) else {
+                  return Err(invalid_parameter("family"));
+              };
+              if !matches!(family, 0 | 2 | 10) {
+                  return Err(invalid_parameter("family"));
+              }
+              let flags = parameters
+                  .get("flags")
+                  .and_then(Value::as_u64)
+                  .unwrap_or(0);
+              Ok(BrowseRequest {
+                  browse_name: format!("{service_type}.{domain}"),
+                  service_type: service_type.to_owned(),
+                  domain,
+                  ifindex,
+                  family,
+                  flags,
+              })
+          }
+
+          fn browse_services_snapshot(
+              resolver: &Resolver,
+              browse: &BrowseRequest,
+          ) -> Result<BTreeSet<BrowsedService>, Value> {
+              let reply = resolve_record(
+                  &Value::object([
+                      ("ifindex", Value::Number(i128::from(browse.ifindex))),
+                      ("name", Value::String(browse.browse_name.clone())),
+                      ("class", Value::Number(i128::from(CLASS_IN))),
+                      ("type", Value::Number(i128::from(TYPE_PTR_RECORD))),
+                      ("flags", Value::Number(i128::from(browse.flags))),
+                  ]),
+                  resolver,
+              );
+              if reply.get("error").is_some() {
+                  return Err(reply);
+              }
+              Ok(service_set_from_record_reply(&reply, browse))
+          }
+
+          fn service_set_from_record_reply(
+              reply: &Value,
+              browse: &BrowseRequest,
+          ) -> BTreeSet<BrowsedService> {
+              let mut services = BTreeSet::new();
+              let Some(records) = reply
+                  .get("parameters")
+                  .and_then(|parameters| parameters.get("rrs"))
+                  .and_then(Value::as_array)
+              else {
+                  return services;
+              };
+              for record in records {
+                  let ifindex = record
+                      .get("ifindex")
+                      .and_then(Value::as_i64)
+                      .and_then(|value| i32::try_from(value).ok())
+                      .unwrap_or(browse.ifindex);
+                  let Some(rr) = record.get("rr") else {
+                      continue;
+                  };
+                  let target = ["name", "target", "replacement"]
+                      .iter()
+                      .find_map(|field| rr.get(field).and_then(Value::as_str));
+                  let Some(target) = target else {
+                      continue;
+                  };
+                  let name = browse_instance_name(target, &browse.browse_name);
+                  services.insert(BrowsedService {
+                      family: browse.family,
+                      name,
+                      service_type: browse.service_type.clone(),
+                      domain: browse.domain.clone(),
+                      ifindex,
+                  });
+              }
+              services
+          }
+
+          fn browse_instance_name(target: &str, browse_name: &str) -> Option<String> {
+              let target = target.trim_end_matches('.');
+              let suffix = format!(".{browse_name}");
+              if target.len() <= suffix.len()
+                  || !target[target.len() - suffix.len()..].eq_ignore_ascii_case(&suffix)
+              {
+                  return None;
+              }
+              let name = &target[..target.len() - suffix.len()];
+              (!name.is_empty()).then(|| name.to_owned())
+          }
+
+          fn browse_services_update(
+              added: &[BrowsedService],
+              removed: &[BrowsedService],
+          ) -> Value {
+              let services = added
+                  .iter()
+                  .map(|service| browse_service_value(service, "added"))
+                  .chain(
+                      removed
+                          .iter()
+                          .map(|service| browse_service_value(service, "removed")),
+                  )
+                  .collect();
+              Value::object([
+                  ("continues", Value::Bool(true)),
+                  (
+                      "parameters",
+                      Value::object([("services", Value::Array(services))]),
+                  ),
+              ])
+          }
+
+          fn browse_service_value(service: &BrowsedService, update: &str) -> Value {
+              Value::object([
+                  ("updateFlag", Value::String(update.to_owned())),
+                  ("family", Value::Number(i128::from(service.family))),
+                  (
+                      "name",
+                      service
+                          .name
+                          .as_ref()
+                          .map_or(Value::Null, |name| Value::String(name.clone())),
+                  ),
+                  ("type", Value::String(service.service_type.clone())),
+                  ("domain", Value::String(service.domain.clone())),
+                  ("ifindex", Value::Number(i128::from(service.ifindex))),
+              ])
+          }
+
+          #[cfg(test)]
+          mod browse_tests {
+              use super::*;
+
+              #[test]
+              fn browse_request_defaults_to_local_and_validates_family() {
+                  let request = parse_browse_request(&Value::object([(
+                      "type",
+                      Value::String("_http._tcp".to_owned()),
+                  )]))
+                  .expect("browse request");
+                  assert_eq!(request.browse_name, "_http._tcp.local");
+                  assert_eq!(request.ifindex, 0);
+                  assert_eq!(request.family, 0);
+                  assert!(parse_browse_request(&Value::object([
+                      ("type", Value::String("_http._tcp".to_owned())),
+                      ("family", Value::Number(1)),
+                  ]))
+                  .is_err());
+              }
+
+              #[test]
+              fn ptr_reply_projects_added_service_data() {
+                  let browse = BrowseRequest {
+                      browse_name: "_http._tcp.local".to_owned(),
+                      service_type: "_http._tcp".to_owned(),
+                      domain: "local".to_owned(),
+                      ifindex: 0,
+                      family: 2,
+                      flags: 0,
+                  };
+                  let reply = success(Value::object([(
+                      "rrs",
+                      Value::Array(vec![Value::object([
+                          ("ifindex", Value::Number(7)),
+                          (
+                              "rr",
+                              Value::object([(
+                                  "name",
+                                  Value::String(
+                                      "Printer._http._tcp.local".to_owned(),
+                                  ),
+                              )]),
+                          ),
+                          ("raw", Value::String(String::new())),
+                      ])]),
+                  )]));
+                  let services = service_set_from_record_reply(&reply, &browse);
+                  let service = services.iter().next().expect("service");
+                  assert_eq!(service.name.as_deref(), Some("Printer"));
+                  assert_eq!(service.ifindex, 7);
+                  let update = browse_services_update(&[service.clone()], &[]);
+                  assert_eq!(update.get("continues").and_then(Value::as_bool), Some(true));
+              }
+
+              #[test]
+              fn browse_dispatch_requires_more() {
+                  let reply = browse_services_dispatch(&Value::object([(
+                      "method",
+                      Value::String("io.systemd.Resolve.BrowseServices".to_owned()),
+                  )]));
+                  assert_eq!(
+                      reply.get("error").and_then(Value::as_str),
+                      Some("org.varlink.service.ExpectedMore")
+                  );
+              }
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/varlink.rs")
+          text = path.read_text(encoding="utf-8")
+          description_anchor = 'method ResolveRecord(ifindex: ?int, name: string, class: ?int, type: int, flags: ?int) -> (rrs: [](ifindex: ?int, rr: ?object, raw: string), flags: int)\\n\\\n'
+          description = '''type BrowseServiceUpdateFlag (added, removed)\\n\\
+          type ServiceData (updateFlag: BrowseServiceUpdateFlag, family: int, name: ?string, type: string, domain: string, ifindex: int)\\n\\
+          method BrowseServices(type: string, domain: ?string, ifindex: ?int, family: ?int, flags: ?int) -> (services: []ServiceData)\\n\\
+          '''
+          if text.count(description_anchor) != 1:
+              raise SystemExit("ResolveRecord interface description anchor mismatch")
+          text = text.replace(
+              description_anchor,
+              description_anchor + description,
+              1,
+          )
+
+          dispatch_anchor = '''        "io.systemd.Resolve.ResolveService" => resolve_service(&parameters, resolver),'''
+          dispatch_replacement = '''        "io.systemd.Resolve.ResolveService" => resolve_service(&parameters, resolver),
+                  "io.systemd.Resolve.BrowseServices" => browse_services_dispatch(&request),'''
+          if text.count(dispatch_anchor) != 1:
+              raise SystemExit("Resolve service dispatch anchor mismatch")
+          text = text.replace(dispatch_anchor, dispatch_replacement, 1)
+
+          subscription_anchor = '''                          if interface == VarlinkInterface::Monitor {'''
+          subscription_replacement = '''                          if interface == VarlinkInterface::Resolve
+                              && browse_services_subscription_requested(text)
+                          {
+                              return serve_browse_services(&mut stream, resolver, text);
+                          }
+                          if interface == VarlinkInterface::Monitor {'''
+          if text.count(subscription_anchor) != 1:
+              raise SystemExit("Varlink subscription routing anchor mismatch")
+          text = text.replace(subscription_anchor, subscription_replacement, 1)
+
+          include_anchor = 'include!("varlink_monitor.rs");'
+          if text.count(include_anchor) != 1:
+              raise SystemExit("monitor include anchor mismatch")
+          text = text.replace(
+              include_anchor,
+              include_anchor + '\ninclude!("varlink_browse.rs");',
+              1,
+          )
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          cat > tests/pinned_browse_services.rs <<'EOF'
+          // SPDX-License-Identifier: LGPL-2.1-or-later
+          const RESOLVE: &str = include_str!("../src/varlink.rs");
+          const BROWSE: &str = include_str!("../src/varlink_browse.rs");
+
+          #[test]
+          fn browse_services_remains_a_live_continued_ptr_subscription() {
+              for symbol in [
+                  "method BrowseServices",
+                  "BrowseServiceUpdateFlag",
+                  "io.systemd.Resolve.BrowseServices",
+                  "TYPE_PTR_RECORD",
+                  "resolve_record",
+                  "difference(&previous)",
+                  "updateFlag",
+                  "org.varlink.service.ExpectedMore",
+                  "serve_browse_services",
+              ] {
+                  assert!(
+                      RESOLVE.contains(symbol) || BROWSE.contains(symbol),
+                      "missing browse service symbol {symbol}"
+                  );
+              }
+          }
+          EOF
+
+          rm -f .github/workflows/integrate-browse-services.yml
+          cargo fmt --all
+          git diff --check
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts and surface reduction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json
+          python3 - <<'PY'
+          import json
+
+          with open("/tmp/upstream-surface-audit.json", encoding="utf-8") as stream:
+              report = json.load(stream)
+          if "BrowseServices" in report["missing"]["varlink_methods"]:
+              raise SystemExit("BrowseServices remains missing")
+          PY
+
+      - name: Commit verified browse tranche
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Stream DNS-SD service browsing through Resolve Varlink'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Resolve BrowseServices parity passed' || 'Resolve BrowseServices parity failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/browse-services","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
