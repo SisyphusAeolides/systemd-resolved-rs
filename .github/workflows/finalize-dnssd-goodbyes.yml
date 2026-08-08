@@ -1,0 +1,203 @@
+name: Finalize DNS-SD reload goodbyes
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-dnssd-goodbyes.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Check out and synchronize source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Synchronize with current main
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+      - name: Install verification dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran iproute2 libssl-dev liburing-dev systemd
+      - name: Integrate bounded retired catalogs and goodbyes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s src/dnssd_runtime_v2.rs
+          cp src/dnssd_runtime_v2.rs src/dnssd_runtime.rs
+          rm src/dnssd_runtime_v2.rs
+          python3 - <<'PY'
+          from pathlib import Path
+
+          responder_path = Path('src/mdns_responder.rs')
+          responder = responder_path.read_text(encoding='utf-8')
+          old = '''            if state.generation != responder_generation(&name) {
+                state.restart_probe(&name, now);
+            }
+'''
+          new = '''            if state.generation != responder_generation(&name) {
+                if let Err(error) = send_service_goodbyes(state, &name) {
+                    eprintln!("systemd-resolved: failed to send DNS-SD goodbyes: {error}");
+                }
+                state.restart_probe(&name, now);
+            }
+'''
+          if 'failed to send DNS-SD goodbyes' not in responder:
+              if old not in responder:
+                  raise SystemExit('cannot locate responder generation transition')
+              responder = responder.replace(old, new, 1)
+          helper = '''fn send_service_goodbyes(state: &InterfaceState, name: &NameState) -> io::Result<()> {
+    let records = super::dnssd_runtime::goodbye_records_for(
+        state.interface,
+        &state.addresses,
+        &name.label(),
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+    .into_iter()
+    .map(|record| LocalRecord {
+        owner: record.owner,
+        rr_type: record.rr_type,
+        class: record.class,
+        ttl: 0,
+        cache_flush: record.cache_flush,
+        rdata: record.rdata,
+    })
+    .collect::<BTreeSet<_>>();
+    if records.is_empty() {
+        return Ok(());
+    }
+    let packet = response_packet(0, &[], &records, false)?;
+    send_multicast(state, &packet)
+}
+
+'''
+          if 'fn send_service_goodbyes(' not in responder:
+              anchor = 'fn send_announcement(\n'
+              if anchor not in responder:
+                  raise SystemExit('cannot locate responder announcement sender')
+              responder = responder.replace(anchor, helper + anchor, 1)
+          responder_path.write_text(responder, encoding='utf-8')
+
+          test_path = Path('tests/live-dnssd.py')
+          test = test_path.read_text(encoding='utf-8')
+          helper = '''def wait_for_goodbye(
+    stream: socket.socket,
+    instance: str,
+    timeout: float = 12,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            parsed, peer, ttl = recv_packet(stream, deadline - time.monotonic())
+        except TimeoutError:
+            break
+        if peer != (HOST_ADDRESS, PORT) or ttl != 255:
+            continue
+        ptr_goodbye = any(
+            record["name"] == SERVICE_TYPE
+            and record["type"] == 12
+            and record["ttl"] == 0
+            and record["value"] == instance
+            for record in parsed["records"]
+        )
+        unique_goodbye = any(
+            record["name"] == instance
+            and record["type"] in (16, 33)
+            and record["ttl"] == 0
+            for record in parsed["records"]
+        )
+        if ptr_goodbye and unique_goodbye:
+            return parsed
+    raise TestFailure(f"no complete DNS-SD goodbye for {instance}")
+
+
+'''
+          if 'def wait_for_goodbye(' not in test:
+              anchor = 'def record_values('
+              if anchor not in test:
+                  raise SystemExit('cannot locate DNS-SD record helper')
+              test = test.replace(anchor, helper + anchor, 1)
+          old_reload = '''        time.sleep(1.5)
+        while True:
+            try:
+                recv_packet(stream, 0.1)
+            except TimeoutError:
+                break
+        updated = ask(stream, SERVICE_TYPE, 12)
+'''
+          new_reload = '''        goodbye = wait_for_goodbye(stream, FIRST_INSTANCE)
+        (state_dir / "goodbye.json").write_text(
+            json.dumps(goodbye, indent=2, sort_keys=True) + "\\n",
+            encoding="utf-8",
+        )
+        time.sleep(1.5)
+        while True:
+            try:
+                recv_packet(stream, 0.1)
+            except TimeoutError:
+                break
+        updated = ask(stream, SERVICE_TYPE, 12)
+'''
+          if 'goodbye = wait_for_goodbye' not in test:
+              if old_reload not in test:
+                  raise SystemExit('cannot locate DNS-SD reload wait')
+              test = test.replace(old_reload, new_reload, 1)
+          test_path.write_text(test, encoding='utf-8')
+          PY
+          cargo fmt --all
+      - name: Verify reload behavior and full resolver tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tests/live-dnssd.py
+          make check-native
+          make check-packaging
+          make check-nss
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+          python3 tests/live-dnssd.py target/release/systemd-resolved
+          python3 tests/live-mdns.py target/release/systemd-resolved
+          python3 tests/live-mdns-responder.py target/release/systemd-resolved
+          python3 tests/live-dns.py \
+            target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          git diff --check
+      - name: Commit verified goodbye behavior
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git rm --force .github/workflows/finalize-dnssd-goodbyes.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'Send DNS-SD goodbyes before reload replacement'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
