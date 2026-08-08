@@ -1,0 +1,88 @@
+name: Replacement boot and rollback proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build and QEMU dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            debootstrap \
+            gfortran \
+            libssl-dev \
+            liburing-dev \
+            ovmf \
+            pipx \
+            qemu-system-x86 \
+            qemu-utils \
+            systemd-boot-efi
+          pipx install 'git+https://github.com/systemd/mkosi.git'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify pinned upstream baseline
+        run: bash scripts/verify-upstream-resolved-baseline.sh
+
+      - name: Build release candidate
+        run: cargo build --release --all-features --locked
+
+      - name: Boot candidate twice and verify rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          bash scripts/run-boot-replacement-vm.sh \
+            --binary target/release/systemd-resolved \
+            --client target/release/resolvectl \
+            --output target/boot-replacement-vm
+
+      - name: Write bound boot proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof
+          cp target/boot-replacement-vm/mkosi-build.log proof/
+          cp target/boot-replacement-vm/qemu-console.log proof/
+          cp target/boot-replacement-vm/evidence.json proof/
+          python3 scripts/write-replacement-proof.py \
+            --gate boot-replacement \
+            --result pass \
+            --output proof/boot-replacement.json \
+            --artifact proof/mkosi-build.log \
+            --artifact proof/qemu-console.log \
+            --artifact proof/evidence.json \
+            --metadata environment=qemu \
+            --metadata boot-count=2 \
+            --metadata rollback-verified=true \
+            --summary 'The candidate survived two QEMU boots and the distro resolver rollback was healthy.'
+
+      - name: Upload bound boot proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: replacement-boot-proof-${{ github.sha }}
+          path: proof
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload boot failure evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: replacement-boot-failure-${{ github.sha }}
+          path: target/boot-replacement-vm
+          if-no-files-found: ignore
+          retention-days: 14
