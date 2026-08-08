@@ -1,0 +1,263 @@
+name: Finalize replacement readiness tools
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-readiness-tools.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out and synchronize source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Synchronize with current main
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+      - name: Bind proof evidence to source and binary hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          download_path = Path('scripts/download-replacement-proofs.py')
+          download = download_path.read_text(encoding='utf-8')
+          if 'import urllib.parse\n' not in download:
+              download = download.replace(
+                  'import urllib.request\n',
+                  'import urllib.parse\nimport urllib.request\n',
+                  1,
+              )
+          download_path.write_text(download, encoding='utf-8')
+
+          security_path = Path('.github/workflows/replacement-security-proof.yml')
+          security = security_path.read_text(encoding='utf-8')
+          if '"source_tree": source_tree,' not in security:
+              security = security.replace(
+                  '          sha = os.environ["GITHUB_SHA"]\n',
+                  '          sha = os.environ["GITHUB_SHA"]\n'
+                  '          import subprocess\n'
+                  '          source_tree = subprocess.check_output(\n'
+                  '              ["git", "rev-parse", "HEAD^{tree}"], text=True\n'
+                  '          ).strip()\n',
+                  1,
+              )
+              security = security.replace(
+                  '              "source_commit": sha,\n',
+                  '              "source_commit": sha,\n'
+                  '              "source_tree": source_tree,\n',
+                  1,
+              )
+          security_path.write_text(security, encoding='utf-8')
+
+          validator_path = Path('scripts/validate-replacement-proof.py')
+          validator = validator_path.read_text(encoding='utf-8')
+          validator = validator.replace(
+              '''def validate_upstream(
+    payload: dict[str, Any], located: dict[str, Path], upstream_commit: str
+) -> None:
+''',
+              '''def validate_upstream(
+    payload: dict[str, Any],
+    located: dict[str, Path],
+    source_tree: str,
+    upstream_commit: str,
+    daemon_sha256: str | None,
+    client_sha256: str | None,
+) -> None:
+''',
+          )
+          validator = validator.replace(
+              '''    if evidence.get("upstream_commit") != upstream_commit:
+        raise ProofValidationError("upstream evidence uses another baseline")
+''',
+              '''    if evidence.get("source_tree") != source_tree:
+        raise ProofValidationError("upstream evidence uses another source tree")
+    if evidence.get("upstream_commit") != upstream_commit:
+        raise ProofValidationError("upstream evidence uses another baseline")
+    if daemon_sha256 and evidence.get("daemon_sha256") != daemon_sha256:
+        raise ProofValidationError("upstream evidence daemon hash differs")
+    if client_sha256 and evidence.get("client_sha256") != client_sha256:
+        raise ProofValidationError("upstream evidence client hash differs")
+''',
+              1,
+          )
+          validator = validator.replace(
+              'def validate_security(payload: dict[str, Any], located: dict[str, Path]) -> None:\n',
+              'def validate_security(\n'
+              '    payload: dict[str, Any], located: dict[str, Path], source_tree: str\n'
+              ') -> None:\n',
+          )
+          validator = validator.replace(
+              '''    if evidence.get("missing") != []:
+        raise ProofValidationError("security evidence still has missing categories")
+''',
+              '''    if evidence.get("source_tree") != source_tree:
+        raise ProofValidationError("security evidence uses another source tree")
+    if evidence.get("source_commit") != payload.get("source_commit"):
+        raise ProofValidationError("security evidence uses another source commit")
+    if evidence.get("missing") != []:
+        raise ProofValidationError("security evidence still has missing categories")
+''',
+              1,
+          )
+          validator = validator.replace(
+              '''        if any(item.get("head_sha") is None for item in values if isinstance(item, dict)):
+            raise ProofValidationError(f"security category evidence is malformed: {category}")
+''',
+              '''        if not all(isinstance(item, dict) for item in values):
+            raise ProofValidationError(f"security category evidence is malformed: {category}")
+        if any(item.get("head_sha") != payload.get("source_commit") for item in values):
+            raise ProofValidationError(f"security category uses another SHA: {category}")
+''',
+              1,
+          )
+          validator = validator.replace(
+              '''def validate_boot(
+    payload: dict[str, Any], located: dict[str, Path], upstream_commit: str
+) -> None:
+''',
+              '''def validate_boot(
+    payload: dict[str, Any],
+    located: dict[str, Path],
+    source_tree: str,
+    upstream_commit: str,
+    daemon_sha256: str | None,
+    client_sha256: str | None,
+) -> None:
+''',
+          )
+          validator = validator.replace(
+              '''    if evidence.get("environment") != "qemu":
+        raise ProofValidationError("boot evidence did not use QEMU")
+''',
+              '''    if evidence.get("source_tree") != source_tree:
+        raise ProofValidationError("boot evidence uses another source tree")
+    if evidence.get("environment") != "qemu":
+        raise ProofValidationError("boot evidence did not use QEMU")
+''',
+              1,
+          )
+          validator = validator.replace(
+              '''    if evidence.get("upstream_commit") != upstream_commit:
+        raise ProofValidationError("boot evidence uses another baseline")
+''',
+              '''    if evidence.get("upstream_commit") != upstream_commit:
+        raise ProofValidationError("boot evidence uses another baseline")
+    if daemon_sha256 and evidence.get("daemon_sha256") != daemon_sha256:
+        raise ProofValidationError("boot evidence daemon hash differs")
+    if client_sha256 and evidence.get("client_sha256") != client_sha256:
+        raise ProofValidationError("boot evidence client hash differs")
+''',
+              1,
+          )
+          if 'parser.add_argument("--daemon-sha256")' not in validator:
+              validator = validator.replace(
+                  '    parser.add_argument("--proof-directory", required=True, type=Path)\n',
+                  '    parser.add_argument("--proof-directory", required=True, type=Path)\n'
+                  '    parser.add_argument("--daemon-sha256")\n'
+                  '    parser.add_argument("--client-sha256")\n',
+                  1,
+              )
+          validator = validator.replace(
+              '''        validate_upstream(payload, located, options.upstream_commit)
+    elif options.gate == "security-suite":
+        validate_security(payload, located)
+    elif options.gate == "boot-replacement":
+        validate_boot(payload, located, options.upstream_commit)
+''',
+              '''        validate_upstream(
+            payload,
+            located,
+            options.source_tree,
+            options.upstream_commit,
+            options.daemon_sha256,
+            options.client_sha256,
+        )
+    elif options.gate == "security-suite":
+        validate_security(payload, located, options.source_tree)
+    elif options.gate == "boot-replacement":
+        validate_boot(
+            payload,
+            located,
+            options.source_tree,
+            options.upstream_commit,
+            options.daemon_sha256,
+            options.client_sha256,
+        )
+''',
+              1,
+          )
+          validator_path.write_text(validator, encoding='utf-8')
+
+          certificate_path = Path('scripts/certify-replacement.sh')
+          certificate = certificate_path.read_text(encoding='utf-8')
+          if '--daemon-sha256 "$BINARY_SHA256"' not in certificate:
+              certificate = certificate.replace(
+                  '        --proof-directory "$PROOF_DIR" \\\n'
+                  '        >"$log" 2>&1\n',
+                  '        --proof-directory "$PROOF_DIR" \\\n'
+                  '        --daemon-sha256 "$BINARY_SHA256" \\\n'
+                  '        --client-sha256 "$CLIENT_SHA256" \\\n'
+                  '        >"$log" 2>&1\n',
+                  1,
+              )
+          certificate_path.write_text(certificate, encoding='utf-8')
+          PY
+          chmod 0755 \
+            scripts/download-replacement-proofs.py \
+            scripts/import-replacement-proof.py \
+            scripts/validate-replacement-proof.py
+      - name: Validate exact-SHA proof tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            scripts/download-replacement-proofs.py \
+            scripts/import-replacement-proof.py \
+            scripts/validate-replacement-proof.py \
+            scripts/write-replacement-proof.py
+          bash -n scripts/certify-replacement.sh
+          scripts/download-replacement-proofs.py --help >/dev/null
+          scripts/import-replacement-proof.py --help >/dev/null
+          scripts/validate-replacement-proof.py --help >/dev/null
+          git diff --check
+      - name: Commit exact-SHA binding
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git rm --force .github/workflows/finalize-readiness-tools.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'Bind readiness proofs to exact binaries and source'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
