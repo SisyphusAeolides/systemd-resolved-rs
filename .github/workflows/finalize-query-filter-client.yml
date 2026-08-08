@@ -1,0 +1,296 @@
+name: Finalize pinned QueryFilter client parity
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-query-filter-client.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/query-filter-client-final","description":"QueryFilter client final verification in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install build dependencies and pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          if ! test -f compat/query-filter-upstream.json; then
+            commit=$(cat compat/upstream-systemd/commit)
+            git clone --filter=blob:none --no-checkout https://github.com/systemd/systemd.git /tmp/systemd
+            git -C /tmp/systemd fetch --depth 1 origin "$commit"
+            git -C /tmp/systemd checkout --detach "$commit"
+          fi
+
+      - name: Recover contract and implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! test -f compat/query-filter-upstream.json; then
+            test -f .github/workflows/analyze-query-filter-contract.yml
+            python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path(".github/workflows/analyze-query-filter-contract.yml")
+          lines = workflow.read_text(encoding="utf-8").splitlines()
+          marker = "      - name: Extract role schema and call sites"
+          cursor = lines.index(marker)
+          while lines[cursor] != "        run: |":
+              cursor += 1
+          cursor += 1
+          end = cursor
+          while end < len(lines) and not lines[end].startswith("      - name: "):
+              end += 1
+          body = [line[10:] if line.startswith("          ") else "" for line in lines[cursor:end]]
+          Path("/tmp/analyze-query-filter.sh").write_text(
+              "\n".join(body) + "\n", encoding="utf-8"
+          )
+          PY
+            set +e
+            bash /tmp/analyze-query-filter.sh
+            analysis_status=$?
+            set -e
+            if [[ $analysis_status -ne 0 ]]; then
+              python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import subprocess
+
+          root = Path("/tmp/systemd")
+          definition = None
+          definition_path = None
+          for path in sorted((root / "src").rglob("varlink-io.systemd.Resolve*.c")):
+              text = path.read_text(encoding="utf-8", errors="replace")
+              match = re.search(
+                  r"(?:static\s+)?SD_VARLINK_DEFINE_METHOD(?:_[A-Z_]+)?\(\s*QueryFilter\s*,(?P<body>.*?)\n\s*\);",
+                  text,
+                  re.S,
+              )
+              if match:
+                  definition = match.group(0)
+                  definition_path = path.relative_to(root).as_posix()
+                  break
+          if definition is None:
+              raise SystemExit("QueryFilter definition remains missing")
+          fields = []
+          for match in re.finditer(
+              r"SD_VARLINK_DEFINE_(INPUT|OUTPUT)(?:_BY_TYPE)?\(\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_.]+)\s*,\s*([^)]+)\)",
+              definition,
+          ):
+              fields.append(
+                  {
+                      "direction": match.group(1).lower(),
+                      "name": match.group(2),
+                      "type": match.group(3),
+                      "flags": " ".join(match.group(4).split()),
+                  }
+              )
+          references = []
+          server_bind = []
+          for path in sorted((root / "src" / "resolve").rglob("*.[ch]")):
+              text = path.read_text(encoding="utf-8", errors="replace")
+              if "QueryFilter" not in text:
+                  continue
+              lines = text.splitlines()
+              for index, line in enumerate(lines):
+                  if "QueryFilter" not in line:
+                      continue
+                  excerpt = "\n".join(lines[max(0, index - 8):min(len(lines), index + 10)])
+                  item = {
+                      "path": path.relative_to(root).as_posix(),
+                      "line": index + 1,
+                      "excerpt": excerpt,
+                  }
+                  references.append(item)
+                  lowered = excerpt.lower()
+                  if "server_bind_method" in lowered or "bind_method_many" in lowered:
+                      server_bind.append(item)
+          non_definition = [item for item in references if item["path"] != definition_path]
+          if server_bind:
+              raise SystemExit("QueryFilter is server-bound; refusing client implementation")
+          if not non_definition:
+              raise SystemExit("QueryFilter has no non-definition references")
+          report = {
+              "schema": 1,
+              "upstream_commit": subprocess.check_output(
+                  ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+              ).strip(),
+              "definition_path": definition_path,
+              "role": "client",
+              "fields": fields,
+              "server_bind_sites": [],
+              "client_call_sites": non_definition,
+              "references": references,
+              "definition": definition,
+          }
+          Path("compat/query-filter-upstream.json").write_text(
+              json.dumps(report, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+            fi
+          fi
+
+          if ! test -f src/query_filter.rs \
+              || ! grep -F 'crate::query_filter::filter_response' src/resolver_methods_01.rs >/dev/null 2>&1; then
+            test -f .github/workflows/integrate-query-filter-client.yml
+            python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path(".github/workflows/integrate-query-filter-client.yml")
+          lines = workflow.read_text(encoding="utf-8").splitlines()
+          marker = "      - name: Implement client-side query filtering"
+          cursor = lines.index(marker)
+          while lines[cursor] != "        run: |":
+              cursor += 1
+          cursor += 1
+          end = cursor
+          while end < len(lines) and not lines[end].startswith("      - name: "):
+              end += 1
+          body = [line[10:] if line.startswith("          ") else "" for line in lines[cursor:end]]
+          Path("/tmp/apply-query-filter.sh").write_text(
+              "\n".join(body) + "\n", encoding="utf-8"
+          )
+          PY
+            bash -n /tmp/apply-query-filter.sh
+            bash /tmp/apply-query-filter.sh
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/query_filter.rs")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace("use std::net::IpAddr;\n", "")
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          test -f tests/pinned_query_filter_client.rs
+          grep -F 'io.systemd.Resolve.QueryFilter' src/query_filter.rs >/dev/null
+          grep -F 'SYSTEMD_RESOLVED_QUERY_FILTER_SOCKET' src/query_filter.rs >/dev/null
+          grep -F 'crate::query_filter::filter_response' src/resolver_methods_01.rs >/dev/null
+          rm -f \
+            .github/workflows/analyze-query-filter-contract.yml \
+            .github/workflows/integrate-query-filter-client.yml \
+            .github/workflows/finalize-query-filter-client.yml
+          cargo fmt --all
+          git diff --check
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts and surface reduction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("/tmp/upstream-surface-audit.json").read_text(encoding="utf-8"))
+          if "QueryFilter" in report["missing"]["varlink_methods"]:
+              raise SystemExit("QueryFilter remains missing")
+          PY
+
+      - name: Commit independently verified QueryFilter client
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Finalize pinned QueryFilter client parity'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'QueryFilter client final verification passed' || 'QueryFilter client final verification failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/query-filter-client-final","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
