@@ -1,0 +1,438 @@
+name: Integrate DNS configuration subscription parity
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/integrate-dns-configuration-subscription.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/dns-configuration-subscription","description":"DNS configuration subscription in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Implement DNS configuration streaming
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          monitor = Path("src/varlink_monitor.rs")
+          text = monitor.read_text(encoding="utf-8")
+          old = 'method DumpStatistics() -> (transactions: TransactionStatistics, cache: CacheStatistics, dnssec: DnssecStatistics)\\n\\\n          method ResetStatistics()";'
+          new = 'method DumpStatistics() -> (transactions: TransactionStatistics, cache: CacheStatistics, dnssec: DnssecStatistics)\\n\\\n          type DNSConfiguration (ifname: ?string, ifindex: ?int, delegate: ?string, defaultRoute: ?bool, currentServer: ?object, servers: ?[]object, fallbackServers: ?[]object, searchDomains: ?[]object, negativeTrustAnchors: ?[]string, dnssec: ?string, dnssecSupported: ?bool, dnsOverTLS: ?string, llmnr: ?string, mDNS: ?string, resolvConfMode: ?string, scopes: ?[]object)\\n\\\n          method SubscribeDNSConfiguration(allowInteractiveAuthentication: ?bool) -> (configuration: []DNSConfiguration)\\n\\\n          method ResetStatistics()";'
+          if text.count(old) != 1:
+              raise SystemExit("monitor interface description anchor mismatch")
+          text = text.replace(old, new, 1)
+
+          dispatch_anchor = '''                  "io.systemd.Resolve.Monitor.DumpCache" => monitor_dump_cache(resolver),'''
+          dispatch_replacement = '''                  "io.systemd.Resolve.Monitor.SubscribeDNSConfiguration" => {
+                      if request.get("more").and_then(Value::as_bool) == Some(true) {
+                          monitor_dns_configuration_update(resolver)
+                      } else {
+                          error("org.varlink.service.ExpectedMore")
+                      }
+                  }
+                  "io.systemd.Resolve.Monitor.DumpCache" => monitor_dump_cache(resolver),'''
+          if text.count(dispatch_anchor) != 1:
+              raise SystemExit("monitor dispatch anchor mismatch")
+          text = text.replace(dispatch_anchor, dispatch_replacement, 1)
+
+          function_anchor = "fn monitor_dump_cache(resolver: &Resolver) -> Value {"
+          helpers = r'''fn monitor_dns_configuration_subscription_requested(input: &str) -> bool {
+              let Ok(request) = json::parse(input) else {
+                  return false;
+              };
+              request.get("method").and_then(Value::as_str)
+                  == Some("io.systemd.Resolve.Monitor.SubscribeDNSConfiguration")
+                  && request.get("more").and_then(Value::as_bool) == Some(true)
+          }
+
+          fn monitor_dns_configuration_update(resolver: &Resolver) -> Value {
+              match dump_dns_configuration(resolver) {
+                  Value::Object(mut object) => {
+                      object.insert("continues".to_owned(), Value::Bool(true));
+                      Value::Object(object)
+                  }
+                  _ => error("org.varlink.service.InternalError"),
+              }
+          }
+
+          fn serve_dns_configuration_subscription(
+              stream: &mut UnixStream,
+              resolver: &Resolver,
+          ) -> io::Result<()> {
+              stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+              let first = monitor_dns_configuration_update(resolver);
+              let mut previous = monitor_configuration_identity(&first);
+              write_monitor_frame(stream, &first)?;
+
+              let mut probe = [0; 1];
+              while !stop_requested() {
+                  match stream.peek(&mut probe) {
+                      Ok(0) => return Ok(()),
+                      Ok(_) => {
+                          return Err(io::Error::new(
+                              io::ErrorKind::InvalidData,
+                              "unexpected request data on DNS configuration subscription",
+                          ));
+                      }
+                      Err(error)
+                          if matches!(
+                              error.kind(),
+                              io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                          ) => {}
+                      Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                      Err(error)
+                          if matches!(
+                              error.kind(),
+                              io::ErrorKind::BrokenPipe
+                                  | io::ErrorKind::ConnectionAborted
+                                  | io::ErrorKind::ConnectionReset
+                          ) =>
+                      {
+                          return Ok(());
+                      }
+                      Err(error) => return Err(error),
+                  }
+
+                  let update = monitor_dns_configuration_update(resolver);
+                  let identity = monitor_configuration_identity(&update);
+                  if identity != previous {
+                      match write_monitor_frame(stream, &update) {
+                          Ok(()) => previous = identity,
+                          Err(error)
+                              if matches!(
+                                  error.kind(),
+                                  io::ErrorKind::BrokenPipe
+                                      | io::ErrorKind::ConnectionAborted
+                                      | io::ErrorKind::ConnectionReset
+                              ) =>
+                          {
+                              return Ok(());
+                          }
+                          Err(error) => return Err(error),
+                      }
+                  }
+              }
+              Ok(())
+          }
+
+          fn monitor_configuration_identity(update: &Value) -> String {
+              update
+                  .get("parameters")
+                  .map_or_else(String::new, Value::to_json)
+          }
+
+          fn write_monitor_frame(stream: &mut UnixStream, value: &Value) -> io::Result<()> {
+              stream.write_all(value.to_json().as_bytes())?;
+              stream.write_all(&[0])
+          }
+
+          '''
+          if text.count(function_anchor) != 1:
+              raise SystemExit("monitor cache function anchor mismatch")
+          text = text.replace(function_anchor, helpers + function_anchor, 1)
+          monitor.write_text(text, encoding="utf-8")
+
+          varlink = Path("src/varlink.rs")
+          text = varlink.read_text(encoding="utf-8")
+          signature = "fn serve_connection("
+          start = text.index(signature)
+          brace = text.index("{", start)
+          depth = 0
+          in_string = False
+          escaped = False
+          index = brace
+          while index < len(text):
+              character = text[index]
+              if in_string:
+                  if escaped:
+                      escaped = False
+                  elif character == "\\":
+                      escaped = True
+                  elif character == '"':
+                      in_string = False
+              else:
+                  if character == '"':
+                      in_string = True
+                  elif character == "{":
+                      depth += 1
+                  elif character == "}":
+                      depth -= 1
+                      if depth == 0:
+                          end = index + 1
+                          break
+              index += 1
+          else:
+              raise SystemExit("unterminated serve_connection")
+          function = text[start:end]
+          pattern = re.compile(
+              r'Ok\(text\)\s*=>\s*\{?\s*dispatch_interface_with_access\(\s*text,\s*resolver,\s*can_control,\s*interface,?\s*\)\s*\}?',
+              re.S,
+          )
+          replacement = '''Ok(text) => {
+                          if interface == VarlinkInterface::Monitor
+                              && monitor_dns_configuration_subscription_requested(text)
+                          {
+                              return serve_dns_configuration_subscription(&mut stream, resolver);
+                          }
+                          dispatch_interface_with_access(text, resolver, can_control, interface)
+                      }'''
+          function, count = pattern.subn(replacement, function, count=1)
+          if count != 1:
+              raise SystemExit("serve_connection dispatch expression mismatch")
+          text = text[:start] + function + text[end:]
+          varlink.write_text(text, encoding="utf-8")
+          PY
+
+          cat >> src/varlink_monitor.rs <<'EOF'
+
+          #[cfg(test)]
+          mod dns_configuration_subscription_tests {
+              use super::*;
+              use crate::config::{Config, Domain};
+              use crate::routing::KernelLinkState;
+
+              fn read_frame(stream: &mut UnixStream) -> Value {
+                  let mut pending = Vec::new();
+                  let mut chunk = [0; 4096];
+                  loop {
+                      let length = stream.read(&mut chunk).expect("subscription frame");
+                      assert_ne!(length, 0, "subscription closed early");
+                      if let Some(end) = chunk[..length].iter().position(|byte| *byte == 0) {
+                          pending.extend_from_slice(&chunk[..end]);
+                          return json::parse(
+                              std::str::from_utf8(&pending).expect("UTF-8 subscription frame"),
+                          )
+                          .expect("JSON subscription frame");
+                      }
+                      pending.extend_from_slice(&chunk[..length]);
+                  }
+              }
+
+              #[test]
+              fn subscription_requires_the_more_flag() {
+                  let resolver = Resolver::new(Config::default());
+                  let reply = dispatch_monitor(
+                      r#"{"method":"io.systemd.Resolve.Monitor.SubscribeDNSConfiguration","parameters":{}}"#,
+                      &resolver,
+                  );
+                  assert_eq!(
+                      reply.get("error").and_then(Value::as_str),
+                      Some("org.varlink.service.ExpectedMore")
+                  );
+              }
+
+              #[test]
+              fn subscription_streams_only_changed_configurations() {
+                  let resolver = Arc::new(Resolver::new(Config::default()));
+                  resolver
+                      .sync_kernel_links(vec![KernelLinkState {
+                          ifindex: 7,
+                          ifname: "test7".to_owned(),
+                          flags: 0x1_0001,
+                          mtu: 1500,
+                          operstate: 6,
+                          has_ipv4_global: true,
+                          has_ipv4_link_local: false,
+                          has_ipv6_global: false,
+                          has_ipv6_link_local: false,
+                      }])
+                      .expect("kernel link");
+                  let (mut client, server) = UnixStream::pair().expect("Varlink pair");
+                  client
+                      .set_read_timeout(Some(Duration::from_secs(3)))
+                      .expect("client timeout");
+                  let server_resolver = Arc::clone(&resolver);
+                  let handle = thread::spawn(move || {
+                      serve_connection(
+                          server,
+                          &server_resolver,
+                          VarlinkInterface::Monitor,
+                      )
+                  });
+
+                  client
+                      .write_all(
+                          br#"{"method":"io.systemd.Resolve.Monitor.SubscribeDNSConfiguration","parameters":{},"more":true}"#,
+                      )
+                      .expect("subscription request");
+                  client.write_all(&[0]).expect("request delimiter");
+                  let first = read_frame(&mut client);
+                  assert_eq!(first.get("continues").and_then(Value::as_bool), Some(true));
+                  let first_identity = monitor_configuration_identity(&first);
+
+                  resolver
+                      .set_link_domains(
+                          7,
+                          vec![Domain {
+                              name: "changed.example".to_owned(),
+                              route_only: true,
+                          }],
+                      )
+                      .expect("link domains");
+                  let second = read_frame(&mut client);
+                  assert_eq!(second.get("continues").and_then(Value::as_bool), Some(true));
+                  assert_ne!(monitor_configuration_identity(&second), first_identity);
+
+                  drop(client);
+                  handle
+                      .join()
+                      .expect("subscription thread")
+                      .expect("subscription server");
+              }
+          }
+          EOF
+
+          cat > tests/pinned_dns_configuration_subscription.rs <<'EOF'
+          // SPDX-License-Identifier: LGPL-2.1-or-later
+          const MONITOR: &str = include_str!("../src/varlink_monitor.rs");
+          const SERVER: &str = include_str!("../src/varlink.rs");
+
+          #[test]
+          fn dns_configuration_subscription_remains_streaming() {
+              for symbol in [
+                  "method SubscribeDNSConfiguration",
+                  "io.systemd.Resolve.Monitor.SubscribeDNSConfiguration",
+                  "org.varlink.service.ExpectedMore",
+                  "continues",
+                  "serve_dns_configuration_subscription",
+                  "monitor_dns_configuration_subscription_requested",
+              ] {
+                  assert!(
+                      MONITOR.contains(symbol) || SERVER.contains(symbol),
+                      "missing subscription symbol {symbol}"
+                  );
+              }
+          }
+          EOF
+
+          rm -f .github/workflows/integrate-dns-configuration-subscription.yml
+          cargo fmt --all
+          git diff --check
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts and surface reduction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json
+          python3 - <<'PY'
+          import json
+
+          with open("/tmp/upstream-surface-audit.json", encoding="utf-8") as stream:
+              report = json.load(stream)
+          if "SubscribeDNSConfiguration" in report["missing"]["varlink_methods"]:
+              raise SystemExit("SubscribeDNSConfiguration remains missing")
+          PY
+
+      - name: Commit verified subscription tranche
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Stream Resolve DNS configuration updates'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'DNS configuration subscription passed' || 'DNS configuration subscription failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/dns-configuration-subscription","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
