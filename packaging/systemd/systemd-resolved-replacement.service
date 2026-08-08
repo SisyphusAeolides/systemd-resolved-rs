@@ -11,7 +11,7 @@ Wants=nss-lookup.target
 [Service]
 Type=notify
 NotifyAccess=main
-Sockets=systemd-resolved-varlink.socket
+Sockets=systemd-resolved-varlink.socket systemd-resolved-monitor.socket
 WatchdogSec=3min
 ExecStart=@SYSTEMD_RESOLVED_RS@
 User=systemd-resolve
@@ -44,4 +44,4 @@ SystemCallFilter=@system-service
 
 [Install]
 WantedBy=sysinit.target
-Also=systemd-resolved-varlink.socket
+Also=systemd-resolved-varlink.socket systemd-resolved-monitor.socket

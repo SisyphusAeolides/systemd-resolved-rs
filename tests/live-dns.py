@@ -335,6 +335,24 @@ def run(binary: Path, resolvectl: Path) -> None:
                             f"Varlink lookup did not return {TEST_ADDRESS}: {result.stdout!r}"
                         )
 
+                    monitor_commands = {
+                        "statistics": "Transactions",
+                        "show-cache": "Global, protocol dns",
+                        "show-server-state": "Server ",
+                    }
+                    for verb, expected in monitor_commands.items():
+                        monitor_result = subprocess.run(
+                            [str(resolvectl), "--socket", str(varlink), verb],
+                            text=True,
+                            capture_output=True,
+                            timeout=15,
+                            check=True,
+                        )
+                        if expected not in monitor_result.stdout:
+                            raise AssertionError(
+                                f"{verb} did not expose monitor data: {monitor_result.stdout!r}"
+                            )
+
                     for name in ("stub-resolv.conf", "resolv.conf"):
                         path = run_dir / name
                         if not path.is_file() or not path.read_text(encoding="utf-8"):

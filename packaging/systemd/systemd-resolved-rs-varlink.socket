@@ -5,6 +5,8 @@ Conflicts=systemd-resolved.service
 
 [Socket]
 ListenStream=/run/systemd/resolve/io.systemd.Resolve
+Symlinks=/run/varlink/registry/io.systemd.Resolve
+FileDescriptorName=varlink
 SocketMode=0666
 DirectoryMode=0755
 Service=systemd-resolved-rs.service

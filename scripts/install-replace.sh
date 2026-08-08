@@ -12,10 +12,12 @@ BINARY_SOURCE="$ROOT/target/release/systemd-resolved"
 RESOLVECTL_SOURCE="$ROOT/target/release/resolvectl"
 UNIT_SOURCE="$ROOT/packaging/systemd/systemd-resolved-replacement.service"
 SOCKET_SOURCE="$ROOT/packaging/systemd/systemd-resolved-varlink.socket"
+MONITOR_SOCKET_SOURCE="$ROOT/packaging/systemd/systemd-resolved-monitor.socket"
 BINARY_DESTINATION="$PREFIX/lib/systemd/systemd-resolved-rs"
 RESOLVECTL_DESTINATION="$PREFIX/bin/resolvectl-rs"
 UNIT_DESTINATION="/etc/systemd/system/systemd-resolved.service"
 SOCKET_DESTINATION="/etc/systemd/system/systemd-resolved-varlink.socket"
+MONITOR_SOCKET_DESTINATION="/etc/systemd/system/systemd-resolved-monitor.socket"
 RESOLV_CONF="/etc/resolv.conf"
 CURRENT_STATE="$STATE_ROOT/current"
 BACKUP=""
@@ -103,16 +105,18 @@ rollback() {
     log "rolling back: $reason"
     set +e
 
-    systemctl stop systemd-resolved.service systemd-resolved-varlink.socket >/dev/null 2>&1
+    systemctl stop systemd-resolved.service systemd-resolved-varlink.socket systemd-resolved-monitor.socket >/dev/null 2>&1
 
     restore_path "$UNIT_DESTINATION" unit
     restore_path "$SOCKET_DESTINATION" socket
+    restore_path "$MONITOR_SOCKET_DESTINATION" monitor-socket
     restore_path "$BINARY_DESTINATION" binary
     restore_path "$RESOLVECTL_DESTINATION" resolvectl
     restore_path "$RESOLV_CONF" resolv-conf
 
     systemctl daemon-reload >/dev/null 2>&1
     restore_activity systemd-resolved-varlink.socket socket-active
+    restore_activity systemd-resolved-monitor.socket monitor-socket-active
     restore_activity systemd-resolved.service service-active
     restore_enablement systemd-resolved-rs.service legacy-enabled
     restore_activity systemd-resolved-rs.service legacy-active
@@ -228,6 +232,7 @@ wait_for_service() {
     for attempt in {1..100}; do
         if systemctl is-active --quiet systemd-resolved.service \
             && [[ -S /run/systemd/resolve/io.systemd.Resolve ]] \
+            && [[ -S /run/systemd/resolve/io.systemd.Resolve.Monitor ]] \
             && [[ -s /run/systemd/resolve/stub-resolv.conf ]]; then
             return 0
         fi
@@ -247,6 +252,7 @@ done
 [[ -x "$RESOLVECTL_SOURCE" ]] || fail "missing release binary: $RESOLVECTL_SOURCE"
 [[ -r "$UNIT_SOURCE" ]] || fail "missing replacement unit: $UNIT_SOURCE"
 [[ -r "$SOCKET_SOURCE" ]] || fail "missing Varlink socket unit: $SOCKET_SOURCE"
+[[ -r "$MONITOR_SOCKET_SOURCE" ]] || fail "missing monitor Varlink socket unit: $MONITOR_SOCKET_SOURCE"
 [[ -r "$ROOT/tests/live-dns.py" ]] || fail "missing live resolver test"
 getent passwd systemd-resolve >/dev/null || fail "systemd-resolve user does not exist"
 
@@ -265,9 +271,11 @@ printf '%s\n' "$BINARY_DESTINATION" >"$BACKUP/binary-destination"
 printf '%s\n' "$RESOLVECTL_DESTINATION" >"$BACKUP/resolvectl-destination"
 printf '%s\n' "$UNIT_DESTINATION" >"$BACKUP/unit-destination"
 printf '%s\n' "$SOCKET_DESTINATION" >"$BACKUP/socket-destination"
+printf '%s\n' "$MONITOR_SOCKET_DESTINATION" >"$BACKUP/monitor-socket-destination"
 
 capture_path "$UNIT_DESTINATION" unit
 capture_path "$SOCKET_DESTINATION" socket
+capture_path "$MONITOR_SOCKET_DESTINATION" monitor-socket
 capture_path "$BINARY_DESTINATION" binary
 capture_path "$RESOLVECTL_DESTINATION" resolvectl
 capture_path "$RESOLV_CONF" resolv-conf
@@ -275,6 +283,8 @@ unit_state is-enabled systemd-resolved.service >"$BACKUP/service-enabled"
 unit_state is-active systemd-resolved.service >"$BACKUP/service-active"
 unit_state is-enabled systemd-resolved-varlink.socket >"$BACKUP/socket-enabled"
 unit_state is-active systemd-resolved-varlink.socket >"$BACKUP/socket-active"
+unit_state is-enabled systemd-resolved-monitor.socket >"$BACKUP/monitor-socket-enabled"
+unit_state is-active systemd-resolved-monitor.socket >"$BACKUP/monitor-socket-active"
 unit_state is-enabled systemd-resolved-rs.service >"$BACKUP/legacy-enabled"
 unit_state is-active systemd-resolved-rs.service >"$BACKUP/legacy-active"
 unit_state is-enabled systemd-resolved-rs.socket >"$BACKUP/legacy-socket-enabled"
@@ -285,11 +295,13 @@ install_atomic "$BINARY_SOURCE" "$BINARY_DESTINATION" 0755
 install_atomic "$RESOLVECTL_SOURCE" "$RESOLVECTL_DESTINATION" 0755
 install_unit
 install_atomic "$SOCKET_SOURCE" "$SOCKET_DESTINATION" 0644
+install_atomic "$MONITOR_SOCKET_SOURCE" "$MONITOR_SOCKET_DESTINATION" 0644
 
 systemctl disable --now systemd-resolved-rs.service systemd-resolved-rs.socket >/dev/null 2>&1 || true
 systemctl daemon-reload
-systemctl stop systemd-resolved.service systemd-resolved-varlink.socket >/dev/null 2>&1 || true
+systemctl stop systemd-resolved.service systemd-resolved-varlink.socket systemd-resolved-monitor.socket >/dev/null 2>&1 || true
 systemctl start systemd-resolved-varlink.socket
+systemctl start systemd-resolved-monitor.socket
 systemctl start systemd-resolved.service
 wait_for_service
 
@@ -302,6 +314,9 @@ busctl get-property \
 "$RESOLVECTL_DESTINATION" \
     --socket /run/systemd/resolve/io.systemd.Resolve \
     query "$PROBE_NAME" >/dev/null
+"$RESOLVECTL_DESTINATION" --socket /run/systemd/resolve/io.systemd.Resolve statistics >/dev/null
+"$RESOLVECTL_DESTINATION" --socket /run/systemd/resolve/io.systemd.Resolve show-cache >/dev/null
+"$RESOLVECTL_DESTINATION" --socket /run/systemd/resolve/io.systemd.Resolve show-server-state >/dev/null
 probe_stub
 
 log "switching /etc/resolv.conf only after direct resolver checks passed"

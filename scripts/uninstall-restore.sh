@@ -101,12 +101,14 @@ BINARY_DESTINATION="$(cat "$BACKUP/binary-destination")"
 RESOLVECTL_DESTINATION="$(cat "$BACKUP/resolvectl-destination")"
 UNIT_DESTINATION="$(cat "$BACKUP/unit-destination")"
 SOCKET_DESTINATION="$(cat "$BACKUP/socket-destination")"
+MONITOR_SOCKET_DESTINATION="$(cat "$BACKUP/monitor-socket-destination")"
 
 log "stopping replacement resolver"
-systemctl stop systemd-resolved.service systemd-resolved-varlink.socket >/dev/null 2>&1 || true
+systemctl stop systemd-resolved.service systemd-resolved-varlink.socket systemd-resolved-monitor.socket >/dev/null 2>&1 || true
 
 restore_path "$UNIT_DESTINATION" unit
 restore_path "$SOCKET_DESTINATION" socket
+restore_path "$MONITOR_SOCKET_DESTINATION" monitor-socket
 restore_path "$BINARY_DESTINATION" binary
 restore_path "$RESOLVECTL_DESTINATION" resolvectl
 restore_path /etc/resolv.conf resolv-conf
@@ -114,7 +116,9 @@ restore_path /etc/resolv.conf resolv-conf
 systemctl daemon-reload
 restore_enablement systemd-resolved.service service-enabled
 restore_enablement systemd-resolved-varlink.socket socket-enabled
+restore_enablement systemd-resolved-monitor.socket monitor-socket-enabled
 restore_activity systemd-resolved-varlink.socket socket-active
+restore_activity systemd-resolved-monitor.socket monitor-socket-active
 restore_activity systemd-resolved.service service-active
 restore_enablement systemd-resolved-rs.service legacy-enabled
 restore_activity systemd-resolved-rs.service legacy-active
@@ -122,7 +126,9 @@ restore_enablement systemd-resolved-rs.socket legacy-socket-enabled
 restore_activity systemd-resolved-rs.socket legacy-socket-active
 
 verify_path /etc/resolv.conf resolv-conf
+verify_path "$MONITOR_SOCKET_DESTINATION" monitor-socket
 verify_activity systemd-resolved-varlink.socket socket-active
+verify_activity systemd-resolved-monitor.socket monitor-socket-active
 verify_activity systemd-resolved.service service-active
 verify_activity systemd-resolved-rs.socket legacy-socket-active
 verify_activity systemd-resolved-rs.service legacy-active

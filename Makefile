@@ -60,8 +60,10 @@ check-packaging:
 	sed 's|@SYSTEMD_RESOLVED_RS@|/bin/true|g' \
 		packaging/systemd/systemd-resolved-replacement.service >"$$work/systemd-resolved.service"; \
 	cp packaging/systemd/systemd-resolved-varlink.socket "$$work/systemd-resolved-varlink.socket"; \
+	cp packaging/systemd/systemd-resolved-monitor.socket "$$work/systemd-resolved-monitor.socket"; \
 	SYSTEMD_UNIT_PATH="$$work" systemd-analyze verify \
 		"$$work/systemd-resolved.service" \
+		"$$work/systemd-resolved-monitor.socket" \
 		"$$work/systemd-resolved-varlink.socket"
 
 check-live: build
@@ -77,6 +79,7 @@ install: build
 	install -Dm0755 target/release/resolvectl $(DESTDIR)$(PREFIX)/bin/resolvectl
 	install -Dm0644 packaging/systemd/systemd-resolved.service $(DESTDIR)$(UNITDIR)/systemd-resolved.service
 	install -Dm0644 packaging/systemd/systemd-resolved-varlink.socket $(DESTDIR)$(UNITDIR)/systemd-resolved-varlink.socket
+	install -Dm0644 packaging/systemd/systemd-resolved-monitor.socket $(DESTDIR)$(UNITDIR)/systemd-resolved-monitor.socket
 	install -Dm0644 packaging/tmpfiles/systemd-resolved.conf $(DESTDIR)$(TMPFILESDIR)/systemd-resolved.conf
 
 clean:

@@ -164,6 +164,7 @@ impl Drop for TlsStream {
 #[derive(Clone, Debug)]
 pub(crate) struct TlsCapability {
     possible: bool,
+    verified: bool,
     retry_after: Option<Instant>,
     grace_period: Duration,
 }
@@ -172,6 +173,7 @@ impl Default for TlsCapability {
     fn default() -> Self {
         Self {
             possible: true,
+            verified: false,
             retry_after: None,
             grace_period: TLS_FEATURE_GRACE_PERIOD_MIN,
         }
@@ -200,7 +202,16 @@ impl TlsCapability {
 
     pub fn record_success(&mut self) {
         self.possible = true;
+        self.verified = true;
         self.retry_after = None;
+    }
+
+    pub const fn current_possible(&self) -> bool {
+        self.possible
+    }
+
+    pub const fn verified(&self) -> bool {
+        self.verified
     }
 
     pub fn record_failure(&mut self, strict: bool, now: Instant) {

@@ -12,11 +12,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const DEFAULT_SOCKET: &str = "/run/systemd/resolve/io.systemd.Resolve";
+const DEFAULT_MONITOR_SOCKET: &str = "/run/systemd/resolve/io.systemd.Resolve.Monitor";
 const MAX_REPLY_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug)]
 struct Options {
     socket: PathBuf,
+    socket_explicit: bool,
     family: i32,
     command: String,
     arguments: Vec<String>,
@@ -36,14 +38,20 @@ fn execute() -> Result<(), Box<dyn Error>> {
     let Some(options) = parse_options()? else {
         return Ok(());
     };
+    let monitor_socket = options.monitor_socket();
     match options.command.as_str() {
         "query" => query_many(&options.socket, &options.arguments, options.family),
         "openpgp" => resolvectl_rr::openpgp(&options.socket, &options.arguments),
         "tlsa" => resolvectl_rr::tlsa(&options.socket, &options.arguments),
         "status" => status(&options.socket),
-        "statistics" => statistics(&options.socket),
+        "statistics" => statistics(&monitor_socket),
+        "show-cache" => show_cache(&monitor_socket),
+        "show-server-state" => show_server_state(&monitor_socket),
         "flush-caches" => control(&options.socket, "io.systemd.Resolve.FlushCaches"),
-        "reset-statistics" => control(&options.socket, "io.systemd.Resolve.ResetStatistics"),
+        "reset-statistics" => control(
+            &monitor_socket,
+            "io.systemd.Resolve.Monitor.ResetStatistics",
+        ),
         "reset-server-features" => {
             control(&options.socket, "io.systemd.Resolve.ResetServerFeatures")
         }
@@ -54,8 +62,28 @@ fn execute() -> Result<(), Box<dyn Error>> {
     }
 }
 
+impl Options {
+    fn monitor_socket(&self) -> PathBuf {
+        if self.socket_explicit {
+            monitor_socket_for(&self.socket)
+        } else {
+            PathBuf::from(DEFAULT_MONITOR_SOCKET)
+        }
+    }
+}
+
+fn monitor_socket_for(path: &Path) -> PathBuf {
+    if path.file_name().and_then(|name| name.to_str()) == Some("io.systemd.Resolve") {
+        return path.with_file_name("io.systemd.Resolve.Monitor");
+    }
+    let mut monitor = path.as_os_str().to_owned();
+    monitor.push(".Monitor");
+    PathBuf::from(monitor)
+}
+
 fn parse_options() -> Result<Option<Options>, Box<dyn Error>> {
     let mut socket = PathBuf::from(DEFAULT_SOCKET);
+    let mut socket_explicit = false;
     let mut family = 0;
     let mut command = None;
     let mut command_arguments = Vec::new();
@@ -74,6 +102,7 @@ fn parse_options() -> Result<Option<Options>, Box<dyn Error>> {
         match name {
             "--socket" => {
                 socket = option_value(inline_value, &mut arguments, name)?.into();
+                socket_explicit = true;
             }
             "-4" => family = 2,
             "-6" => family = 10,
@@ -98,6 +127,7 @@ fn parse_options() -> Result<Option<Options>, Box<dyn Error>> {
     }
     Ok(Some(Options {
         socket,
+        socket_explicit,
         family,
         command,
         arguments: command_arguments,
@@ -254,23 +284,232 @@ fn status(socket: &Path) -> Result<(), Box<dyn Error>> {
 fn statistics(socket: &Path) -> Result<(), Box<dyn Error>> {
     let reply = call(
         socket,
-        "io.systemd.Resolve.GetStatistics",
+        "io.systemd.Resolve.Monitor.DumpStatistics",
         Value::Object(BTreeMap::new()),
     )?;
     let parameters = reply_parameters(&reply)?;
-    for key in [
+    print_statistic_section(
+        parameters,
         "transactions",
-        "cacheHits",
-        "cacheMisses",
-        "failures",
-        "localAnswers",
-        "cacheEntries",
-    ] {
-        if let Some(value) = parameters.get(key).and_then(Value::as_u64) {
-            println!("{key}: {value}");
+        "Transactions",
+        &[
+            ("Current Transactions", "currentTransactions"),
+            ("Total Transactions", "totalTransactions"),
+            ("Total Timeouts", "totalTimeouts"),
+            ("Timeouts Served Stale", "totalTimeoutsServedStale"),
+            ("Failed Responses", "totalFailedResponses"),
+            (
+                "Failed Responses Served Stale",
+                "totalFailedResponsesServedStale",
+            ),
+        ],
+    );
+    print_statistic_section(
+        parameters,
+        "cache",
+        "Cache",
+        &[
+            ("Current Cache Size", "size"),
+            ("Cache Hits", "hits"),
+            ("Cache Misses", "misses"),
+        ],
+    );
+    print_statistic_section(
+        parameters,
+        "dnssec",
+        "DNSSEC Verdicts",
+        &[
+            ("Secure", "secure"),
+            ("Insecure", "insecure"),
+            ("Bogus", "bogus"),
+            ("Indeterminate", "indeterminate"),
+        ],
+    );
+    Ok(())
+}
+
+fn print_statistic_section(parameters: &Value, field: &str, title: &str, entries: &[(&str, &str)]) {
+    let Some(section) = parameters.get(field) else {
+        return;
+    };
+    println!("{title}");
+    for (label, key) in entries {
+        if let Some(value) = section.get(key).and_then(Value::as_u64) {
+            println!("  {label}: {value}");
         }
     }
+}
+
+fn show_cache(socket: &Path) -> Result<(), Box<dyn Error>> {
+    let reply = call(
+        socket,
+        "io.systemd.Resolve.Monitor.DumpCache",
+        Value::Object(BTreeMap::new()),
+    )?;
+    let scopes = reply_parameters(&reply)?
+        .get("dump")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_data("cache dump is missing its scope array"))?;
+
+    for (index, scope) in scopes.iter().enumerate() {
+        if index != 0 {
+            println!();
+        }
+        print_cache_scope(scope)?;
+    }
     Ok(())
+}
+
+fn print_cache_scope(scope: &Value) -> Result<(), Box<dyn Error>> {
+    let protocol = scope
+        .get("protocol")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let ifname = scope.get("ifname").and_then(Value::as_str);
+    let ifindex = scope.get("ifindex").and_then(Value::as_i64);
+    match (ifname, ifindex) {
+        (Some(name), Some(index)) => println!("Link {index} ({name}), protocol {protocol}"),
+        (Some(name), None) => println!("Link {name}, protocol {protocol}"),
+        (None, Some(index)) => println!("Link {index}, protocol {protocol}"),
+        (None, None) => println!("Global, protocol {protocol}"),
+    }
+
+    let cache = scope
+        .get("cache")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_data("cache scope is missing its entries"))?;
+    if cache.is_empty() {
+        println!("  Cache is empty");
+        return Ok(());
+    }
+
+    for entry in cache {
+        let key = entry
+            .get("key")
+            .ok_or_else(|| invalid_data("cache entry is missing its resource key"))?;
+        let name = key.get("name").and_then(Value::as_str).unwrap_or("?");
+        let class = key.get("class").and_then(Value::as_u64).unwrap_or(1);
+        let rr_type = key.get("type").and_then(Value::as_u64).unwrap_or(0);
+        print!(
+            "  {name} {} {}",
+            class_name(class),
+            record_type_name(rr_type)
+        );
+        if let Some(kind) = entry.get("type").and_then(Value::as_str) {
+            print!(" -- {kind}");
+        } else if let Some(records) = entry.get("rrs").and_then(Value::as_array) {
+            print!(
+                " -- {} record{}",
+                records.len(),
+                if records.len() == 1 { "" } else { "s" }
+            );
+        }
+        if let Some(until) = entry.get("until").and_then(Value::as_u64) {
+            print!(" (valid until monotonic {until} µs)");
+        }
+        println!();
+    }
+    Ok(())
+}
+
+fn class_name(class: u64) -> String {
+    match class {
+        1 => "IN".to_owned(),
+        255 => "ANY".to_owned(),
+        other => format!("CLASS{other}"),
+    }
+}
+
+fn record_type_name(rr_type: u64) -> String {
+    match rr_type {
+        1 => "A".to_owned(),
+        2 => "NS".to_owned(),
+        5 => "CNAME".to_owned(),
+        6 => "SOA".to_owned(),
+        12 => "PTR".to_owned(),
+        15 => "MX".to_owned(),
+        16 => "TXT".to_owned(),
+        28 => "AAAA".to_owned(),
+        33 => "SRV".to_owned(),
+        43 => "DS".to_owned(),
+        46 => "RRSIG".to_owned(),
+        47 => "NSEC".to_owned(),
+        48 => "DNSKEY".to_owned(),
+        50 => "NSEC3".to_owned(),
+        64 => "SVCB".to_owned(),
+        65 => "HTTPS".to_owned(),
+        255 => "ANY".to_owned(),
+        other => format!("TYPE{other}"),
+    }
+}
+
+fn show_server_state(socket: &Path) -> Result<(), Box<dyn Error>> {
+    let reply = call(
+        socket,
+        "io.systemd.Resolve.Monitor.DumpServerState",
+        Value::Object(BTreeMap::new()),
+    )?;
+    let servers = reply_parameters(&reply)?
+        .get("dump")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_data("server-state dump is missing its array"))?;
+    if servers.is_empty() {
+        println!("No DNS servers are configured.");
+        return Ok(());
+    }
+
+    for (index, server) in servers.iter().enumerate() {
+        if index != 0 {
+            println!();
+        }
+        print_server_state(server);
+    }
+    Ok(())
+}
+
+fn print_server_state(server: &Value) {
+    let name = server
+        .get("Server")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let kind = server
+        .get("Type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    println!("Server {name} ({kind})");
+    for (label, field) in [
+        ("Interface", "Interface"),
+        ("Interface Index", "InterfaceIndex"),
+        ("Verified Feature Level", "VerifiedFeatureLevel"),
+        ("Possible Feature Level", "PossibleFeatureLevel"),
+        ("DNSSEC Mode", "DNSSECMode"),
+        ("DNSSEC Supported", "DNSSECSupported"),
+        ("Maximum UDP Fragment", "ReceivedUDPFragmentMax"),
+        ("Failed UDP Attempts", "FailedUDPAttempts"),
+        ("Failed TCP Attempts", "FailedTCPAttempts"),
+        ("Packet Truncated", "PacketTruncated"),
+        ("Bad OPT Record", "PacketBadOpt"),
+        ("RRSIG Missing", "PacketRRSIGMissing"),
+        ("Invalid Packet", "PacketInvalid"),
+        ("DO Flag Dropped", "PacketDoOff"),
+    ] {
+        if let Some(value) = server.get(field).and_then(format_scalar) {
+            println!("  {label}: {value}");
+        }
+    }
+}
+
+fn format_scalar(value: &Value) -> Option<String> {
+    if let Some(value) = value.as_str() {
+        return Some(value.to_owned());
+    }
+    if let Some(value) = value.as_bool() {
+        return Some(if value { "yes" } else { "no" }.to_owned());
+    }
+    if let Some(value) = value.as_i64() {
+        return Some(value.to_string());
+    }
+    value.as_u64().map(|value| value.to_string())
 }
 
 fn control(socket: &Path, method: &str) -> Result<(), Box<dyn Error>> {
@@ -338,6 +577,8 @@ fn print_help() {
            tlsa [tcp|udp|sctp] DOMAIN[:PORT]...\n\
            status\n\
            statistics\n\
+           show-cache\n\
+           show-server-state\n\
            flush-caches\n\
            reset-statistics\n\
            reset-server-features\n\
@@ -352,4 +593,31 @@ fn print_help() {
            revert LINK",
         resolved::VERSION
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitor_socket_tracks_default_and_custom_resolve_paths() {
+        assert_eq!(
+            monitor_socket_for(Path::new(DEFAULT_SOCKET)),
+            PathBuf::from(DEFAULT_MONITOR_SOCKET)
+        );
+        assert_eq!(
+            monitor_socket_for(Path::new("/tmp/resolved-test.sock")),
+            PathBuf::from("/tmp/resolved-test.sock.Monitor")
+        );
+    }
+
+    #[test]
+    fn scalar_output_formats_strings_numbers_and_booleans() {
+        assert_eq!(
+            format_scalar(&Value::String("UDP".to_owned())).as_deref(),
+            Some("UDP")
+        );
+        assert_eq!(format_scalar(&Value::Number(7)).as_deref(), Some("7"));
+        assert_eq!(format_scalar(&Value::Bool(true)).as_deref(), Some("yes"));
+    }
 }

@@ -89,6 +89,17 @@ pub enum ResolveError {
 }
 
 impl ResolveError {
+    pub fn is_timeout(&self) -> bool {
+        matches!(
+            self,
+            Self::Io(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                )
+        )
+    }
+
     pub fn varlink_id(&self) -> &'static str {
         match self {
             Self::NoNameServers => "io.systemd.Resolve.NoNameServers",

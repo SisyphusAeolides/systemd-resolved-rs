@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+[Unit]
+Description=Resolve Monitor Varlink Socket
+Documentation=https://github.com/SisyphusAeolides/systemd-resolved-rs
+DefaultDependencies=no
+Before=sockets.target shutdown.target
+Conflicts=shutdown.target
+
+[Socket]
+Service=systemd-resolved.service
+ListenStream=/run/systemd/resolve/io.systemd.Resolve.Monitor
+Symlinks=/run/varlink/registry/io.systemd.Resolve.Monitor
+FileDescriptorName=varlink-monitor
+SocketMode=0666
+
+[Install]
+WantedBy=sockets.target

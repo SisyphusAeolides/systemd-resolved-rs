@@ -23,6 +23,52 @@ use std::time::Duration;
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 const SD_RESOLVED_NO_TXT: u64 = 1 << 6;
 const SD_RESOLVED_NO_ADDRESS: u64 = 1 << 7;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VarlinkEndpoint {
+    Resolve,
+    Monitor,
+    Any,
+}
+
+impl VarlinkEndpoint {
+    fn allows(self, method: &str) -> bool {
+        match self {
+            Self::Resolve => {
+                method.starts_with("org.varlink.service.")
+                    || (method.starts_with("io.systemd.Resolve.")
+                        && !method.starts_with("io.systemd.Resolve.Monitor."))
+            }
+            Self::Monitor => {
+                method.starts_with("org.varlink.service.")
+                    || method.starts_with("io.systemd.Resolve.Monitor.")
+            }
+            Self::Any => true,
+        }
+    }
+
+    fn interfaces(self) -> Vec<Value> {
+        let mut interfaces = Vec::new();
+        if matches!(self, Self::Resolve | Self::Any) {
+            interfaces.push(Value::String("io.systemd.Resolve".to_owned()));
+        }
+        if matches!(self, Self::Monitor | Self::Any) {
+            interfaces.push(Value::String("io.systemd.Resolve.Monitor".to_owned()));
+        }
+        interfaces.push(Value::String("org.varlink.service".to_owned()));
+        interfaces
+    }
+
+    fn description(self, interface: &str) -> Option<&'static str> {
+        match (self, interface) {
+            (Self::Resolve | Self::Any, "io.systemd.Resolve") => Some(INTERFACE_DESCRIPTION),
+            (Self::Monitor | Self::Any, "io.systemd.Resolve.Monitor") => {
+                Some(MONITOR_INTERFACE_DESCRIPTION)
+            }
+            _ => None,
+        }
+    }
+}
 const INTERFACE_DESCRIPTION: &str = "interface io.systemd.Resolve\n\
 method ResolveHostname(ifindex: ?int, name: string, family: ?int, flags: ?int) -> (addresses: [](ifindex: ?int, family: int, address: []int), name: string, flags: int)\n\
 method ResolveAddress(ifindex: ?int, family: int, address: []int, flags: ?int) -> (names: [](ifindex: ?int, name: string), flags: int)\n\
@@ -43,17 +89,23 @@ error InconsistentServiceRecords";
 #[derive(Debug)]
 pub struct VarlinkServer {
     path: PathBuf,
+    monitor_path: PathBuf,
     resolver: Arc<Resolver>,
     activated_listener: Option<UnixListener>,
+    activated_monitor_listener: Option<UnixListener>,
 }
 
 impl VarlinkServer {
     pub fn new(path: impl Into<PathBuf>, resolver: Arc<Resolver>) -> io::Result<Self> {
-        let activated_listener = take_activated_listener()?;
+        let (activated_listener, activated_monitor_listener) = take_activated_listeners()?;
+        let path = path.into();
+        let monitor_path = monitor_path_for(&path);
         Ok(Self {
-            path: path.into(),
+            path,
+            monitor_path,
             resolver,
             activated_listener,
+            activated_monitor_listener,
         })
     }
 
@@ -61,69 +113,175 @@ impl VarlinkServer {
         let (listener, remove_path) = if let Some(listener) = &self.activated_listener {
             (listener.try_clone()?, false)
         } else {
-            prepare_socket_path(&self.path)?;
-            let listener = UnixListener::bind(&self.path)?;
-            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o666))?;
-            (listener, true)
+            (bind_varlink_listener(&self.path)?, true)
         };
         listener.set_nonblocking(true)?;
+
+        let (monitor_listener, remove_monitor_path) =
+            if let Some(listener) = &self.activated_monitor_listener {
+                (Some(listener.try_clone()?), false)
+            } else if self.monitor_path == self.path {
+                (None, false)
+            } else {
+                (Some(bind_varlink_listener(&self.monitor_path)?), true)
+            };
+        if let Some(listener) = &monitor_listener {
+            listener.set_nonblocking(true)?;
+        }
+
         while !stop_requested() {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let resolver = Arc::clone(&self.resolver);
-                    let _ = thread::Builder::new()
-                        .name("resolved-varlink-client".to_owned())
-                        .spawn(move || {
-                            if let Err(error) = serve_connection(stream, &resolver) {
-                                eprintln!("systemd-resolved: Varlink connection failed: {error}");
-                            }
-                        });
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(50));
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(error),
+            let mut accepted = accept_varlink_connection(
+                &listener,
+                &self.resolver,
+                "resolved-varlink-client",
+                "Resolve",
+                VarlinkEndpoint::Resolve,
+            )?;
+            if let Some(listener) = &monitor_listener {
+                accepted |= accept_varlink_connection(
+                    listener,
+                    &self.resolver,
+                    "resolved-varlink-monitor-client",
+                    "Resolve.Monitor",
+                    VarlinkEndpoint::Monitor,
+                )?;
+            }
+            if !accepted {
+                thread::sleep(Duration::from_millis(50));
             }
         }
         if remove_path {
             let _ = fs::remove_file(&self.path);
         }
+        if remove_monitor_path {
+            let _ = fs::remove_file(&self.monitor_path);
+        }
         Ok(())
     }
 }
 
-fn take_activated_listener() -> io::Result<Option<UnixListener>> {
+fn monitor_path_for(path: &Path) -> PathBuf {
+    if path.file_name().and_then(|name| name.to_str()) == Some("io.systemd.Resolve") {
+        return path.with_file_name("io.systemd.Resolve.Monitor");
+    }
+    let mut monitor = path.as_os_str().to_owned();
+    monitor.push(".Monitor");
+    PathBuf::from(monitor)
+}
+
+fn bind_varlink_listener(path: &Path) -> io::Result<UnixListener> {
+    prepare_socket_path(path)?;
+    let listener = UnixListener::bind(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o666))?;
+    Ok(listener)
+}
+
+fn accept_varlink_connection(
+    listener: &UnixListener,
+    resolver: &Arc<Resolver>,
+    thread_name: &str,
+    interface_name: &'static str,
+    endpoint: VarlinkEndpoint,
+) -> io::Result<bool> {
+    match listener.accept() {
+        Ok((stream, _)) => {
+            let resolver = Arc::clone(resolver);
+            thread::Builder::new()
+                .name(thread_name.to_owned())
+                .spawn(move || {
+                    if let Err(error) = serve_connection(stream, &resolver, endpoint) {
+                        eprintln!(
+                            "systemd-resolved: {interface_name} Varlink connection failed: {error}"
+                        );
+                    }
+                })?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn take_activated_listeners() -> io::Result<(Option<UnixListener>, Option<UnixListener>)> {
     let names = env::var("LISTEN_FDNAMES").ok();
     let count = native::listen_fds()?;
-    let Some(fd) = activated_varlink_fd(count, names.as_deref())? else {
+    let (main_fd, monitor_fd) = activated_varlink_fds(count, names.as_deref())?;
+    Ok((
+        activated_listener_from_fd(main_fd)?,
+        activated_listener_from_fd(monitor_fd)?,
+    ))
+}
+
+fn activated_listener_from_fd(fd: Option<RawFd>) -> io::Result<Option<UnixListener>> {
+    let Some(fd) = fd else {
         return Ok(None);
     };
-
-    // SAFETY: systemd activation descriptors start at 3; activated_varlink_fd validates
-    // that exactly one descriptor was supplied for this process before ownership moves here.
+    // SAFETY: activated_varlink_fds only returns descriptors supplied by systemd and each
+    // descriptor is converted to an owning UnixListener exactly once.
     let listener = unsafe { UnixListener::from_raw_fd(fd) };
     let _ = listener.local_addr()?;
     Ok(Some(listener))
 }
 
-fn activated_varlink_fd(count: usize, names: Option<&str>) -> io::Result<Option<RawFd>> {
+fn activated_varlink_fds(
+    count: usize,
+    names: Option<&str>,
+) -> io::Result<(Option<RawFd>, Option<RawFd>)> {
     if count == 0 {
-        return Ok(None);
+        return Ok((None, None));
     }
-    if count != 1 {
+    if count > 2 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "expected exactly one activated Varlink descriptor",
+            "expected at most two activated Varlink descriptors",
         ));
     }
-    if matches!(names, Some(name) if !name.is_empty() && name != "varlink") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "activated descriptor is not named varlink",
-        ));
+
+    let parsed_names = names
+        .filter(|names| !names.is_empty())
+        .map(|names| names.split(':').collect::<Vec<_>>());
+    if let Some(names) = &parsed_names {
+        if names.len() != count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "activated Varlink descriptor names do not match descriptor count",
+            ));
+        }
     }
-    Ok(Some(3))
+
+    let mut main_fd = None;
+    let mut monitor_fd = None;
+    for index in 0..count {
+        let fd = 3 + i32::try_from(index).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid activation descriptor index",
+            )
+        })?;
+        let name = parsed_names
+            .as_ref()
+            .and_then(|names| names.get(index).copied());
+        match name {
+            None if index == 0 => main_fd = Some(fd),
+            None => monitor_fd = Some(fd),
+            Some("varlink") if main_fd.is_none() => main_fd = Some(fd),
+            Some("varlink-monitor") if monitor_fd.is_none() => monitor_fd = Some(fd),
+            Some(name) if matches!(name, "varlink" | "varlink-monitor") => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate activated Varlink descriptor name",
+                ));
+            }
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unexpected activated Varlink descriptor name",
+                ));
+            }
+        }
+    }
+    Ok((main_fd, monitor_fd))
 }
 
 fn prepare_socket_path(path: &Path) -> io::Result<()> {
@@ -141,7 +299,11 @@ fn prepare_socket_path(path: &Path) -> io::Result<()> {
     }
 }
 
-fn serve_connection(mut stream: UnixStream, resolver: &Resolver) -> io::Result<()> {
+fn serve_connection(
+    mut stream: UnixStream,
+    resolver: &Resolver,
+    endpoint: VarlinkEndpoint,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     let can_control = matches!(
         native::peer_credentials(stream.as_raw_fd()),
@@ -153,7 +315,7 @@ fn serve_connection(mut stream: UnixStream, resolver: &Resolver) -> io::Result<(
         if let Some(end) = pending.iter().position(|byte| *byte == 0) {
             let message: Vec<_> = pending.drain(..=end).collect();
             let reply = match std::str::from_utf8(&message[..message.len() - 1]) {
-                Ok(text) => dispatch_with_access(text, resolver, can_control),
+                Ok(text) => dispatch_for_endpoint(text, resolver, can_control, endpoint),
                 Err(_) => invalid_parameter("message"),
             };
             stream.write_all(reply.to_json().as_bytes())?;
@@ -180,12 +342,24 @@ pub fn dispatch(input: &str, resolver: &Resolver) -> Value {
 }
 
 fn dispatch_with_access(input: &str, resolver: &Resolver, can_control: bool) -> Value {
+    dispatch_for_endpoint(input, resolver, can_control, VarlinkEndpoint::Any)
+}
+
+fn dispatch_for_endpoint(
+    input: &str,
+    resolver: &Resolver,
+    can_control: bool,
+    endpoint: VarlinkEndpoint,
+) -> Value {
     let Ok(request) = json::parse(input) else {
         return invalid_parameter("message");
     };
     let Some(method) = request.get("method").and_then(Value::as_str) else {
         return invalid_parameter("method");
     };
+    if !endpoint.allows(method) {
+        return error("org.varlink.service.MethodNotFound");
+    }
     let parameters = request
         .get("parameters")
         .cloned()
@@ -200,29 +374,38 @@ fn dispatch_with_access(input: &str, resolver: &Resolver, can_control: bool) -> 
                 "url",
                 Value::String("https://github.com/SisyphusAeolides/systemd-resolved-rs".to_owned()),
             ),
-            (
-                "interfaces",
-                Value::Array(vec![
-                    Value::String("io.systemd.Resolve".to_owned()),
-                    Value::String("org.varlink.service".to_owned()),
-                ]),
-            ),
+            ("interfaces", Value::Array(endpoint.interfaces())),
         ])),
         "org.varlink.service.GetInterfaceDescription" => {
-            if parameters.get("interface").and_then(Value::as_str) == Some("io.systemd.Resolve") {
-                success(Value::object([(
-                    "description",
-                    Value::String(INTERFACE_DESCRIPTION.to_owned()),
-                )]))
-            } else {
-                error("org.varlink.service.InterfaceNotFound")
-            }
+            let description = parameters
+                .get("interface")
+                .and_then(Value::as_str)
+                .and_then(|interface| endpoint.description(interface));
+            description.map_or_else(
+                || error("org.varlink.service.InterfaceNotFound"),
+                |description| {
+                    success(Value::object([(
+                        "description",
+                        Value::String(description.to_owned()),
+                    )]))
+                },
+            )
         }
         "io.systemd.Resolve.ResolveHostname" => resolve_hostname(&parameters, resolver),
         "io.systemd.Resolve.ResolveAddress" => resolve_address(&parameters, resolver),
         "io.systemd.Resolve.ResolveRecord" => resolve_record(&parameters, resolver),
         "io.systemd.Resolve.ResolveService" => resolve_service(&parameters, resolver),
         "io.systemd.Resolve.DumpDNSConfiguration" => dump_dns_configuration(resolver),
+        "io.systemd.Resolve.Monitor.DumpCache" => monitor_dump_cache(can_control, resolver),
+        "io.systemd.Resolve.Monitor.DumpServerState" => {
+            monitor_dump_server_state(can_control, resolver)
+        }
+        "io.systemd.Resolve.Monitor.DumpStatistics" => {
+            monitor_dump_statistics(can_control, resolver)
+        }
+        "io.systemd.Resolve.Monitor.ResetStatistics" => {
+            monitor_reset_statistics(can_control, resolver)
+        }
         "io.systemd.Resolve.FlushCaches" => control(can_control, || resolver.flush_cache()),
         "io.systemd.Resolve.ResetServerFeatures" => {
             control(can_control, || resolver.reset_server_features())
@@ -236,6 +419,7 @@ fn dispatch_with_access(input: &str, resolver: &Resolver, can_control: bool) -> 
 }
 
 include!("varlink_dns_configuration.rs");
+include!("varlink_monitor.rs");
 
 fn resolve_hostname(parameters: &Value, resolver: &Resolver) -> Value {
     let Some(name) = parameters.get("name").and_then(Value::as_str) else {
@@ -987,18 +1171,86 @@ mod tests {
     use crate::config::Config;
 
     #[test]
+    fn monitor_socket_is_a_sibling_of_the_resolve_socket() {
+        assert_eq!(
+            monitor_path_for(Path::new("/run/systemd/resolve/io.systemd.Resolve")),
+            PathBuf::from("/run/systemd/resolve/io.systemd.Resolve.Monitor")
+        );
+        assert_eq!(
+            monitor_path_for(Path::new("/tmp/resolved-test.sock")),
+            PathBuf::from("/tmp/resolved-test.sock.Monitor")
+        );
+    }
+
+    #[test]
+    fn socket_endpoints_expose_only_their_pinned_interface() {
+        let resolver = Resolver::new(Config::default());
+        let request = r#"{"method":"org.varlink.service.GetInfo","parameters":{}}"#;
+        let resolve = dispatch_for_endpoint(request, &resolver, false, VarlinkEndpoint::Resolve);
+        let resolve_interfaces = resolve
+            .get("parameters")
+            .and_then(|parameters| parameters.get("interfaces"))
+            .and_then(Value::as_array)
+            .expect("Resolve interfaces");
+        assert!(resolve_interfaces
+            .iter()
+            .any(|value| value.as_str() == Some("io.systemd.Resolve")));
+        assert!(!resolve_interfaces
+            .iter()
+            .any(|value| value.as_str() == Some("io.systemd.Resolve.Monitor")));
+
+        let monitor = dispatch_for_endpoint(request, &resolver, false, VarlinkEndpoint::Monitor);
+        let monitor_interfaces = monitor
+            .get("parameters")
+            .and_then(|parameters| parameters.get("interfaces"))
+            .and_then(Value::as_array)
+            .expect("Monitor interfaces");
+        assert!(monitor_interfaces
+            .iter()
+            .any(|value| value.as_str() == Some("io.systemd.Resolve.Monitor")));
+        assert!(!monitor_interfaces
+            .iter()
+            .any(|value| value.as_str() == Some("io.systemd.Resolve")));
+
+        let denied = dispatch_for_endpoint(
+            r#"{"method":"io.systemd.Resolve.ResolveHostname","parameters":{"name":"localhost"}}"#,
+            &resolver,
+            false,
+            VarlinkEndpoint::Monitor,
+        );
+        assert_eq!(
+            denied.get("error").and_then(Value::as_str),
+            Some("org.varlink.service.MethodNotFound")
+        );
+    }
+
+    #[test]
     fn activation_descriptor_selection_is_strict() {
-        assert_eq!(activated_varlink_fd(0, None).expect("no activation"), None);
         assert_eq!(
-            activated_varlink_fd(1, None).expect("unnamed activation"),
-            Some(3)
+            activated_varlink_fds(0, None).expect("no activation"),
+            (None, None)
         );
         assert_eq!(
-            activated_varlink_fd(1, Some("varlink")).expect("named activation"),
-            Some(3)
+            activated_varlink_fds(1, None).expect("unnamed activation"),
+            (Some(3), None)
         );
-        assert!(activated_varlink_fd(1, Some("other")).is_err());
-        assert!(activated_varlink_fd(2, Some("varlink:other")).is_err());
+        assert_eq!(
+            activated_varlink_fds(1, Some("varlink-monitor")).expect("monitor activation"),
+            (None, Some(3))
+        );
+        assert_eq!(
+            activated_varlink_fds(2, Some("varlink:varlink-monitor")).expect("named activation"),
+            (Some(3), Some(4))
+        );
+        assert_eq!(
+            activated_varlink_fds(2, Some("varlink-monitor:varlink"))
+                .expect("reverse named activation"),
+            (Some(4), Some(3))
+        );
+        assert!(activated_varlink_fds(1, Some("other")).is_err());
+        assert!(activated_varlink_fds(2, Some("varlink:other")).is_err());
+        assert!(activated_varlink_fds(2, Some("varlink:varlink")).is_err());
+        assert!(activated_varlink_fds(3, None).is_err());
     }
 
     #[test]

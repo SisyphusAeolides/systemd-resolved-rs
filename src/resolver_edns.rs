@@ -186,8 +186,20 @@ impl Resolver {
                 (response, response_transport, false)
             };
 
-            let opt = edns::inspect_opt(&response)?;
-            let rcode = edns::full_rcode(&response, opt.as_ref())?;
+            let opt = match edns::inspect_opt(&response) {
+                Ok(opt) => opt,
+                Err(error) => {
+                    self.record_invalid_packet(server);
+                    return Err(error.into());
+                }
+            };
+            let rcode = match edns::full_rcode(&response, opt.as_ref()) {
+                Ok(rcode) => rcode,
+                Err(error) => {
+                    self.record_invalid_packet(server);
+                    return Err(error.into());
+                }
+            };
 
             if outbound.managed_opt && outbound.sent_edns {
                 let Some(opt) = opt.as_ref() else {
@@ -355,6 +367,7 @@ impl Resolver {
     fn record_do_off(&self, server: ServerKey, level: FeatureLevel) -> FeatureLevel {
         let mut states = self.states();
         let state = states.entry(server).or_default();
+        state.packet_do_off = true;
         let lower = state.features.record_do_off(level, Instant::now());
         state.transport.clear_failures();
         lower
@@ -411,6 +424,10 @@ impl Resolver {
             .or_default()
             .transport
             .record_truncated();
+    }
+
+    fn record_invalid_packet(&self, server: ServerKey) {
+        self.states().entry(server).or_default().packet_invalid = true;
     }
 
     fn clear_transport_failures(&self, server: ServerKey) {

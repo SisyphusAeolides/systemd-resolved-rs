@@ -45,6 +45,7 @@ impl FeatureLevel {
 pub struct ServerFeatureState {
     possible: FeatureLevel,
     verified: FeatureLevel,
+    verified_once: bool,
     failed_attempts: u8,
     retry_after: Option<Instant>,
     grace_period: Duration,
@@ -56,6 +57,7 @@ impl Default for ServerFeatureState {
         Self {
             possible: FeatureLevel::DnssecOk,
             verified: FeatureLevel::Udp,
+            verified_once: false,
             failed_attempts: 0,
             retry_after: None,
             grace_period: FEATURE_GRACE_PERIOD_MIN,
@@ -94,7 +96,20 @@ impl ServerFeatureState {
         self.verified
     }
 
+    pub const fn current_possible_level(&self) -> FeatureLevel {
+        self.possible
+    }
+
+    pub const fn has_verified_level(&self) -> bool {
+        self.verified_once
+    }
+
+    pub const fn bad_opt(&self) -> bool {
+        self.bad_opt
+    }
+
     pub fn record_success(&mut self, level: FeatureLevel) {
+        self.verified_once = true;
         if level > self.verified {
             self.verified = level;
         }

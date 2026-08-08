@@ -9,7 +9,7 @@ pub enum TransportMode {
     Tcp,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ServerTransportState {
     mode: TransportMode,
     failed_udp: u8,
@@ -17,6 +17,19 @@ pub struct ServerTransportState {
     packet_truncated: bool,
     packet_fragmented: bool,
     received_udp_fragment_max: u32,
+}
+
+impl Default for ServerTransportState {
+    fn default() -> Self {
+        Self {
+            mode: TransportMode::Udp,
+            failed_udp: 0,
+            failed_tcp: 0,
+            packet_truncated: false,
+            packet_fragmented: false,
+            received_udp_fragment_max: 512,
+        }
+    }
 }
 
 impl ServerTransportState {

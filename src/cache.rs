@@ -15,6 +15,16 @@ pub struct CacheKey {
     pub route: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct CacheSnapshot {
+    pub name: Vec<u8>,
+    pub rr_type: u16,
+    pub class: u16,
+    pub rcode: u8,
+    pub response: Vec<u8>,
+    pub remaining: Duration,
+}
+
 pub struct Cache {
     global: GlobalCache,
     capacity: usize,
@@ -131,6 +141,25 @@ impl Cache {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    pub fn snapshot(&self) -> Vec<CacheSnapshot> {
+        let now = Instant::now();
+        self.global
+            .snapshot(now)
+            .into_iter()
+            .map(|(key, entry)| CacheSnapshot {
+                name: key.owner.as_ref().to_vec(),
+                rr_type: key.qtype,
+                class: key.qclass,
+                rcode: entry.rcode,
+                response: entry.answer.as_ref().to_vec(),
+                remaining: entry
+                    .expires_at
+                    .checked_duration_since(now)
+                    .unwrap_or_default(),
+            })
+            .collect()
     }
 }
 

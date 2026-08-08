@@ -9,6 +9,12 @@
             return Ok(wire::refused_for(query)?);
         }
         self.counters.transactions.fetch_add(1, Ordering::Relaxed);
+        self.counters
+            .current_transactions
+            .fetch_add(1, Ordering::Relaxed);
+        let _active_transaction = ActiveTransaction {
+            counter: &self.counters.current_transactions,
+        };
 
         if mode == QueryMode::Full {
             if let Some(response) =
@@ -74,14 +80,28 @@
                             Ok(response)
                         }
                         Err(error) => {
+                            let timed_out = error.is_timeout();
                             if self.config.cache {
                                 if let Some(response) = self.cache.get(&key, header.id, true) {
                                     self.counters
                                         .cache_hits
                                         .fetch_add(1, Ordering::Relaxed);
+                                    if timed_out {
+                                        self.counters.timeouts.fetch_add(1, Ordering::Relaxed);
+                                        self.counters
+                                            .timeouts_served_stale
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    } else {
+                                        self.counters
+                                            .failures_served_stale
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
                                     transaction_leader.complete(normalize_shared_response(&response));
                                     return Ok(response);
                                 }
+                            }
+                            if timed_out {
+                                self.counters.timeouts.fetch_add(1, Ordering::Relaxed);
                             }
                             self.counters.failures.fetch_add(1, Ordering::Relaxed);
                             Err(error)

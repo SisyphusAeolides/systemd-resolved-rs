@@ -161,15 +161,31 @@ struct ServerState {
     tls: TlsCapability,
     transport: ServerTransportState,
     missing_root_rrsig: bool,
+    packet_do_off: bool,
+    packet_invalid: bool,
 }
 
 #[derive(Debug, Default)]
 struct Counters {
+    current_transactions: AtomicU64,
     transactions: AtomicU64,
+    timeouts: AtomicU64,
+    timeouts_served_stale: AtomicU64,
+    failures_served_stale: AtomicU64,
     cache_hits: AtomicU64,
     cache_misses: AtomicU64,
     failures: AtomicU64,
     local_answers: AtomicU64,
+}
+
+struct ActiveTransaction<'a> {
+    counter: &'a AtomicU64,
+}
+
+impl Drop for ActiveTransaction<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -300,12 +316,36 @@ impl Drop for InflightLeader<'_> {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ResolverStats {
+    pub current_transactions: u64,
     pub transactions: u64,
+    pub timeouts: u64,
+    pub timeouts_served_stale: u64,
+    pub failures_served_stale: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub failures: u64,
     pub local_answers: u64,
     pub cache_entries: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolverServerState {
+    pub server: String,
+    pub server_type: String,
+    pub interface: Option<String>,
+    pub interface_index: Option<i32>,
+    pub verified_feature_level: String,
+    pub possible_feature_level: String,
+    pub dnssec_mode: String,
+    pub dnssec_supported: bool,
+    pub received_udp_fragment_max: u32,
+    pub failed_udp_attempts: u8,
+    pub failed_tcp_attempts: u8,
+    pub packet_truncated: bool,
+    pub packet_bad_opt: bool,
+    pub packet_rrsig_missing: bool,
+    pub packet_invalid: bool,
+    pub packet_do_off: bool,
 }
 
 #[derive(Debug)]

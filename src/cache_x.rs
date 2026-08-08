@@ -317,6 +317,30 @@ impl GlobalCache {
             .map(|s| s.live.load(Ordering::Relaxed) as usize)
             .sum()
     }
+
+    pub fn snapshot(&self, now: Instant) -> Vec<(CacheKey, CacheEntry)> {
+        let mut entries = Vec::new();
+        for shard in &self.shards {
+            let map = shard.map.read();
+            entries.extend(map.iter().filter_map(|(key, entry)| {
+                if entry.is_fresh(now) || entry.is_servable_stale(now) {
+                    Some((key.clone(), entry.clone()))
+                } else {
+                    None
+                }
+            }));
+        }
+        entries.sort_by(|(left_key, left_entry), (right_key, right_entry)| {
+            left_key
+                .owner
+                .as_ref()
+                .cmp(right_key.owner.as_ref())
+                .then_with(|| left_key.qclass.cmp(&right_key.qclass))
+                .then_with(|| left_key.qtype.cmp(&right_key.qtype))
+                .then_with(|| left_entry.insert_gen.cmp(&right_entry.insert_gen))
+        });
+        entries
+    }
 }
 
 #[derive(Clone, Debug)]

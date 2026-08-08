@@ -21,6 +21,7 @@ ExecStart=/usr/lib/systemd/systemd-resolved-rs
 ExecReload=/bin/kill -HUP $MAINPID
 WatchdogSec=3min
 NotifyAccess=main
+Sockets=systemd-resolved-rs-varlink.socket systemd-resolved-rs-monitor.socket
 
 User=systemd-resolve
 Group=systemd-resolve
@@ -62,4 +63,4 @@ Environment=RESOLVED_RS_METRICS=127.0.0.1:9990
 
 [Install]
 WantedBy=multi-user.target
-Also=systemd-resolved-rs.socket
+Also=systemd-resolved-rs.socket systemd-resolved-rs-varlink.socket systemd-resolved-rs-monitor.socket
