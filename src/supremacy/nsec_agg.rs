@@ -122,11 +122,9 @@ impl AggressiveNsec {
                     continue;
                 }
                 if range.nsec3 {
-                    if let (Some(owner_hash), Some(next_hash), Some(parameters)) = (
-                        &range.owner_hash,
-                        &range.next_hash,
-                        &range.nsec3_params,
-                    ) {
+                    if let (Some(owner_hash), Some(next_hash), Some(parameters)) =
+                        (&range.owner_hash, &range.next_hash, &range.nsec3_params)
+                    {
                         let query_hash = nsec3_hash(parameters, qname);
                         if query_hash.is_empty() {
                             continue;
@@ -159,8 +157,7 @@ impl AggressiveNsec {
     }
 
     fn record_hit(&self) {
-        self.hits
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -259,11 +256,9 @@ fn sha1(input: &[u8]) -> [u8; 20] {
             words[index] = u32::from_be_bytes(bytes.try_into().expect("four-byte SHA-1 word"));
         }
         for index in 16..80 {
-            words[index] = (words[index - 3]
-                ^ words[index - 8]
-                ^ words[index - 14]
-                ^ words[index - 16])
-                .rotate_left(1);
+            words[index] =
+                (words[index - 3] ^ words[index - 8] ^ words[index - 14] ^ words[index - 16])
+                    .rotate_left(1);
         }
 
         let mut a = state[0];
@@ -337,10 +332,7 @@ mod tests {
     #[test]
     fn rejects_malformed_type_bitmaps() {
         assert!(!TypeBitmap { bits: vec![0] }.contains(1));
-        assert!(!TypeBitmap {
-            bits: vec![0, 0],
-        }
-        .contains(1));
+        assert!(!TypeBitmap { bits: vec![0, 0] }.contains(1));
         assert!(!TypeBitmap {
             bits: vec![0, 2, 0x40],
         }
@@ -356,8 +348,8 @@ mod tests {
         assert_eq!(
             sha1(b"abc"),
             [
-                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e,
-                0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
+                0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+                0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
             ]
         );
     }
@@ -373,8 +365,8 @@ mod tests {
         assert_eq!(
             nsec3_hash(&parameters, &wire_name("EXAMPLE.")),
             vec![
-                0x06, 0x53, 0x68, 0xab, 0xee, 0xd7, 0xec, 0x6e, 0x9f, 0xeb,
-                0xa9, 0x6b, 0x8c, 0x8b, 0xc3, 0xe8, 0xb7, 0x91, 0xf7, 0x16,
+                0x06, 0x53, 0x68, 0xab, 0xee, 0xd7, 0xec, 0x6e, 0x9f, 0xeb, 0xa9, 0x6b, 0x8c, 0x8b,
+                0xc3, 0xe8, 0xb7, 0x91, 0xf7, 0x16,
             ]
         );
     }
