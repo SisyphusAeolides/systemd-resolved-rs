@@ -1,0 +1,691 @@
+name: Integrate query result subscription parity
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/integrate-query-result-subscription.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/query-result-subscription","description":"Query result subscription in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Record and stream query results
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/resolver.rs")
+          text = path.read_text(encoding="utf-8")
+          start = text.index("pub struct Resolver {")
+          end = text.index("\n}", start)
+          block = text[start:end]
+          if "monitor_query_events:" in block:
+              raise SystemExit("query journal field already exists")
+          insertion = "    monitor_query_events: Mutex<MonitorQueryJournal>,\n"
+          text = text[:end] + "\n" + insertion.rstrip("\n") + text[end:]
+
+          constructor = text.index("pub fn new(")
+          brace = text.index("{", constructor)
+          depth = 0
+          in_string = False
+          escaped = False
+          index = brace
+          while index < len(text):
+              character = text[index]
+              if in_string:
+                  if escaped:
+                      escaped = False
+                  elif character == "\\":
+                      escaped = True
+                  elif character == '"':
+                      in_string = False
+              else:
+                  if character == '"':
+                      in_string = True
+                  elif character == "{":
+                      depth += 1
+                  elif character == "}":
+                      depth -= 1
+                      if depth == 0:
+                          function_end = index + 1
+                          break
+              index += 1
+          else:
+              raise SystemExit("unterminated Resolver constructor")
+          function = text[constructor:function_end]
+          initializer = "Self {"
+          if initializer not in function:
+              raise SystemExit("Resolver initializer is missing")
+          function = function.replace(
+              initializer,
+              initializer + "\n            monitor_query_events: Mutex::new(MonitorQueryJournal::default()),",
+              1,
+          )
+          text = text[:constructor] + function + text[function_end:]
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          cat >> src/resolver.rs <<'EOF'
+
+          const MONITOR_QUERY_EVENT_CAPACITY: usize = 1024;
+
+          #[derive(Clone, Debug)]
+          pub(crate) struct MonitorQueryEvent {
+              pub(crate) sequence: u64,
+              pub(crate) request: Vec<u8>,
+              pub(crate) response: Option<Vec<u8>>,
+              pub(crate) error: Option<String>,
+          }
+
+          #[derive(Debug, Default)]
+          struct MonitorQueryJournal {
+              next_sequence: u64,
+              events: std::collections::VecDeque<MonitorQueryEvent>,
+          }
+
+          impl Resolver {
+              pub(crate) fn record_monitor_query_event(
+                  &self,
+                  request: &[u8],
+                  result: &Result<Vec<u8>, ResolveError>,
+              ) {
+                  let mut journal = self
+                      .monitor_query_events
+                      .lock()
+                      .unwrap_or_else(std::sync::PoisonError::into_inner);
+                  journal.next_sequence = journal.next_sequence.saturating_add(1);
+                  let sequence = journal.next_sequence;
+                  let (response, error) = match result {
+                      Ok(response) => (Some(response.clone()), None),
+                      Err(error) => (None, Some(error.to_string())),
+                  };
+                  journal.events.push_back(MonitorQueryEvent {
+                      sequence,
+                      request: request.to_vec(),
+                      response,
+                      error,
+                  });
+                  while journal.events.len() > MONITOR_QUERY_EVENT_CAPACITY {
+                      journal.events.pop_front();
+                  }
+              }
+
+              pub(crate) fn monitor_query_latest_sequence(&self) -> u64 {
+                  self.monitor_query_events
+                      .lock()
+                      .unwrap_or_else(std::sync::PoisonError::into_inner)
+                      .next_sequence
+              }
+
+              pub(crate) fn monitor_query_events_after(
+                  &self,
+                  sequence: u64,
+              ) -> Vec<MonitorQueryEvent> {
+                  self.monitor_query_events
+                      .lock()
+                      .unwrap_or_else(std::sync::PoisonError::into_inner)
+                      .events
+                      .iter()
+                      .filter(|event| event.sequence > sequence)
+                      .cloned()
+                      .collect()
+              }
+          }
+
+          #[cfg(test)]
+          mod monitor_query_journal_tests {
+              use super::*;
+
+              #[test]
+              fn query_journal_orders_and_filters_events() {
+                  let resolver = Resolver::new(Config::default());
+                  let result: Result<Vec<u8>, ResolveError> = Ok(vec![0; 12]);
+                  resolver.record_monitor_query_event(&[1, 2, 3], &result);
+                  resolver.record_monitor_query_event(&[4, 5, 6], &result);
+                  assert_eq!(resolver.monitor_query_latest_sequence(), 2);
+                  let events = resolver.monitor_query_events_after(1);
+                  assert_eq!(events.len(), 1);
+                  assert_eq!(events[0].sequence, 2);
+                  assert_eq!(events[0].request, vec![4, 5, 6]);
+              }
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/resolver_methods_01.rs")
+          text = path.read_text(encoding="utf-8")
+          marker = "pub fn resolve_packet("
+          start = text.index(marker)
+          open_paren = text.index("(", start)
+          depth = 0
+          index = open_paren
+          while index < len(text):
+              character = text[index]
+              if character == "(":
+                  depth += 1
+              elif character == ")":
+                  depth -= 1
+                  if depth == 0:
+                      close_paren = index
+                      break
+              index += 1
+          else:
+              raise SystemExit("unterminated resolve_packet parameters")
+          brace = text.index("{", close_paren)
+          signature = text[start:brace]
+          parameters = text[open_paren + 1 : close_paren]
+
+          segments = []
+          current = []
+          depths = {"(": 0, "[": 0, "<": 0}
+          pairs = {")": "(", "]": "[", ">": "<"}
+          for character in parameters:
+              if character in depths:
+                  depths[character] += 1
+              elif character in pairs and depths[pairs[character]]:
+                  depths[pairs[character]] -= 1
+              if character == "," and not any(depths.values()):
+                  segments.append("".join(current).strip())
+                  current = []
+              else:
+                  current.append(character)
+          if "".join(current).strip():
+              segments.append("".join(current).strip())
+
+          arguments = []
+          request_name = None
+          for segment in segments:
+              if segment in {"&self", "&mut self", "self", "mut self"}:
+                  continue
+              if ":" not in segment:
+                  raise SystemExit(f"unsupported resolve_packet parameter: {segment}")
+              pattern, type_name = segment.split(":", 1)
+              name = pattern.strip().removeprefix("mut ").strip()
+              if not name.isidentifier():
+                  raise SystemExit(f"unsupported resolve_packet pattern: {pattern}")
+              arguments.append(name)
+              if "[u8]" in type_name:
+                  request_name = name
+          if request_name is None:
+              raise SystemExit("resolve_packet byte request parameter is missing")
+
+          inner_signature = signature.replace(
+              "pub fn resolve_packet(",
+              "fn resolve_packet_inner(",
+              1,
+          )
+          wrapper = (
+              signature
+              + "{\n"
+              + f"        let monitor_request = {request_name}.to_vec();\n"
+              + f"        let result = self.resolve_packet_inner({', '.join(arguments)});\n"
+              + "        self.record_monitor_query_event(&monitor_request, &result);\n"
+              + "        result\n"
+              + "    }\n\n    "
+          )
+          text = text[:start] + wrapper + inner_signature + text[brace:]
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("src/varlink_monitor.rs")
+          text = path.read_text(encoding="utf-8")
+          old = 'method SubscribeDNSConfiguration(allowInteractiveAuthentication: ?bool) -> (configuration: []DNSConfiguration)\\n\\\n          method ResetStatistics()";'
+          new = 'method SubscribeDNSConfiguration(allowInteractiveAuthentication: ?bool) -> (configuration: []DNSConfiguration)\\n\\\n          method SubscribeQueryResults() -> (ready: ?bool, state: ?string, result: ?string, rcode: ?int, errno: ?int, extendedDNSErrorCode: ?int, extendedDNSErrorMessage: ?string, question: ?[]object, collectedQuestions: ?[]object, answer: ?[]Answer)\\n\\\n          method ResetStatistics()";'
+          if text.count(old) != 1:
+              raise SystemExit("monitor subscription description anchor mismatch")
+          text = text.replace(old, new, 1)
+
+          anchor = '''                  "io.systemd.Resolve.Monitor.SubscribeDNSConfiguration" => {'''
+          insertion = '''                  "io.systemd.Resolve.Monitor.SubscribeQueryResults" => {
+                      if request.get("more").and_then(Value::as_bool) == Some(true) {
+                          monitor_query_results_ready()
+                      } else {
+                          error("org.varlink.service.ExpectedMore")
+                      }
+                  }
+          '''
+          if text.count(anchor) != 1:
+              raise SystemExit("monitor subscription dispatch anchor mismatch")
+          text = text.replace(anchor, insertion + anchor, 1)
+
+          function_anchor = "fn monitor_dns_configuration_subscription_requested(input: &str) -> bool {"
+          helpers = r'''fn monitor_query_results_subscription_requested(input: &str) -> bool {
+              let Ok(request) = json::parse(input) else {
+                  return false;
+              };
+              request.get("method").and_then(Value::as_str)
+                  == Some("io.systemd.Resolve.Monitor.SubscribeQueryResults")
+                  && request.get("more").and_then(Value::as_bool) == Some(true)
+          }
+
+          fn monitor_query_results_ready() -> Value {
+              Value::object([
+                  ("continues", Value::Bool(true)),
+                  (
+                      "parameters",
+                      Value::object([("ready", Value::Bool(true))]),
+                  ),
+              ])
+          }
+
+          fn serve_query_results_subscription(
+              stream: &mut UnixStream,
+              resolver: &Resolver,
+          ) -> io::Result<()> {
+              stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+              let mut sequence = resolver.monitor_query_latest_sequence();
+              write_monitor_frame(stream, &monitor_query_results_ready())?;
+              let mut probe = [0; 1];
+              while !stop_requested() {
+                  match stream.peek(&mut probe) {
+                      Ok(0) => return Ok(()),
+                      Ok(_) => {
+                          return Err(io::Error::new(
+                              io::ErrorKind::InvalidData,
+                              "unexpected request data on query result subscription",
+                          ));
+                      }
+                      Err(error)
+                          if matches!(
+                              error.kind(),
+                              io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                          ) => {}
+                      Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                      Err(error)
+                          if matches!(
+                              error.kind(),
+                              io::ErrorKind::BrokenPipe
+                                  | io::ErrorKind::ConnectionAborted
+                                  | io::ErrorKind::ConnectionReset
+                          ) =>
+                      {
+                          return Ok(());
+                      }
+                      Err(error) => return Err(error),
+                  }
+
+                  for event in resolver.monitor_query_events_after(sequence) {
+                      let update = monitor_query_event_value(&event);
+                      match write_monitor_frame(stream, &update) {
+                          Ok(()) => sequence = event.sequence,
+                          Err(error)
+                              if matches!(
+                                  error.kind(),
+                                  io::ErrorKind::BrokenPipe
+                                      | io::ErrorKind::ConnectionAborted
+                                      | io::ErrorKind::ConnectionReset
+                              ) =>
+                          {
+                              return Ok(());
+                          }
+                          Err(error) => return Err(error),
+                      }
+                  }
+              }
+              Ok(())
+          }
+
+          fn monitor_query_event_value(event: &crate::resolver::MonitorQueryEvent) -> Value {
+              let question = crate::wire::parse_question(&event.request).ok().map(|question| {
+                  Value::object([
+                      ("class", Value::Number(i128::from(question.class))),
+                      ("type", Value::Number(i128::from(question.record_type))),
+                      ("name", Value::String(question.name)),
+                  ])
+              });
+              let response = event.response.as_deref();
+              let rcode = response
+                  .and_then(|message| message.get(3))
+                  .map(|flags| flags & 0x0f);
+              let answer = response.map(|message| {
+                  crate::wire::parse_records(message)
+                      .unwrap_or_default()
+                      .iter()
+                      .map(|record| {
+                          Value::object([
+                              ("rr", resource_record_to_value(record)),
+                              ("raw", Value::String(base64(&record.raw))),
+                              ("ifindex", Value::Null),
+                          ])
+                      })
+                      .collect()
+              });
+              let success = event.error.is_none() && rcode.unwrap_or(0) == 0;
+              let result = event.error.clone().unwrap_or_else(|| {
+                  if success {
+                      "insecure".to_owned()
+                  } else {
+                      monitor_cache_rcode_name(rcode.unwrap_or(0)).to_owned()
+                  }
+              });
+              let question_array = question.clone().map_or(Value::Null, |question| {
+                  Value::Array(vec![question])
+              });
+              Value::object([
+                  ("continues", Value::Bool(true)),
+                  (
+                      "parameters",
+                      Value::object([
+                          ("ready", Value::Null),
+                          (
+                              "state",
+                              Value::String(if success { "success" } else { "failure" }.to_owned()),
+                          ),
+                          ("result", Value::String(result)),
+                          (
+                              "rcode",
+                              rcode.map_or(Value::Null, |rcode| {
+                                  Value::Number(i128::from(rcode))
+                              }),
+                          ),
+                          ("errno", Value::Null),
+                          ("extendedDNSErrorCode", Value::Null),
+                          ("extendedDNSErrorMessage", Value::Null),
+                          ("question", question_array.clone()),
+                          ("collectedQuestions", question_array),
+                          (
+                              "answer",
+                              answer.map_or(Value::Null, Value::Array),
+                          ),
+                      ]),
+                  ),
+              ])
+          }
+
+          '''
+          if text.count(function_anchor) != 1:
+              raise SystemExit("DNS configuration subscription helper anchor mismatch")
+          text = text.replace(function_anchor, helpers + function_anchor, 1)
+          path.write_text(text, encoding="utf-8")
+
+          varlink = Path("src/varlink.rs")
+          source = varlink.read_text(encoding="utf-8")
+          old = '''                          if interface == VarlinkInterface::Monitor
+                              && monitor_dns_configuration_subscription_requested(text)
+                          {
+                              return serve_dns_configuration_subscription(&mut stream, resolver);
+                          }
+                          dispatch_interface_with_access(text, resolver, can_control, interface)'''
+          new = '''                          if interface == VarlinkInterface::Monitor {
+                              if monitor_query_results_subscription_requested(text) {
+                                  return serve_query_results_subscription(&mut stream, resolver);
+                              }
+                              if monitor_dns_configuration_subscription_requested(text) {
+                                  return serve_dns_configuration_subscription(&mut stream, resolver);
+                              }
+                          }
+                          dispatch_interface_with_access(text, resolver, can_control, interface)'''
+          if source.count(old) != 1:
+              raise SystemExit("Varlink subscription routing anchor mismatch")
+          varlink.write_text(source.replace(old, new, 1), encoding="utf-8")
+          PY
+
+          cat >> src/varlink_monitor.rs <<'EOF'
+
+          #[cfg(test)]
+          mod query_result_subscription_tests {
+              use super::*;
+              use crate::config::Config;
+
+              fn read_frame(stream: &mut UnixStream) -> Value {
+                  let mut pending = Vec::new();
+                  let mut chunk = [0; 4096];
+                  loop {
+                      let length = stream.read(&mut chunk).expect("query result frame");
+                      assert_ne!(length, 0, "query result subscription closed early");
+                      if let Some(end) = chunk[..length].iter().position(|byte| *byte == 0) {
+                          pending.extend_from_slice(&chunk[..end]);
+                          return json::parse(
+                              std::str::from_utf8(&pending).expect("UTF-8 query result frame"),
+                          )
+                          .expect("JSON query result frame");
+                      }
+                      pending.extend_from_slice(&chunk[..length]);
+                  }
+              }
+
+              fn query_packet() -> Vec<u8> {
+                  vec![
+                      0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00, 0x09, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0x00,
+                      0x00, 0x01, 0x00, 0x01,
+                  ]
+              }
+
+              #[test]
+              fn query_subscription_requires_more() {
+                  let resolver = Resolver::new(Config::default());
+                  let reply = dispatch_monitor(
+                      r#"{"method":"io.systemd.Resolve.Monitor.SubscribeQueryResults","parameters":{}}"#,
+                      &resolver,
+                  );
+                  assert_eq!(
+                      reply.get("error").and_then(Value::as_str),
+                      Some("org.varlink.service.ExpectedMore")
+                  );
+              }
+
+              #[test]
+              fn query_subscription_streams_future_results() {
+                  let resolver = Arc::new(Resolver::new(Config::default()));
+                  let (mut client, server) = UnixStream::pair().expect("Varlink pair");
+                  client
+                      .set_read_timeout(Some(Duration::from_secs(3)))
+                      .expect("client timeout");
+                  let server_resolver = Arc::clone(&resolver);
+                  let handle = thread::spawn(move || {
+                      serve_connection(
+                          server,
+                          &server_resolver,
+                          VarlinkInterface::Monitor,
+                      )
+                  });
+                  client
+                      .write_all(
+                          br#"{"method":"io.systemd.Resolve.Monitor.SubscribeQueryResults","parameters":{},"more":true}"#,
+                      )
+                      .expect("subscription request");
+                  client.write_all(&[0]).expect("request delimiter");
+                  let ready = read_frame(&mut client);
+                  assert_eq!(
+                      ready
+                          .get("parameters")
+                          .and_then(|parameters| parameters.get("ready"))
+                          .and_then(Value::as_bool),
+                      Some(true)
+                  );
+
+                  let request = query_packet();
+                  let mut response = request.clone();
+                  response[2] = 0x81;
+                  response[3] = 0x80;
+                  let result: Result<Vec<u8>, ResolveError> = Ok(response);
+                  resolver.record_monitor_query_event(&request, &result);
+                  let event = read_frame(&mut client);
+                  let parameters = event.get("parameters").expect("event parameters");
+                  assert_eq!(parameters.get("state").and_then(Value::as_str), Some("success"));
+                  assert_eq!(
+                      parameters
+                          .get("question")
+                          .and_then(Value::as_array)
+                          .and_then(|questions| questions.first())
+                          .and_then(|question| question.get("name"))
+                          .and_then(Value::as_str),
+                      Some("localhost")
+                  );
+
+                  drop(client);
+                  handle
+                      .join()
+                      .expect("query subscription thread")
+                      .expect("query subscription server");
+              }
+          }
+          EOF
+
+          cat > tests/pinned_query_result_subscription.rs <<'EOF'
+          // SPDX-License-Identifier: LGPL-2.1-or-later
+          const RESOLVER: &str = include_str!("../src/resolver.rs");
+          const METHODS: &str = include_str!("../src/resolver_methods_01.rs");
+          const MONITOR: &str = include_str!("../src/varlink_monitor.rs");
+          const SERVER: &str = include_str!("../src/varlink.rs");
+
+          #[test]
+          fn query_result_subscription_remains_backed_by_core_transactions() {
+              for symbol in [
+                  "MonitorQueryJournal",
+                  "record_monitor_query_event",
+                  "resolve_packet_inner",
+                  "SubscribeQueryResults",
+                  "serve_query_results_subscription",
+                  "monitor_query_event_value",
+                  "collectedQuestions",
+                  "extendedDNSErrorCode",
+              ] {
+                  assert!(
+                      RESOLVER.contains(symbol)
+                          || METHODS.contains(symbol)
+                          || MONITOR.contains(symbol)
+                          || SERVER.contains(symbol),
+                      "missing query-result subscription symbol {symbol}"
+                  );
+              }
+          }
+          EOF
+
+          rm -f .github/workflows/integrate-query-result-subscription.yml
+          cargo fmt --all
+          git diff --check
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts and surface reduction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json
+          python3 - <<'PY'
+          import json
+
+          with open("/tmp/upstream-surface-audit.json", encoding="utf-8") as stream:
+              report = json.load(stream)
+          if "SubscribeQueryResults" in report["missing"]["varlink_methods"]:
+              raise SystemExit("SubscribeQueryResults remains missing")
+          PY
+
+      - name: Commit verified query-result tranche
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Stream resolver query results through Resolve monitor'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Query result subscription passed' || 'Query result subscription failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/query-result-subscription","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
