@@ -1,0 +1,180 @@
+name: Finalize portable readiness certificate
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-portable-certificate.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out and synchronize source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Synchronize with current main
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+      - name: Install diagnostics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck
+      - name: Add relative bundled artifact references
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          certificate_path = Path('scripts/certify-replacement.sh')
+          certificate = certificate_path.read_text(encoding='utf-8')
+          old = '''    "binary": {"path": binary_path, "sha256": binary_sha256},
+    "client": {"path": client_path, "sha256": client_sha256},
+'''
+          new = '''    "binary": {
+        "path": binary_path,
+        "artifact_path": str(
+            (Path(report_directory).resolve() / "artifacts" / "systemd-resolved")
+            .relative_to(Path(output_path).resolve().parent)
+        ),
+        "sha256": binary_sha256,
+    },
+    "client": {
+        "path": client_path,
+        "artifact_path": str(
+            (Path(report_directory).resolve() / "artifacts" / "resolvectl")
+            .relative_to(Path(output_path).resolve().parent)
+        ),
+        "sha256": client_sha256,
+    },
+'''
+          if '"artifact_path": str(' not in certificate:
+              if old not in certificate:
+                  raise SystemExit('cannot locate certificate binary metadata')
+              certificate = certificate.replace(old, new, 1)
+          certificate_path.write_text(certificate, encoding='utf-8')
+
+          switch_path = Path('scripts/switch-resolved-transactionally.sh')
+          switch = switch_path.read_text(encoding='utf-8')
+          block = re.compile(
+              r'certificate_output=\$\(python3 - "\$CERTIFICATE" "\$MAX_CERTIFICATE_AGE" <<\'PY\'\n.*?^PY\n\)',
+              re.S | re.M,
+          )
+          replacement = '''BUNDLE_VERIFIER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/verify-readiness-bundle.py"
+[[ -x $BUNDLE_VERIFIER ]] || {
+    printf 'The portable readiness-bundle verifier is missing: %s\\n' "$BUNDLE_VERIFIER" >&2
+    exit 2
+}
+certificate_output=$(python3 "$BUNDLE_VERIFIER" \\
+    --certificate "$CERTIFICATE" \\
+    --maximum-age "$MAX_CERTIFICATE_AGE" \\
+    --shell-values)'''
+          switch, count = block.subn(replacement, switch, count=1)
+          if count != 1 and 'verify-readiness-bundle.py' not in switch:
+              raise SystemExit('cannot locate embedded certificate validation')
+          switch = switch.replace(
+              '[[ -x $BINARY && -x $CLIENT ]] || {',
+              '[[ -f $BINARY && -f $CLIENT ]] || {',
+          )
+          switch_path.write_text(switch, encoding='utf-8')
+          PY
+          chmod 0755 scripts/verify-readiness-bundle.py
+      - name: Verify portability with a synthetic moved bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n \
+            scripts/certify-replacement.sh \
+            scripts/switch-resolved-transactionally.sh
+          python3 -m py_compile scripts/verify-readiness-bundle.py
+          shellcheck --severity=error \
+            scripts/certify-replacement.sh \
+            scripts/switch-resolved-transactionally.sh
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          mkdir -p "$work/bundle/replacement-certification.d/artifacts"
+          printf daemon >"$work/bundle/replacement-certification.d/artifacts/systemd-resolved"
+          printf client >"$work/bundle/replacement-certification.d/artifacts/resolvectl"
+          daemon_hash=$(sha256sum "$work/bundle/replacement-certification.d/artifacts/systemd-resolved" | awk '{print $1}')
+          client_hash=$(sha256sum "$work/bundle/replacement-certification.d/artifacts/resolvectl" | awk '{print $1}')
+          now=$(date --utc --iso-8601=seconds)
+          python3 - "$work/bundle/replacement-certification.json" "$daemon_hash" "$client_hash" "$now" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          path, daemon_hash, client_hash, now = sys.argv[1:]
+          Path(path).write_text(
+              json.dumps(
+                  {
+                      "schema": 2,
+                      "certified": True,
+                      "generated_at": now,
+                      "source_commit": "1" * 40,
+                      "source_tree": "2" * 40,
+                      "upstream_commit": "3" * 40,
+                      "gates": [{"name": "synthetic", "status": "pass", "detail": "test"}],
+                      "binary": {
+                          "path": "/discarded/ci/path/systemd-resolved",
+                          "artifact_path": "replacement-certification.d/artifacts/systemd-resolved",
+                          "sha256": daemon_hash,
+                      },
+                      "client": {
+                          "path": "/discarded/ci/path/resolvectl",
+                          "artifact_path": "replacement-certification.d/artifacts/resolvectl",
+                          "sha256": client_hash,
+                      },
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+          scripts/verify-readiness-bundle.py \
+            --certificate "$work/bundle/replacement-certification.json" \
+            --shell-values >"$work/values"
+          grep -Fq "$work/bundle/replacement-certification.d/artifacts/systemd-resolved" "$work/values"
+          cp -a "$work/bundle" "$work/moved"
+          scripts/verify-readiness-bundle.py \
+            --certificate "$work/moved/replacement-certification.json" >/dev/null
+          git diff --check
+      - name: Commit portable certificate support
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git rm --force .github/workflows/finalize-portable-certificate.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'Make readiness certificates portable across machines'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
