@@ -2,7 +2,6 @@
 #![allow(clippy::many_single_char_names)]
 
 use resolved::json::Value;
-use std::collections::BTreeMap;
 use std::error::Error;
 use std::io;
 use std::path::Path;
@@ -277,7 +276,7 @@ fn parse_canonical_record(input: &[u8]) -> Result<CanonicalRecord, io::Error> {
             *input
                 .get(offset)
                 .ok_or_else(|| invalid_data("record owner is truncated"))?,
-         );
+        );
         offset = offset
             .checked_add(1)
             .ok_or_else(|| invalid_data("record owner offset overflow"))?;
@@ -325,7 +324,7 @@ fn read_u16(input: &[u8], offset: usize) -> Result<u16, io::Error> {
 fn read_u32(input: &[u8], offset: usize) -> Result<u32, io::Error> {
     let bytes: [u8; 4] = input
         .get(offset..offset + 4)
-        .ok_or_else(|| invalid_data("record is truncated")?
+        .ok_or_else(|| invalid_data("record is truncated"))?
         .try_into()
         .map_err(|_| invalid_data("record is truncated"))?;
     Ok(u32::from_be_bytes(bytes))
@@ -426,6 +425,7 @@ fn encode_hex(input: &[u8]) -> String {
 }
 
 #[allow(clippy::needless_range_loop)]
+#[allow(clippy::too_many_lines)]
 fn sha256(input: &[u8]) -> [u8; 32] {
     const INITIAL: [u32; 8] = [
         0x6a09_e667,
@@ -560,7 +560,7 @@ fn sha256(input: &[u8]) -> [u8; 32] {
             b = a;
             a = first.wrapping_add(second);
         }
-        for (value, addition) in state.iter_mut().zip([a, b, c, d, e, f, g, h].into_iter()) {
+        for (value, addition) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
             *value = value.wrapping_add(addition);
         }
     }

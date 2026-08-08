@@ -7,6 +7,7 @@ license = "LGPL-2.1-or-later"
 description = "A compatibility-oriented reimplementation of systemd-resolved"
 repository = "https://github.com/SisyphusAeolides/systemd-resolved-rs"
 build = "build.rs"
+autobins = false
 
 [lib]
 name = "resolved"
