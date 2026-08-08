@@ -1,0 +1,105 @@
+name: Finalize transactional switch health checks
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-switch-health.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out and synchronize source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Synchronize with current main
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+      - name: Install shell diagnostics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck
+      - name: Add resolver-only health requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/switch-resolved-transactionally.sh')
+          text = path.read_text(encoding='utf-8')
+          old = '''    busctl --system --no-pager introspect \\
+        org.freedesktop.resolve1 /org/freedesktop/resolve1 \\
+        org.freedesktop.resolve1.Manager >/dev/null || return 1
+    "$client" status >/dev/null || return 1
+    "$client" statistics >/dev/null || return 1
+    "$client" query localhost >/dev/null || return 1
+    getent ahosts localhost >/dev/null || return 1
+'''
+          new = '''    busctl --system --no-pager introspect \\
+        org.freedesktop.resolve1 /org/freedesktop/resolve1 \\
+        org.freedesktop.resolve1.Manager >/dev/null || return 1
+    busctl --system --no-pager get-property \\
+        org.freedesktop.resolve1 /org/freedesktop/resolve1 \\
+        org.freedesktop.resolve1.Manager ResolvConfMode >/dev/null || return 1
+    test -r /etc/resolv.conf || return 1
+    "$client" status >/dev/null || return 1
+    "$client" statistics >/dev/null || return 1
+    "$client" query localhost >/dev/null || return 1
+    "$client" query _localdnsstub >/dev/null || return 1
+    getent ahosts localhost >/dev/null || return 1
+    getent ahosts _localdnsstub >/dev/null || return 1
+'''
+          if 'getent ahosts _localdnsstub' not in text:
+              if old not in text:
+                  raise SystemExit('cannot locate transactional health checks')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+      - name: Validate fail-closed switch script
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/switch-resolved-transactionally.sh
+          shellcheck --severity=error scripts/switch-resolved-transactionally.sh
+          scripts/switch-resolved-transactionally.sh --help >/dev/null
+          grep -Fq 'getent ahosts _localdnsstub' scripts/switch-resolved-transactionally.sh
+          grep -Fq 'ResolvConfMode' scripts/switch-resolved-transactionally.sh
+          git diff --check
+      - name: Commit verified health checks
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git rm --force .github/workflows/finalize-switch-health.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'Require resolver-only health for replacement transactions'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
