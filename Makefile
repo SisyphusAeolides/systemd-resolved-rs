@@ -54,6 +54,8 @@ check-packaging:
 		scripts/probe-stub.py; \
 	PYTHONPYCACHEPREFIX="$$work/pycache" python3 tests/test-upstream-surface-audit.py; \
 	python3 scripts/check-workflow-fleet.py; \
+	cargo metadata --no-deps --format-version 1 >"$$work/cargo-metadata.json"; \
+	python3 -c 'import json, sys; data = json.load(open(sys.argv[1], encoding="utf-8")); bins = sorted(target["name"] for package in data["packages"] if package["name"] == "systemd-resolved-rs" for target in package["targets"] if "bin" in target["kind"]); expected = ["resolvectl", "systemd-resolved"]; assert bins == expected, f"unexpected Cargo binary targets: {bins}"' "$$work/cargo-metadata.json"; \
 	test "$$(grep -Fc 'ExecStart=@SYSTEMD_RESOLVED_RS@' packaging/systemd/systemd-resolved-replacement.service)" -eq 1; \
 	sed 's|@SYSTEMD_RESOLVED_RS@|/bin/true|g' \
 		packaging/systemd/systemd-resolved-replacement.service >"$$work/systemd-resolved.service"; \
