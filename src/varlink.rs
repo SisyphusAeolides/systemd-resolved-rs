@@ -28,6 +28,10 @@ method ResolveHostname(ifindex: ?int, name: string, family: ?int, flags: ?int) -
 method ResolveAddress(ifindex: ?int, family: int, address: []int, flags: ?int) -> (names: [](ifindex: ?int, name: string), flags: int)\n\
 method ResolveService(name: ?string, type: ?string, domain: string, ifindex: ?int, family: ?int, flags: ?int) -> (services: [](priority: int, weight: int, port: int, hostname: string, canonicalName: ?string, addresses: ?[](ifindex: ?int, family: int, address: []int)), txt: ?[]string, canonical: (name: ?string, type: string, domain: string), flags: int)\n\
 method ResolveRecord(ifindex: ?int, name: string, class: ?int, type: int, flags: ?int) -> (rrs: [](ifindex: ?int, rr: ?object, raw: string), flags: int)\n\
+type DNSServer (address: []int, addressString: string, family: int, port: int, ifindex: ?int, name: ?string, accessible: ?bool)\n\
+type SearchDomain (name: string, routeOnly: bool, ifindex: ?int)\n\
+type DNSConfiguration (ifname: ?string, ifindex: ?int, delegate: ?string, defaultRoute: ?bool, currentServer: ?DNSServer, servers: ?[]DNSServer, fallbackServers: ?[]DNSServer, searchDomains: ?[]SearchDomain, negativeTrustAnchors: ?[]string, dnssec: ?string, dnssecSupported: ?bool, dnsOverTLS: ?string, llmnr: ?string, mDNS: ?string, resolvConfMode: ?string, scopes: ?[]string)\n\
+method DumpDNSConfiguration() -> (configuration: []DNSConfiguration)\n\
 error QueryAborted\n\
 error QueryRefused\n\
 error DNSSECValidationFailed(result: string, extendedDNSErrorCode: ?int, extendedDNSErrorMessage: ?string)\n\
@@ -218,6 +222,7 @@ fn dispatch_with_access(input: &str, resolver: &Resolver, can_control: bool) -> 
         "io.systemd.Resolve.ResolveAddress" => resolve_address(&parameters, resolver),
         "io.systemd.Resolve.ResolveRecord" => resolve_record(&parameters, resolver),
         "io.systemd.Resolve.ResolveService" => resolve_service(&parameters, resolver),
+        "io.systemd.Resolve.DumpDNSConfiguration" => dump_dns_configuration(resolver),
         "io.systemd.Resolve.FlushCaches" => control(can_control, || resolver.flush_cache()),
         "io.systemd.Resolve.ResetServerFeatures" => {
             control(can_control, || resolver.reset_server_features())
@@ -229,6 +234,8 @@ fn dispatch_with_access(input: &str, resolver: &Resolver, can_control: bool) -> 
         _ => error("org.varlink.service.MethodNotFound"),
     }
 }
+
+include!("varlink_dns_configuration.rs");
 
 fn resolve_hostname(parameters: &Value, resolver: &Resolver) -> Value {
     let Some(name) = parameters.get("name").and_then(Value::as_str) else {
