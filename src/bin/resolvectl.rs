@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
+mod resolvectl_rr;
+
 use resolved::json::{self, Value};
 use std::collections::BTreeMap;
 use std::env;
@@ -36,6 +38,8 @@ fn execute() -> Result<(), Box<dyn Error>> {
     };
     match options.command.as_str() {
         "query" => query_many(&options.socket, &options.arguments, options.family),
+        "openpgp" => resolvectl_rr::openpgp(&options.socket, &options.arguments),
+        "tlsa" => resolvectl_rr::tlsa(&options.socket, &options.arguments),
         "status" => status(&options.socket),
         "statistics" => statistics(&options.socket),
         "flush-caches" => control(&options.socket, "io.systemd.Resolve.FlushCaches"),
@@ -330,6 +334,8 @@ fn print_help() {
          Usage: resolvectl [--socket PATH] [-4|-6] COMMAND [ARGUMENTS]\n\
          Commands:\n\
            query NAME|ADDRESS...\n\
+           openpgp EMAIL@DOMAIN...\n\
+           tlsa [tcp|udp|sctp] DOMAIN[:PORT]...\n\
            status\n\
            statistics\n\
            flush-caches\n\
