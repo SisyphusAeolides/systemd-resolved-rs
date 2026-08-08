@@ -1,0 +1,112 @@
+name: Remove obsolete integration workflows
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/cleanup-workflow-fleet.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize with main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Remove completed integration launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm --ignore-unmatch -- \
+            .github/workflows/finalize-dnssd-goodbyes.yml \
+            .github/workflows/finalize-dnssd-live.yml \
+            .github/workflows/finalize-dnssd-responder.yml \
+            .github/workflows/finalize-exact-sha-orchestration.yml \
+            .github/workflows/finalize-mdns-additional-records.yml \
+            .github/workflows/finalize-mdns-duplex-certification.yml \
+            .github/workflows/finalize-mdns-integration.yml \
+            .github/workflows/finalize-mdns-policy.yml \
+            .github/workflows/finalize-mdns-responder.yml \
+            .github/workflows/finalize-miri-coverage.yml \
+            .github/workflows/finalize-pinned-dbus-contract.yml \
+            .github/workflows/finalize-portable-certificate.yml \
+            .github/workflows/finalize-portable-switch-runtime.yml \
+            .github/workflows/finalize-proof-validation.yml \
+            .github/workflows/finalize-readiness-tools.yml \
+            .github/workflows/finalize-replacement-safety.yml \
+            .github/workflows/finalize-reproducible-certification.yml \
+            .github/workflows/finalize-surface-certification.yml \
+            .github/workflows/finalize-switch-health.yml \
+            .github/workflows/fix-reproducible-release.yml \
+            .github/workflows/integrate-mdns-stack.yml \
+            .github/workflows/reconcile-mdns-dnssd-v2.yml \
+            .github/workflows/reconcile-mdns-dnssd.yml \
+            .github/workflows/land-dnssd-core.yml \
+            .github/workflows/land-mdns-core.yml \
+            .github/workflows/land-mdns-native.yml
+          git rm --force .github/workflows/cleanup-workflow-fleet.yml
+
+          for workflow in \
+            build-and-test.yml \
+            dnssd-live.yml \
+            mdns-duplex.yml \
+            mdns-live.yml \
+            mdns-responder-live.yml \
+            pin-upstream-resolved.yml \
+            replacement-boot-proof.yml \
+            replacement-full-certification.yml \
+            replacement-readiness-certificate.yml \
+            replacement-security-gates.yml \
+            replacement-security-proof.yml \
+            replacement-upstream-test-75.yml \
+            reproducible-release.yml \
+            upstream-surface-audit.yml \
+            verify-upstream-baseline.yml; do
+              test -s ".github/workflows/$workflow"
+          done
+
+          if find .github/workflows -maxdepth 1 -type f \
+              \( -name 'finalize-*.yml' -o -name 'reconcile-*.yml' \
+                 -o -name 'integrate-*.yml' -o -name 'land-*.yml' \
+                 -o -name 'fix-*.yml' \) | grep -q .; then
+              echo 'obsolete integration workflow remains' >&2
+              exit 1
+          fi
+          git diff --cached --check
+
+      - name: Commit cleanup
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git commit -m 'Remove obsolete integration workflows'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
