@@ -1,0 +1,188 @@
+name: Replacement security gates
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - src/**
+      - ffi/**
+      - nss/**
+      - fuzz/**
+      - build.rs
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/replacement-security-gates.yml
+  workflow_dispatch:
+  schedule:
+    - cron: '43 4 * * 3'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: replacement-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: libFuzzer corpus and smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libFuzzer toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends clang libssl-dev
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+      - name: Run libFuzzer smoke on every target
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s fuzz/Cargo.toml
+          mapfile -t targets < <(cargo +nightly fuzz list)
+          test "${#targets[@]}" -gt 0
+          for target in "${targets[@]}"; do
+            timeout --signal=TERM --kill-after=5s 45s \
+              cargo +nightly fuzz run "$target" -- \
+              -max_total_time=30 -timeout=5 -rss_limit_mb=2048
+          done
+      - name: Upload fuzz failures
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures-${{ github.sha }}
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+
+  asan:
+    name: Address Sanitizer ASan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Address Sanitizer dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            clang gfortran libssl-dev liburing-dev
+      - name: Run Address Sanitizer ASan
+        shell: bash
+        env:
+          ASAN_OPTIONS: abort_on_error=1:detect_leaks=1:strict_string_checks=1:check_initialization_order=1
+        run: |
+          set -euo pipefail
+          make clean
+          make check-native \
+            CC='clang -fsanitize=address -fno-omit-frame-pointer' \
+            CFLAGS='-O1 -g -fPIC -std=c17 -Wall -Wextra -Werror -Wpedantic -fstack-protector-strong -D_FORTIFY_SOURCE=2' \
+            LDLIBS='-lssl -lcrypto -lasan'
+          make -C nss clean
+          make -C nss all test_nss \
+            CC='clang -fsanitize=address -fno-omit-frame-pointer' \
+            CFLAGS='-O1 -g -fPIC -std=c17 -Wall -Wextra -Werror -Wpedantic -fstack-protector-strong -D_FORTIFY_SOURCE=2'
+          bash nss/run-tests.sh
+
+  ubsan:
+    name: Undefined Behavior Sanitizer UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Undefined Behavior Sanitizer dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            clang gfortran libssl-dev liburing-dev
+      - name: Run Undefined Behavior Sanitizer UBSan
+        shell: bash
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          make clean
+          make check-native \
+            CC='clang -fsanitize=undefined -fno-omit-frame-pointer' \
+            CFLAGS='-O1 -g -fPIC -std=c17 -Wall -Wextra -Werror -Wpedantic -fstack-protector-strong -D_FORTIFY_SOURCE=2' \
+            LDLIBS='-lssl -lcrypto -lubsan'
+          make -C nss clean
+          make -C nss all test_nss \
+            CC='clang -fsanitize=undefined -fno-omit-frame-pointer' \
+            CFLAGS='-O1 -g -fPIC -std=c17 -Wall -Wextra -Werror -Wpedantic -fstack-protector-strong -D_FORTIFY_SOURCE=2'
+          bash nss/run-tests.sh
+
+  miri:
+    name: Miri strict provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Miri
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libssl-dev
+          rustup toolchain install nightly --profile minimal --component miri,rust-src
+          cargo +nightly miri setup
+      - name: Run Miri strict provenance
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-disable-isolation
+        run: cargo +nightly miri test --lib miri_
+
+  tsan:
+    name: Thread Sanitizer TSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Thread Sanitizer toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            gfortran libssl-dev liburing-dev
+          rustup toolchain install nightly --profile minimal --component rust-src
+      - name: Run Thread Sanitizer TSan
+        shell: bash
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+          RUSTDOCFLAGS: -Zsanitizer=thread
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: |
+          cargo +nightly test \
+            -Zbuild-std \
+            --target x86_64-unknown-linux-gnu \
+            --lib --all-features --locked
+
+  valgrind:
+    name: Valgrind NSS Varlink and DNS fallback
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Valgrind dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            gfortran libssl-dev liburing-dev valgrind
+      - name: Run Valgrind NSS Varlink and DNS fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C nss clean all test_nss
+          mv nss/test_nss nss/test_nss.real
+          cat > nss/test_nss <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          exec valgrind \
+            --error-exitcode=99 \
+            --leak-check=full \
+            --show-leak-kinds=all \
+            --track-origins=yes \
+            --errors-for-leak-kinds=definite,indirect,possible \
+            "$root/test_nss.real" "$@"
+          EOF
+          chmod 0755 nss/test_nss
+          bash nss/run-tests.sh
