@@ -1,0 +1,451 @@
+name: Integrate live monitor server state
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/integrate-monitor-server-runtime.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/monitor-server-runtime","description":"Live monitor server state in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Export live server telemetry
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >> src/resolver.rs <<'EOF'
+
+          #[derive(Clone, Debug)]
+          pub(crate) struct MonitorServerRuntime {
+              pub(crate) scope: crate::routing::ScopeKind,
+              pub(crate) spec: crate::config::DnsServerSpec,
+              pub(crate) verified_feature_level: String,
+              pub(crate) dnssec: crate::config::ValidationMode,
+              pub(crate) dns_over_tls: crate::config::TlsMode,
+              pub(crate) dnssec_supported: bool,
+              pub(crate) received_udp_fragment_max: u16,
+              pub(crate) failed_udp_attempts: u8,
+              pub(crate) failed_tcp_attempts: u8,
+              pub(crate) packet_truncated: bool,
+              pub(crate) packet_bad_opt: bool,
+              pub(crate) packet_rrsig_missing: bool,
+              pub(crate) packet_invalid: bool,
+              pub(crate) packet_do_off: bool,
+          }
+
+          impl Resolver {
+              pub(crate) fn monitor_server_runtime_snapshot(&self) -> Vec<MonitorServerRuntime> {
+                  let mut keys = self.server_keys_for_scope(
+                      crate::routing::ScopeKind::Global,
+                      &self.config.upstreams,
+                  );
+                  keys.extend(self.server_keys_for_scope(
+                      crate::routing::ScopeKind::Fallback,
+                      &self.config.fallback_upstreams,
+                  ));
+                  for link in self.links() {
+                      keys.extend(self.server_keys_for_scope(
+                          crate::routing::ScopeKind::Link(link.ifindex),
+                          &link.dns_servers,
+                      ));
+                  }
+
+                  let features = self
+                      .server_features
+                      .lock()
+                      .unwrap_or_else(std::sync::PoisonError::into_inner);
+                  let transports = self
+                      .transport_states
+                      .lock()
+                      .unwrap_or_else(std::sync::PoisonError::into_inner);
+                  keys.into_iter()
+                      .map(|key| {
+                          let feature = features.get(&key);
+                          let transport = transports.get(&key);
+                          let dnssec = self.server_dnssec_mode(key);
+                          MonitorServerRuntime {
+                              scope: key.scope_kind(),
+                              spec: self.server_spec_for_key(key),
+                              verified_feature_level: monitor_verified_feature_level(
+                                  feature,
+                                  transport,
+                              )
+                              .to_owned(),
+                              dnssec,
+                              dns_over_tls: self.server_dns_over_tls_mode(key),
+                              dnssec_supported: match dnssec {
+                                  crate::config::ValidationMode::No => false,
+                                  crate::config::ValidationMode::Yes => true,
+                                  crate::config::ValidationMode::AllowDowngrade => feature.map_or(
+                                      true,
+                                      |state| {
+                                          !state.rrsig_missing && !state.do_off && !state.invalid
+                                      },
+                                  ),
+                              },
+                              received_udp_fragment_max: feature
+                                  .map_or(512, |state| state.max_udp_payload),
+                              failed_udp_attempts: transport.map_or(0, |state| state.udp_failures),
+                              failed_tcp_attempts: transport.map_or(0, |state| state.tcp_failures),
+                              packet_truncated: feature.is_some_and(|state| state.truncated),
+                              packet_bad_opt: feature.is_some_and(|state| state.bad_opt),
+                              packet_rrsig_missing: feature
+                                  .is_some_and(|state| state.rrsig_missing),
+                              packet_invalid: feature.is_some_and(|state| state.invalid),
+                              packet_do_off: feature.is_some_and(|state| state.do_off),
+                          }
+                      })
+                      .collect()
+              }
+          }
+
+          fn monitor_verified_feature_level(
+              feature: Option<&crate::edns::FeatureState>,
+              transport: Option<&crate::transport::TransportState>,
+          ) -> &'static str {
+              if transport.is_some_and(|state| {
+                  state.mode == crate::transport::TransportMode::Tcp
+              }) {
+                  return "TCP";
+              }
+              match feature.map(|state| state.level) {
+                  Some(crate::edns::FeatureLevel::Plain) => "UDP",
+                  Some(crate::edns::FeatureLevel::Edns) => "UDP+EDNS0",
+                  Some(crate::edns::FeatureLevel::EdnsDnssec) => "UDP+EDNS0+DO",
+                  None => "n/a",
+              }
+          }
+
+          #[cfg(test)]
+          mod monitor_server_runtime_tests {
+              use super::*;
+
+              #[test]
+              fn server_runtime_snapshot_projects_feature_and_transport_telemetry() {
+                  let resolver = Resolver::new(Config::default());
+                  let address = resolver.config.fallback_upstreams[0];
+                  let key = ServerKey::new(crate::routing::ScopeKind::Fallback, address);
+                  let mut feature = crate::edns::FeatureState::default();
+                  feature.level = crate::edns::FeatureLevel::EdnsDnssec;
+                  feature.max_udp_payload = 1232;
+                  feature.bad_opt = true;
+                  feature.rrsig_missing = true;
+                  resolver
+                      .server_features
+                      .lock()
+                      .unwrap_or_else(std::sync::PoisonError::into_inner)
+                      .insert(key, feature);
+                  let mut transport = crate::transport::TransportState::default();
+                  transport.mode = crate::transport::TransportMode::Tcp;
+                  transport.udp_failures = 3;
+                  transport.tcp_failures = 2;
+                  resolver
+                      .transport_states
+                      .lock()
+                      .unwrap_or_else(std::sync::PoisonError::into_inner)
+                      .insert(key, transport);
+
+                  let runtime = resolver
+                      .monitor_server_runtime_snapshot()
+                      .into_iter()
+                      .find(|server| {
+                          server.scope == crate::routing::ScopeKind::Fallback
+                              && server.spec.address == address
+                      })
+                      .expect("fallback server runtime");
+                  assert_eq!(runtime.verified_feature_level, "TCP");
+                  assert_eq!(runtime.received_udp_fragment_max, 1232);
+                  assert_eq!(runtime.failed_udp_attempts, 3);
+                  assert_eq!(runtime.failed_tcp_attempts, 2);
+                  assert!(runtime.packet_bad_opt);
+                  assert!(runtime.packet_rrsig_missing);
+                  assert!(!runtime.dnssec_supported);
+              }
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/varlink_monitor.rs")
+          text = path.read_text(encoding="utf-8")
+
+          def replace_function(source: str, signature: str, replacement: str) -> str:
+              start = source.index(signature)
+              brace = source.index("{", start)
+              depth = 0
+              in_string = False
+              escaped = False
+              index = brace
+              while index < len(source):
+                  character = source[index]
+                  if in_string:
+                      if escaped:
+                          escaped = False
+                      elif character == "\\":
+                          escaped = True
+                      elif character == '"':
+                          in_string = False
+                  else:
+                      if character == '"':
+                          in_string = True
+                      elif character == "{":
+                          depth += 1
+                      elif character == "}":
+                          depth -= 1
+                          if depth == 0:
+                              return source[:start] + replacement + source[index + 1 :]
+                  index += 1
+              raise SystemExit(f"unterminated function: {signature}")
+
+          text = replace_function(
+              text,
+              "fn monitor_dump_server_state(resolver: &Resolver) -> Value {",
+              '''fn monitor_dump_server_state(resolver: &Resolver) -> Value {
+                  let dump = resolver
+                      .monitor_server_runtime_snapshot()
+                      .iter()
+                      .map(|server| {
+                          let (server_type, default_ifindex, default_ifname) = match server.scope {
+                              crate::routing::ScopeKind::Global => ("system", None, None),
+                              crate::routing::ScopeKind::Fallback => ("fallback", None, None),
+                              crate::routing::ScopeKind::Link(ifindex) => {
+                                  let ifname = resolver
+                                      .link(ifindex)
+                                      .and_then(|link| link.kernel.map(|kernel| kernel.ifname));
+                                  ("link", Some(ifindex), ifname)
+                              }
+                          };
+                          monitor_server_state(
+                              server,
+                              server_type,
+                              default_ifindex,
+                              default_ifname.as_deref(),
+                          )
+                      })
+                      .collect();
+                  success(Value::object([("dump", Value::Array(dump))]))
+              }''',
+          )
+
+          text = replace_function(
+              text,
+              "fn monitor_server_state(",
+              '''fn monitor_server_state(
+                  server: &crate::resolver::MonitorServerRuntime,
+                  server_type: &str,
+                  default_ifindex: Option<i32>,
+                  default_ifname: Option<&str>,
+              ) -> Value {
+                  let interface = server.spec.interface.as_deref().or(default_ifname);
+                  let ifindex = server
+                      .spec
+                      .interface
+                      .as_deref()
+                      .and_then(|name| crate::interface::resolve_ifindex(name).ok())
+                      .or(default_ifindex);
+                  Value::object([
+                      ("Server", Value::String(monitor_server_name(&server.spec))),
+                      ("Type", Value::String(server_type.to_owned())),
+                      (
+                          "Interface",
+                          interface.map_or(Value::Null, |name| Value::String(name.to_owned())),
+                      ),
+                      (
+                          "InterfaceIndex",
+                          ifindex.map_or(Value::Null, |value| {
+                              Value::Number(i128::from(value))
+                          }),
+                      ),
+                      (
+                          "VerifiedFeatureLevel",
+                          Value::String(server.verified_feature_level.clone()),
+                      ),
+                      (
+                          "PossibleFeatureLevel",
+                          Value::String(
+                              monitor_possible_feature_level(
+                                  server.dnssec,
+                                  server.dns_over_tls,
+                              )
+                              .to_owned(),
+                          ),
+                      ),
+                      (
+                          "DNSSECMode",
+                          Value::String(validation_mode_name(server.dnssec).to_owned()),
+                      ),
+                      ("DNSSECSupported", Value::Bool(server.dnssec_supported)),
+                      (
+                          "ReceivedUDPFragmentMax",
+                          Value::Number(i128::from(server.received_udp_fragment_max)),
+                      ),
+                      (
+                          "FailedUDPAttempts",
+                          Value::Number(i128::from(server.failed_udp_attempts)),
+                      ),
+                      (
+                          "FailedTCPAttempts",
+                          Value::Number(i128::from(server.failed_tcp_attempts)),
+                      ),
+                      ("PacketTruncated", Value::Bool(server.packet_truncated)),
+                      ("PacketBadOpt", Value::Bool(server.packet_bad_opt)),
+                      (
+                          "PacketRRSIGMissing",
+                          Value::Bool(server.packet_rrsig_missing),
+                      ),
+                      ("PacketInvalid", Value::Bool(server.packet_invalid)),
+                      ("PacketDoOff", Value::Bool(server.packet_do_off)),
+                  ])
+              }''',
+          )
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          cat > tests/pinned_monitor_server_runtime.rs <<'EOF'
+          // SPDX-License-Identifier: LGPL-2.1-or-later
+          const RESOLVER: &str = include_str!("../src/resolver.rs");
+          const MONITOR: &str = include_str!("../src/varlink_monitor.rs");
+
+          #[test]
+          fn monitor_server_state_remains_backed_by_runtime_telemetry() {
+              for symbol in [
+                  "MonitorServerRuntime",
+                  "server_features",
+                  "transport_states",
+                  "max_udp_payload",
+                  "udp_failures",
+                  "tcp_failures",
+                  "packet_rrsig_missing",
+                  "monitor_server_runtime_snapshot",
+                  "VerifiedFeatureLevel",
+                  "ReceivedUDPFragmentMax",
+              ] {
+                  assert!(
+                      RESOLVER.contains(symbol) || MONITOR.contains(symbol),
+                      "missing runtime server-state symbol {symbol}"
+                  );
+              }
+          }
+          EOF
+
+          rm -f .github/workflows/integrate-monitor-server-runtime.yml
+          cargo fmt --all
+          git diff --check
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json
+
+      - name: Commit verified server-state tranche
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Expose live DNS server state through Resolve monitor'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Live monitor server state passed' || 'Live monitor server state failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/monitor-server-runtime","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
