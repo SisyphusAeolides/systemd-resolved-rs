@@ -38,10 +38,7 @@ pub(super) fn openpgp(socket: &Path, inputs: &[String]) -> Result<(), Box<dyn Er
             let owner = openpgp_owner(email)?;
             let records = resolve_records(socket, &owner, TYPE_OPENPGPKEY)?;
             for record in records {
-                println!(
-                    "{owner} IN OPENPGPKEY {}",
-                    encode_base64(&record.rdata)
-                );
+                println!("{owner} IN OPENPGPKEY {}", encode_base64(&record.rdata));
             }
             Ok::<(), Box<dyn Error>>(())
         })();
@@ -121,7 +118,9 @@ fn resolve_records(
             .ok_or_else(|| invalid_data("ResolveRecord reply has no raw record"))?;
         let record = parse_canonical_record(&decode_base64(raw)?)?;
         if record.rr_type != rr_type || record.class != CLASS_IN {
-            return Err(invalid_data("ResolveRecord reply changed the requested type or class").into());
+            return Err(
+                invalid_data("ResolveRecord reply changed the requested type or class").into(),
+            );
         }
         records.push(record);
     }
@@ -181,7 +180,10 @@ fn canonical_local_part(input: &str) -> Result<String, Box<dyn Error>> {
         || input.chars().any(|character| {
             character.is_control()
                 || character.is_whitespace()
-                || matches!(character, '(' | ')' | '<' | '>' | '[' | ']' | ':' | ';' | ',' | '"' | '\\')
+                || matches!(
+                    character,
+                    '(' | ')' | '<' | '>' | '[' | ']' | ':' | ';' | ',' | '"' | '\\'
+                )
         })
     {
         return Err("invalid unquoted email local-part".into());
@@ -275,7 +277,7 @@ fn parse_canonical_record(input: &[u8]) -> Result<CanonicalRecord, io::Error> {
             *input
                 .get(offset)
                 .ok_or_else(|| invalid_data("record owner is truncated"))?,
-        );
+         );
         offset = offset
             .checked_add(1)
             .ok_or_else(|| invalid_data("record owner offset overflow"))?;
@@ -323,7 +325,7 @@ fn read_u16(input: &[u8], offset: usize) -> Result<u16, io::Error> {
 fn read_u32(input: &[u8], offset: usize) -> Result<u32, io::Error> {
     let bytes: [u8; 4] = input
         .get(offset..offset + 4)
-        .ok_or_else(|| invalid_data("record is truncated"))?
+        .ok_or_else(|| invalid_data("record is truncated")?
         .try_into()
         .map_err(|_| invalid_data("record is truncated"))?;
     Ok(u32::from_be_bytes(bytes))
@@ -387,8 +389,7 @@ fn base64_value(byte: u8) -> Result<u8, io::Error> {
 }
 
 fn encode_base64(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let first = chunk[0];
@@ -559,10 +560,7 @@ fn sha256(input: &[u8]) -> [u8; 32] {
             b = a;
             a = first.wrapping_add(second);
         }
-        for (value, addition) in state
-            .iter_mut()
-            .zip([a, b, c, d, e, f, g, h].into_iter())
-        {
+        for (value, addition) in state.iter_mut().zip([a, b, c, d, e, f, g, h].into_iter()) {
             *value = value.wrapping_add(addition);
         }
     }
