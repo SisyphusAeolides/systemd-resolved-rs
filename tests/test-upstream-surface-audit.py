@@ -99,6 +99,21 @@ def main() -> None:
         assert module.configuration_keys(systemd) == ["DNS"]
         assert module.resolvectl_verbs(systemd) == ["query", "statistics"]
 
+    local = module.source_text(ROOT)
+    required_errors = {
+        "DNSSECValidationFailed",
+        "InconsistentServiceRecords",
+        "NoTrustAnchor",
+        "QueryAborted",
+        "QueryRefused",
+        "ResourceRecordTypeObsolete",
+        "StubLoop",
+    }
+    missing_errors = sorted(
+        name for name in required_errors if not module.mentioned(local, name)
+    )
+    assert not missing_errors, f"missing pinned Resolve Varlink errors: {missing_errors}"
+
     print("upstream resolver surface parser tests passed")
 
 
