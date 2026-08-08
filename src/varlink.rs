@@ -27,7 +27,14 @@ const INTERFACE_DESCRIPTION: &str = "interface io.systemd.Resolve\n\
 method ResolveHostname(ifindex: ?int, name: string, family: ?int, flags: ?int) -> (addresses: [](ifindex: ?int, family: int, address: []int), name: string, flags: int)\n\
 method ResolveAddress(ifindex: ?int, family: int, address: []int, flags: ?int) -> (names: [](ifindex: ?int, name: string), flags: int)\n\
 method ResolveService(name: ?string, type: ?string, domain: string, ifindex: ?int, family: ?int, flags: ?int) -> (services: [](priority: int, weight: int, port: int, hostname: string, canonicalName: ?string, addresses: ?[](ifindex: ?int, family: int, address: []int)), txt: ?[]string, canonical: (name: ?string, type: string, domain: string), flags: int)\n\
-method ResolveRecord(ifindex: ?int, name: string, class: ?int, type: int, flags: ?int) -> (rrs: [](ifindex: ?int, rr: ?object, raw: string), flags: int)";
+method ResolveRecord(ifindex: ?int, name: string, class: ?int, type: int, flags: ?int) -> (rrs: [](ifindex: ?int, rr: ?object, raw: string), flags: int)\n\
+error QueryAborted\n\
+error QueryRefused\n\
+error DNSSECValidationFailed(result: string, extendedDNSErrorCode: ?int, extendedDNSErrorMessage: ?string)\n\
+error NoTrustAnchor\n\
+error StubLoop\n\
+error ResourceRecordTypeObsolete\n\
+error InconsistentServiceRecords";
 
 #[derive(Debug)]
 pub struct VarlinkServer {
@@ -895,6 +902,36 @@ fn optional_i32(parameters: &Value, key: &str, default: i32) -> Result<i32, Valu
 }
 
 fn resolver_error(error_value: &ResolveError) -> Value {
+    if let ResolveError::DnssecValidationFailed {
+        result,
+        extended_dns_error_code,
+        extended_dns_error_message,
+    } = error_value
+    {
+        return Value::object([
+            (
+                "error",
+                Value::String("io.systemd.Resolve.DNSSECValidationFailed".to_owned()),
+            ),
+            (
+                "parameters",
+                Value::object([
+                    ("result", Value::String(result.clone())),
+                    (
+                        "extendedDNSErrorCode",
+                        extended_dns_error_code
+                            .map_or(Value::Null, |code| Value::Number(i128::from(code))),
+                    ),
+                    (
+                        "extendedDNSErrorMessage",
+                        extended_dns_error_message
+                            .as_ref()
+                            .map_or(Value::Null, |message| Value::String(message.clone())),
+                    ),
+                ]),
+            ),
+        ]);
+    }
     if let ResolveError::DnsError { rcode, query } = error_value {
         return Value::object([
             (
@@ -1202,6 +1239,83 @@ mod tests {
     #[test]
     fn service_question_rejects_name_without_type() {
         assert!(service_question(Some("Printer"), None, "example.test").is_none());
+    }
+
+    #[test]
+    fn pinned_error_identifiers_and_dnssec_parameters_are_exact() {
+        let errors = [
+            ResolveError::QueryAborted,
+            ResolveError::QueryRefused,
+            ResolveError::NoTrustAnchor,
+            ResolveError::StubLoop,
+            ResolveError::ResourceRecordTypeObsolete,
+            ResolveError::InconsistentServiceRecords,
+        ];
+        let identifiers: Vec<_> = errors.iter().map(ResolveError::varlink_id).collect();
+        assert_eq!(
+            identifiers,
+            vec![
+                "io.systemd.Resolve.QueryAborted",
+                "io.systemd.Resolve.QueryRefused",
+                "io.systemd.Resolve.NoTrustAnchor",
+                "io.systemd.Resolve.StubLoop",
+                "io.systemd.Resolve.ResourceRecordTypeObsolete",
+                "io.systemd.Resolve.InconsistentServiceRecords",
+            ]
+        );
+
+        let dnssec = ResolveError::DnssecValidationFailed {
+            result: "bogus".to_owned(),
+            extended_dns_error_code: Some(6),
+            extended_dns_error_message: Some("signature expired".to_owned()),
+        };
+        let reply = resolver_error(&dnssec);
+        assert_eq!(
+            reply.get("error").and_then(Value::as_str),
+            Some("io.systemd.Resolve.DNSSECValidationFailed")
+        );
+        let parameters = reply.get("parameters").expect("DNSSEC error parameters");
+        assert_eq!(
+            parameters.get("result").and_then(Value::as_str),
+            Some("bogus")
+        );
+        assert_eq!(
+            parameters
+                .get("extendedDNSErrorCode")
+                .and_then(Value::as_u64),
+            Some(6)
+        );
+        assert_eq!(
+            parameters
+                .get("extendedDNSErrorMessage")
+                .and_then(Value::as_str),
+            Some("signature expired")
+        );
+    }
+
+    #[test]
+    fn interface_description_lists_pinned_error_identifiers() {
+        let resolver = Resolver::new(Config::default());
+        let reply = dispatch(
+            r#"{"method":"org.varlink.service.GetInterfaceDescription","parameters":{"interface":"io.systemd.Resolve"}}"#,
+            &resolver,
+        );
+        let description = reply
+            .get("parameters")
+            .and_then(|parameters| parameters.get("description"))
+            .and_then(Value::as_str)
+            .expect("interface description");
+        for symbol in [
+            "DNSSECValidationFailed",
+            "InconsistentServiceRecords",
+            "NoTrustAnchor",
+            "QueryAborted",
+            "QueryRefused",
+            "ResourceRecordTypeObsolete",
+            "StubLoop",
+        ] {
+            assert!(description.contains(symbol), "missing {symbol}");
+        }
     }
 
     #[test]

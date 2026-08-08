@@ -373,9 +373,17 @@ fn map_resolve_error(error: ResolveError) -> DbusError {
             DbusError::CNameLoop(error.to_string())
         }
         ResolveError::DnsError { rcode, .. } => dns_rcode_error(rcode, error.to_string()),
-        ResolveError::Wire(_) | ResolveError::Protocol(_) => {
-            DbusError::InvalidReply(error.to_string())
+        ResolveError::QueryRefused => DbusError::DnsRefused(error.to_string()),
+        ResolveError::ResourceRecordTypeObsolete => {
+            DbusError::ResourceRecordTypeUnsupported(error.to_string())
         }
+        ResolveError::QueryAborted => DbusError::NetworkDown(error.to_string()),
+        ResolveError::DnssecValidationFailed { .. }
+        | ResolveError::NoTrustAnchor
+        | ResolveError::InconsistentServiceRecords
+        | ResolveError::StubLoop
+        | ResolveError::Wire(_)
+        | ResolveError::Protocol(_) => DbusError::InvalidReply(error.to_string()),
     }
 }
 

@@ -73,6 +73,17 @@ pub enum ResolveError {
     NoNameServers,
     NoSuchResourceRecord,
     DnsError { rcode: u16, query: String },
+    DnssecValidationFailed {
+        result: String,
+        extended_dns_error_code: Option<u16>,
+        extended_dns_error_message: Option<String>,
+    },
+    NoTrustAnchor,
+    QueryAborted,
+    QueryRefused,
+    ResourceRecordTypeObsolete,
+    InconsistentServiceRecords,
+    StubLoop,
     UnsupportedFamily(i32),
     Protocol(&'static str),
 }
@@ -83,6 +94,13 @@ impl ResolveError {
             Self::NoNameServers => "io.systemd.Resolve.NoNameServers",
             Self::NoSuchResourceRecord => "io.systemd.Resolve.NoSuchResourceRecord",
             Self::DnsError { .. } => "io.systemd.Resolve.DNSError",
+            Self::DnssecValidationFailed { .. } => "io.systemd.Resolve.DNSSECValidationFailed",
+            Self::NoTrustAnchor => "io.systemd.Resolve.NoTrustAnchor",
+            Self::QueryAborted => "io.systemd.Resolve.QueryAborted",
+            Self::QueryRefused => "io.systemd.Resolve.QueryRefused",
+            Self::ResourceRecordTypeObsolete => "io.systemd.Resolve.ResourceRecordTypeObsolete",
+            Self::InconsistentServiceRecords => "io.systemd.Resolve.InconsistentServiceRecords",
+            Self::StubLoop => "io.systemd.Resolve.StubLoop",
             Self::UnsupportedFamily(_) => "io.systemd.Resolve.BadAddressSize",
             Self::Link(LinkError::NoSuchLink(_)) => "io.systemd.Resolve.NoSuchLink",
             Self::Link(_) => "io.systemd.Resolve.InvalidParameter",
@@ -111,6 +129,19 @@ impl fmt::Display for ResolveError {
             Self::DnsError { rcode, query } => {
                 write!(formatter, "DNS response code {rcode} for {query}")
             }
+            Self::DnssecValidationFailed { result, .. } => {
+                write!(formatter, "DNSSEC validation failed: {result}")
+            }
+            Self::NoTrustAnchor => formatter.write_str("no DNSSEC trust anchor"),
+            Self::QueryAborted => formatter.write_str("DNS query aborted"),
+            Self::QueryRefused => formatter.write_str("DNS query refused"),
+            Self::ResourceRecordTypeObsolete => {
+                formatter.write_str("DNS resource record type is obsolete")
+            }
+            Self::InconsistentServiceRecords => {
+                formatter.write_str("DNS service records are inconsistent")
+            }
+            Self::StubLoop => formatter.write_str("DNS stub loop detected"),
             Self::UnsupportedFamily(family) => {
                 write!(formatter, "unsupported address family {family}")
             }
