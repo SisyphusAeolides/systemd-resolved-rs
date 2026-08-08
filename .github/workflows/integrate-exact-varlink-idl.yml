@@ -1,0 +1,570 @@
+name: Integrate exact pinned Varlink IDL generation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/integrate-exact-varlink-idl.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/exact-varlink-idl","description":"Exact pinned Varlink IDL generation in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install build dependencies and clone pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          commit=$(cat compat/upstream-systemd/commit)
+          git clone --filter=blob:none --no-checkout https://github.com/systemd/systemd.git /tmp/systemd
+          git -C /tmp/systemd fetch --depth 1 origin "$commit"
+          git -C /tmp/systemd checkout --detach "$commit"
+
+      - name: Generate canonical pinned interface descriptions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > scripts/extract-upstream-varlink-idl.py <<'PY'
+          #!/usr/bin/env python3
+          """Generate canonical Varlink IDL from systemd's sd-varlink C declarations."""
+
+          from __future__ import annotations
+
+          import argparse
+          from dataclasses import dataclass, field
+          from pathlib import Path
+          import re
+          from typing import Iterable
+
+
+          @dataclass
+          class Field:
+              name: str
+              type_name: str
+              nullable: bool = False
+              array: bool = False
+
+              def idl_type(self) -> str:
+                  prefix = "?" if self.nullable else ""
+                  if self.array:
+                      prefix += "[]"
+                  return prefix + self.type_name
+
+
+          @dataclass
+          class Definition:
+              kind: str
+              name: str
+              fields: list[Field] = field(default_factory=list)
+              values: list[str] = field(default_factory=list)
+              source_order: int = 0
+
+
+          @dataclass
+          class MacroCall:
+              name: str
+              raw: str
+              arguments: list[str]
+              offset: int
+
+
+          PRIMITIVES = {
+              "SD_VARLINK_BOOL": "bool",
+              "SD_VARLINK_INT": "int",
+              "SD_VARLINK_FLOAT": "float",
+              "SD_VARLINK_STRING": "string",
+              "SD_VARLINK_OBJECT": "object",
+          }
+
+
+          def strip_comments(text: str) -> str:
+              text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+              return re.sub(r"//[^\n]*", "", text)
+
+
+          def matching_paren(text: str, opening: int) -> int:
+              depth = 0
+              in_string = False
+              escaped = False
+              for index in range(opening, len(text)):
+                  character = text[index]
+                  if in_string:
+                      if escaped:
+                          escaped = False
+                      elif character == "\\":
+                          escaped = True
+                      elif character == '"':
+                          in_string = False
+                      continue
+                  if character == '"':
+                      in_string = True
+                  elif character == "(":
+                      depth += 1
+                  elif character == ")":
+                      depth -= 1
+                      if depth == 0:
+                          return index
+              raise ValueError("unterminated macro call")
+
+
+          def split_arguments(body: str) -> list[str]:
+              output: list[str] = []
+              start = 0
+              depths = {"(": 0, "[": 0, "{": 0}
+              pairs = {")": "(", "]": "[", "}": "{"}
+              in_string = False
+              escaped = False
+              for index, character in enumerate(body):
+                  if in_string:
+                      if escaped:
+                          escaped = False
+                      elif character == "\\":
+                          escaped = True
+                      elif character == '"':
+                          in_string = False
+                      continue
+                  if character == '"':
+                      in_string = True
+                  elif character in depths:
+                      depths[character] += 1
+                  elif character in pairs:
+                      depths[pairs[character]] -= 1
+                  elif character == "," and not any(depths.values()):
+                      output.append(body[start:index].strip())
+                      start = index + 1
+              tail = body[start:].strip()
+              if tail:
+                  output.append(tail)
+              return output
+
+
+          def macro_calls(text: str) -> list[MacroCall]:
+              calls = []
+              pattern = re.compile(r"\b(SD_VARLINK_DEFINE_[A-Z_]+)\s*\(")
+              for match in pattern.finditer(text):
+                  opening = text.index("(", match.start())
+                  closing = matching_paren(text, opening)
+                  raw = text[match.start():closing + 1]
+                  calls.append(
+                      MacroCall(
+                          name=match.group(1),
+                          raw=raw,
+                          arguments=split_arguments(text[opening + 1:closing]),
+                          offset=match.start(),
+                      )
+                  )
+              return calls
+
+
+          def identifier(value: str) -> str:
+              match = re.search(r"[A-Za-z_][A-Za-z0-9_.]*", value)
+              if match is None:
+                  raise ValueError(f"missing identifier in {value!r}")
+              return match.group(0)
+
+
+          def string_literal(value: str) -> str | None:
+              match = re.search(r'"([^"\\]*(?:\\.[^"\\]*)*)"', value)
+              if match is None:
+                  return None
+              return bytes(match.group(1), "utf-8").decode("unicode_escape")
+
+
+          def field_from_call(call: MacroCall) -> Field | None:
+              if len(call.arguments) < 3:
+                  return None
+              direction_names = (
+                  "FIELD",
+                  "FIELD_BY_TYPE",
+                  "INPUT",
+                  "INPUT_BY_TYPE",
+                  "OUTPUT",
+                  "OUTPUT_BY_TYPE",
+              )
+              suffix = call.name.removeprefix("SD_VARLINK_DEFINE_")
+              if suffix not in direction_names:
+                  return None
+              name = identifier(call.arguments[0])
+              raw_type = identifier(call.arguments[1])
+              type_name = PRIMITIVES.get(raw_type, raw_type)
+              flags = "|".join(call.arguments[2:])
+              return Field(
+                  name=name,
+                  type_name=type_name,
+                  nullable="SD_VARLINK_NULLABLE" in flags,
+                  array="SD_VARLINK_ARRAY" in flags,
+              )
+
+
+          def nested_calls(raw: str) -> Iterable[MacroCall]:
+              opening = raw.index("(")
+              closing = matching_paren(raw, opening)
+              body = raw[opening + 1:closing]
+              return macro_calls(body)
+
+
+          def parse_definitions(text: str) -> list[Definition]:
+              definitions: list[Definition] = []
+              for order, call in enumerate(macro_calls(strip_comments(text))):
+                  suffix = call.name.removeprefix("SD_VARLINK_DEFINE_")
+                  if suffix in {"ENUM_VALUE", "FIELD", "FIELD_BY_TYPE", "INPUT", "INPUT_BY_TYPE", "OUTPUT", "OUTPUT_BY_TYPE"}:
+                      continue
+                  if suffix.startswith("ENUM_TYPE"):
+                      name = identifier(call.arguments[0])
+                      values = []
+                      for nested in nested_calls(call.raw):
+                          if nested.name == "SD_VARLINK_DEFINE_ENUM_VALUE" and nested.arguments:
+                              values.append(identifier(nested.arguments[0]))
+                      definitions.append(Definition("enum", name, values=values, source_order=order))
+                  elif suffix.startswith("STRUCT_TYPE"):
+                      name = identifier(call.arguments[0])
+                      fields = [
+                          field
+                          for nested in nested_calls(call.raw)
+                          if (field := field_from_call(nested)) is not None
+                          and nested.name.removeprefix("SD_VARLINK_DEFINE_").startswith("FIELD")
+                      ]
+                      definitions.append(Definition("struct", name, fields=fields, source_order=order))
+                  elif suffix.startswith("METHOD"):
+                      name = identifier(call.arguments[0])
+                      fields = [
+                          field
+                          for nested in nested_calls(call.raw)
+                          if (field := field_from_call(nested)) is not None
+                      ]
+                      definitions.append(Definition("method", name, fields=fields, source_order=order))
+                  elif suffix.startswith("ERROR"):
+                      name = identifier(call.arguments[0]).split(".")[-1]
+                      fields = [
+                          field
+                          for nested in nested_calls(call.raw)
+                          if (field := field_from_call(nested)) is not None
+                      ]
+                      definitions.append(Definition("error", name, fields=fields, source_order=order))
+              return definitions
+
+
+          def interface_name_from_path(path: Path) -> str | None:
+              name = path.name
+              match = re.fullmatch(r"varlink-(io\.systemd\.Resolve(?:\.[A-Za-z0-9_]+)?)\.c", name)
+              return match.group(1) if match else None
+
+
+          def referenced_names(definition: Definition) -> set[str]:
+              return {
+                  field.type_name
+                  for field in definition.fields
+                  if field.type_name not in {"bool", "int", "float", "string", "object"}
+              }
+
+
+          def render(interface: str, definitions: list[Definition]) -> str:
+              by_name = {definition.name: definition for definition in definitions}
+              needed = set()
+              for definition in definitions:
+                  if definition.kind in {"method", "error"}:
+                      needed.add(definition.name)
+                      stack = list(referenced_names(definition))
+                      while stack:
+                          name = stack.pop()
+                          if name in needed or name not in by_name:
+                              continue
+                          needed.add(name)
+                          stack.extend(referenced_names(by_name[name]))
+              if not any(definition.kind == "method" for definition in definitions):
+                  needed.update(by_name)
+              selected = [
+                  definition
+                  for definition in definitions
+                  if definition.name in needed
+                  or definition.kind in {"method", "error"}
+              ]
+              selected.sort(key=lambda definition: definition.source_order)
+              lines = [f"interface {interface}"]
+              for definition in selected:
+                  if definition.kind == "enum":
+                      lines.append(f"type {definition.name} ({', '.join(definition.values)})")
+                  elif definition.kind == "struct":
+                      fields = ", ".join(
+                          f"{field.name}: {field.idl_type()}" for field in definition.fields
+                      )
+                      lines.append(f"type {definition.name} ({fields})")
+                  elif definition.kind == "method":
+                      inputs = [field for field in definition.fields if "INPUT" in field_origin(definition.name, field.name, definitions)]
+                      outputs = [field for field in definition.fields if field not in inputs]
+                      if not inputs and not outputs:
+                          inputs = []
+                      input_text = ", ".join(
+                          f"{field.name}: {field.idl_type()}" for field in inputs
+                      )
+                      output_text = ", ".join(
+                          f"{field.name}: {field.idl_type()}" for field in outputs
+                      )
+                      line = f"method {definition.name}({input_text})"
+                      if outputs:
+                          line += f" -> ({output_text})"
+                      lines.append(line)
+                  elif definition.kind == "error":
+                      fields = ", ".join(
+                          f"{field.name}: {field.idl_type()}" for field in definition.fields
+                      )
+                      lines.append(
+                          f"error {definition.name}" + (f"({fields})" if fields else "")
+                      )
+              return "\n".join(lines) + "\n"
+
+
+          _FIELD_DIRECTIONS: dict[tuple[str, str], str] = {}
+
+
+          def field_origin(
+              definition_name: str,
+              field_name: str,
+              definitions: list[Definition],
+          ) -> str:
+              return _FIELD_DIRECTIONS.get((definition_name, field_name), "OUTPUT")
+
+
+          def parse_with_directions(text: str) -> list[Definition]:
+              cleaned = strip_comments(text)
+              definitions = parse_definitions(cleaned)
+              for call in macro_calls(cleaned):
+                  suffix = call.name.removeprefix("SD_VARLINK_DEFINE_")
+                  if not suffix.startswith("METHOD") or not call.arguments:
+                      continue
+                  method = identifier(call.arguments[0])
+                  for nested in nested_calls(call.raw):
+                      nested_suffix = nested.name.removeprefix("SD_VARLINK_DEFINE_")
+                      field = field_from_call(nested)
+                      if field is not None:
+                          _FIELD_DIRECTIONS[(method, field.name)] = (
+                              "INPUT" if nested_suffix.startswith("INPUT") else "OUTPUT"
+                          )
+              return definitions
+
+
+          def main() -> int:
+              parser = argparse.ArgumentParser()
+              parser.add_argument("systemd_tree", type=Path)
+              parser.add_argument("output", type=Path)
+              options = parser.parse_args()
+              shared = options.systemd_tree / "src" / "shared"
+              sources = sorted(shared.glob("varlink-io.systemd.Resolve*.c"))
+              if not sources:
+                  raise SystemExit("pinned Resolve Varlink sources are missing")
+              options.output.mkdir(parents=True, exist_ok=True)
+              generated = []
+              for source in sources:
+                  interface = interface_name_from_path(source)
+                  if interface is None:
+                      continue
+                  definitions = parse_with_directions(
+                      source.read_text(encoding="utf-8", errors="replace")
+                  )
+                  if not any(definition.kind == "method" for definition in definitions):
+                      continue
+                  destination = options.output / f"{interface}.varlink"
+                  destination.write_text(render(interface, definitions), encoding="utf-8")
+                  generated.append(interface)
+              required = {"io.systemd.Resolve", "io.systemd.Resolve.Monitor"}
+              if not required.issubset(generated):
+                  raise SystemExit(f"missing generated interfaces: {sorted(required - set(generated))}")
+              return 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY
+          chmod +x scripts/extract-upstream-varlink-idl.py
+          rm -rf compat/varlink
+          python3 scripts/extract-upstream-varlink-idl.py /tmp/systemd compat/varlink
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          replacements = [
+              (
+                  Path("src/varlink.rs"),
+                  "INTERFACE_DESCRIPTION",
+                  '../compat/varlink/io.systemd.Resolve.varlink',
+              ),
+              (
+                  Path("src/varlink_monitor.rs"),
+                  "MONITOR_INTERFACE_DESCRIPTION",
+                  '../compat/varlink/io.systemd.Resolve.Monitor.varlink',
+              ),
+          ]
+          for path, name, include in replacements:
+              text = path.read_text(encoding="utf-8")
+              pattern = re.compile(
+                  rf"const\s+{name}:\s*&str\s*=\s*.*?;\n",
+                  re.S,
+              )
+              replacement = f'const {name}: &str = include_str!("{include}");\n'
+              text, count = pattern.subn(replacement, text, count=1)
+              if count != 1:
+                  raise SystemExit(f"interface description constant mismatch: {path}:{name}")
+              path.write_text(text, encoding="utf-8")
+          PY
+
+          cat > tests/pinned_varlink_idl.rs <<'EOF'
+          // SPDX-License-Identifier: LGPL-2.1-or-later
+          const RESOLVE_IDL: &str =
+              include_str!("../compat/varlink/io.systemd.Resolve.varlink");
+          const MONITOR_IDL: &str =
+              include_str!("../compat/varlink/io.systemd.Resolve.Monitor.varlink");
+          const RESOLVE_SOURCE: &str = include_str!("../src/varlink.rs");
+          const MONITOR_SOURCE: &str = include_str!("../src/varlink_monitor.rs");
+
+          #[test]
+          fn runtime_descriptions_are_generated_from_the_pinned_idl() {
+              assert!(RESOLVE_SOURCE.contains(
+                  "include_str!(\"../compat/varlink/io.systemd.Resolve.varlink\")"
+              ));
+              assert!(MONITOR_SOURCE.contains(
+                  "include_str!(\"../compat/varlink/io.systemd.Resolve.Monitor.varlink\")"
+              ));
+              for symbol in [
+                  "method ResolveHostname",
+                  "method ResolveAddress",
+                  "method ResolveService",
+                  "method ResolveRecord",
+                  "method DumpDNSConfiguration",
+                  "error DNSSECValidationFailed",
+              ] {
+                  assert!(RESOLVE_IDL.contains(symbol), "missing Resolve IDL symbol {symbol}");
+              }
+              for symbol in [
+                  "method DumpCache",
+                  "method DumpServerState",
+                  "method DumpStatistics",
+                  "method SubscribeDNSConfiguration",
+                  "method SubscribeQueryResults",
+              ] {
+                  assert!(MONITOR_IDL.contains(symbol), "missing Monitor IDL symbol {symbol}");
+              }
+          }
+          EOF
+
+          rm -f .github/workflows/integrate-exact-varlink-idl.yml
+          cargo fmt --all
+          git diff --check
+
+      - name: Verify generated IDL is reproducible
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/generated-varlink
+          python3 scripts/extract-upstream-varlink-idl.py /tmp/systemd /tmp/generated-varlink
+          diff -ru compat/varlink /tmp/generated-varlink
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts and named audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json --fail-on-missing
+
+      - name: Commit exact pinned IDL
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Generate Resolve Varlink IDL from the pinned source'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Exact pinned Varlink IDL generation passed' || 'Exact pinned Varlink IDL generation failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/exact-varlink-idl","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
