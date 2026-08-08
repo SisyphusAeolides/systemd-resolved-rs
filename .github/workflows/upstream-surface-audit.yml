@@ -8,20 +8,62 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   audit:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      - name: Publish pending inventory status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"upstream-surface-audit/inventory","description":"Pinned resolver inventory in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
       - name: Check out source
         uses: actions/checkout@v4
+
       - name: Audit pinned resolver surfaces
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/audit-upstream-resolver-surfaces.py \
             --output target/upstream-surface-audit.json
+
+      - name: Summarize inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("target/upstream-surface-audit.json").read_text())
+          counts = report["counts"]
+          print("## Pinned resolver surface inventory")
+          print()
+          for key in (
+              "dbus_members",
+              "varlink_methods",
+              "varlink_errors",
+              "configuration_keys",
+              "resolvectl_verbs",
+              "missing_total",
+          ):
+              print(f"- **{key}:** {counts[key]}")
+          PY
+
       - name: Upload complete audit
         uses: actions/upload-artifact@v4
         with:
@@ -29,3 +71,22 @@ jobs:
           path: target/upstream-surface-audit.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish final inventory status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Pinned resolver inventory generated' || 'Pinned resolver inventory failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"upstream-surface-audit/inventory","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
