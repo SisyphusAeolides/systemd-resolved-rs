@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
 import json
 from pathlib import Path
 import re
@@ -13,7 +12,6 @@ import subprocess
 import sys
 import tempfile
 from typing import Any
-import xml.etree.ElementTree as ET
 
 
 class AuditError(RuntimeError):
@@ -50,41 +48,48 @@ def source_text(root: Path) -> str:
     return "\n".join(parts)
 
 
-def xml_signature(member: ET.Element) -> dict[str, Any]:
-    return {
-        "name": member.attrib.get("name", ""),
-        "kind": member.tag,
-        "type": member.attrib.get("type"),
-        "access": member.attrib.get("access"),
-        "arguments": [
-            {
-                "name": argument.attrib.get("name"),
-                "type": argument.attrib.get("type"),
-                "direction": argument.attrib.get("direction"),
-            }
-            for argument in member.findall("arg")
-        ],
-    }
-
-
 def dbus_interfaces(systemd: Path) -> dict[str, list[dict[str, Any]]]:
-    output: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for path in sorted((systemd / "src" / "resolve").glob("*.xml")):
-        try:
-            root = ET.parse(path).getroot()
-        except ET.ParseError:
-            continue
-        for interface in root.findall(".//interface"):
-            name = interface.attrib.get("name")
-            if not name or "resolve1" not in name:
-                continue
-            for kind in ("method", "property", "signal"):
-                for member in interface.findall(kind):
-                    signature = xml_signature(member)
-                    signature["source"] = path.relative_to(systemd).as_posix()
-                    output[name].append(signature)
-    for values in output.values():
-        values.sort(key=lambda item: (item["kind"], item["name"]))
+    """Extract resolve1 members from the C vtables used by the pinned daemon."""
+
+    sources = {
+        "org.freedesktop.resolve1.Manager": "resolved-bus.c",
+        "org.freedesktop.resolve1.Link": "resolved-link-bus.c",
+        "org.freedesktop.resolve1.DnssdService": "resolved-dnssd-bus.c",
+        "org.freedesktop.resolve1.DnsDelegate": "resolved-dns-delegate-bus.c",
+    }
+    patterns = {
+        "method": re.compile(
+            r"SD_BUS_METHOD(?:_[A-Z_]+)?\(\s*\"([^\"]+)\""
+        ),
+        "property": re.compile(
+            r"SD_BUS_PROPERTY(?:_[A-Z_]+)?\(\s*\"([^\"]+)\""
+        ),
+        "signal": re.compile(
+            r"SD_BUS_SIGNAL(?:_[A-Z_]+)?\(\s*\"([^\"]+)\""
+        ),
+    }
+    output: dict[str, list[dict[str, Any]]] = {}
+    resolve = systemd / "src" / "resolve"
+    for interface, filename in sources.items():
+        path = resolve / filename
+        if not path.is_file():
+            raise AuditError(f"missing pinned D-Bus source: {path}")
+        text = path.read_text(encoding="utf-8", errors="replace")
+        members = []
+        for kind, pattern in patterns.items():
+            for name in sorted(set(pattern.findall(text))):
+                members.append(
+                    {
+                        "name": name,
+                        "kind": kind,
+                        "source": path.relative_to(systemd).as_posix(),
+                    }
+                )
+        members.sort(key=lambda item: (item["kind"], item["name"]))
+        if members:
+            output[interface] = members
+    if not output:
+        raise AuditError("pinned D-Bus inventory is empty")
     return dict(sorted(output.items()))
 
 
@@ -92,22 +97,38 @@ def varlink_surfaces(systemd: Path) -> dict[str, list[str]]:
     methods: set[str] = set()
     errors: set[str] = set()
     enums: set[str] = set()
-    for path in sorted((systemd / "src" / "resolve").glob("varlink-*.c")):
+    paths = sorted((systemd / "src" / "shared").glob("varlink-io.systemd.Resolve*.c"))
+    paths.extend(sorted((systemd / "src" / "resolve").glob("varlink-*.c")))
+    if not paths:
+        raise AuditError("pinned Varlink sources are missing")
+    for path in paths:
         text = path.read_text(encoding="utf-8", errors="replace")
         methods.update(
-            re.findall(r"SD_VARLINK_DEFINE_METHOD\(\s*([A-Za-z0-9_]+)", text)
+            re.findall(
+                r"SD_VARLINK_DEFINE_METHOD(?:_[A-Z_]+)?\(\s*([A-Za-z0-9_]+)",
+                text,
+            )
         )
         errors.update(
-            re.findall(r"SD_VARLINK_DEFINE_ERROR\(\s*([A-Za-z0-9_.]+)", text)
+            re.findall(
+                r"SD_VARLINK_DEFINE_ERROR(?:_[A-Z_]+)?\(\s*([A-Za-z0-9_.]+)",
+                text,
+            )
         )
         enums.update(
-            re.findall(r"SD_VARLINK_DEFINE_ENUM_TYPE\(\s*([A-Za-z0-9_]+)", text)
+            re.findall(
+                r"SD_VARLINK_DEFINE_ENUM_TYPE(?:_[A-Z_]+)?\(\s*([A-Za-z0-9_]+)",
+                text,
+            )
         )
-    return {
+    output = {
         "methods": sorted(methods),
         "errors": sorted(errors),
         "enums": sorted(enums),
     }
+    if not output["methods"]:
+        raise AuditError("pinned Varlink method inventory is empty")
+    return output
 
 
 def configuration_keys(systemd: Path) -> list[str]:
@@ -115,22 +136,20 @@ def configuration_keys(systemd: Path) -> list[str]:
     for path in sorted((systemd / "src" / "resolve").glob("*gperf*")):
         text = path.read_text(encoding="utf-8", errors="replace")
         keys.update(re.findall(r"\bResolve\.([A-Za-z0-9]+)\b", text))
+    if not keys:
+        raise AuditError("pinned resolved.conf inventory is empty")
     return sorted(keys)
 
 
 def resolvectl_verbs(systemd: Path) -> list[str]:
-    verbs: set[str] = set()
-    for name in ("resolvectl.c", "resolvectl.c.in", "resolve-tool.c"):
-        path = systemd / "src" / "resolve" / name
-        if not path.is_file():
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        verbs.update(
-            value
-            for value in re.findall(r'\{\s*"([a-z][a-z0-9-]+)"\s*,', text)
-            if value not in {"help"}
-        )
-    return sorted(verbs)
+    path = systemd / "src" / "resolve" / "resolvectl.c"
+    if not path.is_file():
+        raise AuditError(f"missing pinned resolvectl source: {path}")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    verbs = sorted(set(re.findall(r"\bVERB\(\s*[^,]+,\s*\"([^\"]+)\"", text)))
+    if not verbs:
+        raise AuditError("pinned resolvectl verb inventory is empty")
+    return verbs
 
 
 def mentioned(text: str, name: str) -> bool:
@@ -175,7 +194,10 @@ def audit(root: Path, systemd: Path) -> dict[str, Any]:
         "todo_macro": re.compile(r"\btodo!\s*\("),
         "unimplemented_macro": re.compile(r"\bunimplemented!\s*\("),
         "not_supported_error": re.compile(r"NotSupported|not supported", re.I),
-        "stub_marker": re.compile(r"\bstub\b|implement .* later", re.I),
+        "placeholder_marker": re.compile(
+            r"\b(?:TODO|FIXME|placeholder)\b|implement(?:ed)? .* later|replace with real",
+            re.I,
+        ),
     }
     for path in sorted((root / "src").rglob("*.rs")):
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -192,7 +214,7 @@ def audit(root: Path, systemd: Path) -> dict[str, Any]:
                 )
 
     return {
-        "schema": 1,
+        "schema": 2,
         "upstream_commit": command("git", "rev-parse", "HEAD", cwd=systemd),
         "source_tree": command("git", "rev-parse", "HEAD^{tree}", cwd=root),
         "dbus": dbus,
