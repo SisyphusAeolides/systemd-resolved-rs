@@ -1,4 +1,4 @@
-name: Finalize Varlink DNS configuration parity
+name: Finalize pinned Varlink error identifiers
 
 on:
   push:
@@ -18,7 +18,7 @@ concurrency:
 jobs:
   integrate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 60
     steps:
       - name: Publish pending status
         shell: bash
@@ -27,7 +27,7 @@ jobs:
           STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          payload=$(printf '{"state":"pending","context":"parity/varlink-configuration","description":"Varlink configuration parity in progress","target_url":"%s"}' "$STATUS_URL")
+          payload=$(printf '{"state":"pending","context":"parity/varlink-errors","description":"Pinned Varlink error parity in progress","target_url":"%s"}' "$STATUS_URL")
           curl --fail-with-body --silent --show-error \
             --request POST \
             --header "Accept: application/vnd.github+json" \
@@ -58,593 +58,274 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
 
-      - name: Implement configuration dump and pinned errors
+      - name: Implement pinned error identifiers
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
+          def lines(*values: str) -> str:
+              return "\n".join(values) + "\n"
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one anchor, found {count}")
+              return text.replace(old, new, 1)
+
           support_path = Path("src/resolver_support.rs")
           support = support_path.read_text(encoding="utf-8")
-          old_enum = '''pub enum ResolveError {
-              Io(io::Error),
-              Wire(WireError),
-              Link(LinkError),
-              NoNameServers,
-              NoSuchResourceRecord,
-              DnsError { rcode: u16, query: String },
-              UnsupportedFamily(i32),
-              Protocol(&'static str),
-          }
-          '''
-          new_enum = '''pub enum ResolveError {
-              Io(io::Error),
-              Wire(WireError),
-              Link(LinkError),
-              NoNameServers,
-              NoSuchResourceRecord,
-              DnsError { rcode: u16, query: String },
-              DnssecValidationFailed {
-                  result: String,
-                  extended_dns_error_code: Option<u16>,
-                  extended_dns_error_message: Option<String>,
-              },
-              NoTrustAnchor,
-              QueryAborted,
-              QueryRefused,
-              ResourceRecordTypeObsolete,
-              InconsistentServiceRecords,
-              StubLoop,
-              UnsupportedFamily(i32),
-              Protocol(&'static str),
-          }
-          '''
-          if support.count(old_enum) != 1:
-              raise SystemExit("ResolveError enum anchor mismatch")
-          support = support.replace(old_enum, new_enum, 1)
-          old_ids = '''                Self::DnsError { .. } => "io.systemd.Resolve.DNSError",
-                      Self::UnsupportedFamily(_) => "io.systemd.Resolve.BadAddressSize",
-          '''
-          new_ids = '''                Self::DnsError { .. } => "io.systemd.Resolve.DNSError",
-                      Self::DnssecValidationFailed { .. } => "io.systemd.Resolve.DNSSECValidationFailed",
-                      Self::NoTrustAnchor => "io.systemd.Resolve.NoTrustAnchor",
-                      Self::QueryAborted => "io.systemd.Resolve.QueryAborted",
-                      Self::QueryRefused => "io.systemd.Resolve.QueryRefused",
-                      Self::ResourceRecordTypeObsolete => "io.systemd.Resolve.ResourceRecordTypeObsolete",
-                      Self::InconsistentServiceRecords => "io.systemd.Resolve.InconsistentServiceRecords",
-                      Self::StubLoop => "io.systemd.Resolve.StubLoop",
-                      Self::UnsupportedFamily(_) => "io.systemd.Resolve.BadAddressSize",
-          '''
-          if support.count(old_ids) != 1:
-              raise SystemExit("ResolveError Varlink ID anchor mismatch")
-          support = support.replace(old_ids, new_ids, 1)
-          old_display = '''                Self::DnsError { rcode, query } => {
-                          write!(formatter, "DNS response code {rcode} for {query}")
-                      }
-                      Self::UnsupportedFamily(family) => {
-          '''
-          new_display = '''                Self::DnsError { rcode, query } => {
-                          write!(formatter, "DNS response code {rcode} for {query}")
-                      }
-                      Self::DnssecValidationFailed { result, .. } => {
-                          write!(formatter, "DNSSEC validation failed: {result}")
-                      }
-                      Self::NoTrustAnchor => formatter.write_str("no DNSSEC trust anchor"),
-                      Self::QueryAborted => formatter.write_str("DNS query aborted"),
-                      Self::QueryRefused => formatter.write_str("DNS query refused"),
-                      Self::ResourceRecordTypeObsolete => {
-                          formatter.write_str("DNS resource record type is obsolete")
-                      }
-                      Self::InconsistentServiceRecords => {
-                          formatter.write_str("DNS service records are inconsistent")
-                      }
-                      Self::StubLoop => formatter.write_str("DNS stub loop detected"),
-                      Self::UnsupportedFamily(family) => {
-          '''
-          if support.count(old_display) != 1:
-              raise SystemExit("ResolveError display anchor mismatch")
-          support = support.replace(old_display, new_display, 1)
+          old_enum = lines(
+              "pub enum ResolveError {",
+              "    Io(io::Error),",
+              "    Wire(WireError),",
+              "    Link(LinkError),",
+              "    NoNameServers,",
+              "    NoSuchResourceRecord,",
+              "    DnsError { rcode: u16, query: String },",
+              "    UnsupportedFamily(i32),",
+              "    Protocol(&'static str),",
+              "}",
+          )
+          new_enum = lines(
+              "pub enum ResolveError {",
+              "    Io(io::Error),",
+              "    Wire(WireError),",
+              "    Link(LinkError),",
+              "    NoNameServers,",
+              "    NoSuchResourceRecord,",
+              "    DnsError { rcode: u16, query: String },",
+              "    DnssecValidationFailed {",
+              "        result: String,",
+              "        extended_dns_error_code: Option<u16>,",
+              "        extended_dns_error_message: Option<String>,",
+              "    },",
+              "    NoTrustAnchor,",
+              "    QueryAborted,",
+              "    QueryRefused,",
+              "    ResourceRecordTypeObsolete,",
+              "    InconsistentServiceRecords,",
+              "    StubLoop,",
+              "    UnsupportedFamily(i32),",
+              "    Protocol(&'static str),",
+              "}",
+          )
+          support = replace_once(support, old_enum, new_enum, "ResolveError enum")
+
+          old_id = '            Self::DnsError { .. } => "io.systemd.Resolve.DNSError",\n'
+          new_id = old_id + lines(
+              '            Self::DnssecValidationFailed { .. } => "io.systemd.Resolve.DNSSECValidationFailed",',
+              '            Self::NoTrustAnchor => "io.systemd.Resolve.NoTrustAnchor",',
+              '            Self::QueryAborted => "io.systemd.Resolve.QueryAborted",',
+              '            Self::QueryRefused => "io.systemd.Resolve.QueryRefused",',
+              '            Self::ResourceRecordTypeObsolete => "io.systemd.Resolve.ResourceRecordTypeObsolete",',
+              '            Self::InconsistentServiceRecords => "io.systemd.Resolve.InconsistentServiceRecords",',
+              '            Self::StubLoop => "io.systemd.Resolve.StubLoop",',
+          )
+          support = replace_once(support, old_id, new_id, "ResolveError Varlink IDs")
+
+          old_display = lines(
+              '            Self::DnsError { rcode, query } => {',
+              '                write!(formatter, "DNS response code {rcode} for {query}")',
+              '            }',
+              '            Self::UnsupportedFamily(family) => {',
+          )
+          new_display = lines(
+              '            Self::DnsError { rcode, query } => {',
+              '                write!(formatter, "DNS response code {rcode} for {query}")',
+              '            }',
+              '            Self::DnssecValidationFailed { result, .. } => {',
+              '                write!(formatter, "DNSSEC validation failed: {result}")',
+              '            }',
+              '            Self::NoTrustAnchor => formatter.write_str("no DNSSEC trust anchor"),',
+              '            Self::QueryAborted => formatter.write_str("DNS query aborted"),',
+              '            Self::QueryRefused => formatter.write_str("DNS query refused"),',
+              '            Self::ResourceRecordTypeObsolete => {',
+              '                formatter.write_str("DNS resource record type is obsolete")',
+              '            }',
+              '            Self::InconsistentServiceRecords => {',
+              '                formatter.write_str("DNS service records are inconsistent")',
+              '            }',
+              '            Self::StubLoop => formatter.write_str("DNS stub loop detected"),',
+              '            Self::UnsupportedFamily(family) => {',
+          )
+          support = replace_once(support, old_display, new_display, "ResolveError display")
           support_path.write_text(support, encoding="utf-8")
 
           dbus_path = Path("src/dbus_helpers.rs")
           dbus = dbus_path.read_text(encoding="utf-8")
-          old_dbus = '''                ResolveError::DnsError { rcode, .. } => dns_rcode_error(rcode, error.to_string()),
-                      ResolveError::Wire(_) | ResolveError::Protocol(_) => {
-                          DbusError::InvalidReply(error.to_string())
-                      }
-          '''
-          new_dbus = '''                ResolveError::DnsError { rcode, .. } => dns_rcode_error(rcode, error.to_string()),
-                      ResolveError::QueryRefused => DbusError::DnsRefused(error.to_string()),
-                      ResolveError::ResourceRecordTypeObsolete => {
-                          DbusError::ResourceRecordTypeUnsupported(error.to_string())
-                      }
-                      ResolveError::QueryAborted => DbusError::NetworkDown(error.to_string()),
-                      ResolveError::DnssecValidationFailed { .. }
-                      | ResolveError::NoTrustAnchor
-                      | ResolveError::InconsistentServiceRecords
-                      | ResolveError::StubLoop
-                      | ResolveError::Wire(_)
-                      | ResolveError::Protocol(_) => DbusError::InvalidReply(error.to_string()),
-          '''
-          if dbus.count(old_dbus) != 1:
-              raise SystemExit("D-Bus resolve error anchor mismatch")
-          dbus_path.write_text(dbus.replace(old_dbus, new_dbus, 1), encoding="utf-8")
+          old_dbus = lines(
+              '        ResolveError::DnsError { rcode, .. } => dns_rcode_error(rcode, error.to_string()),',
+              '        ResolveError::Wire(_) | ResolveError::Protocol(_) => {',
+              '            DbusError::InvalidReply(error.to_string())',
+              '        }',
+          )
+          new_dbus = lines(
+              '        ResolveError::DnsError { rcode, .. } => dns_rcode_error(rcode, error.to_string()),',
+              '        ResolveError::QueryRefused => DbusError::DnsRefused(error.to_string()),',
+              '        ResolveError::ResourceRecordTypeObsolete => {',
+              '            DbusError::ResourceRecordTypeUnsupported(error.to_string())',
+              '        }',
+              '        ResolveError::QueryAborted => DbusError::NetworkDown(error.to_string()),',
+              '        ResolveError::DnssecValidationFailed { .. }',
+              '        | ResolveError::NoTrustAnchor',
+              '        | ResolveError::InconsistentServiceRecords',
+              '        | ResolveError::StubLoop',
+              '        | ResolveError::Wire(_)',
+              '        | ResolveError::Protocol(_) => DbusError::InvalidReply(error.to_string()),',
+          )
+          dbus = replace_once(dbus, old_dbus, new_dbus, "D-Bus error mapping")
+          dbus_path.write_text(dbus, encoding="utf-8")
 
-          path = Path("src/varlink.rs")
-          text = path.read_text(encoding="utf-8")
-          old_import = '''use crate::daemon::stop_requested;
-          use crate::json::{self, Value};
-          '''
-          new_import = '''use crate::config::{SupportMode, TlsMode, ValidationMode};
-          use crate::daemon::stop_requested;
-          use crate::json::{self, Value};
-          '''
-          if text.count(old_import) != 1:
-              raise SystemExit("Varlink import anchor mismatch")
-          text = text.replace(old_import, new_import, 1)
-          old_net = "use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};\n"
-          new_net = "use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};\n"
-          if text.count(old_net) != 1:
-              raise SystemExit("Varlink network import anchor mismatch")
-          text = text.replace(old_net, new_net, 1)
-          old_description_tail = '''method ResolveRecord(ifindex: ?int, name: string, class: ?int, type: int, flags: ?int) -> (rrs: [](ifindex: ?int, rr: ?object, raw: string), flags: int)";
-          '''
-          new_description_tail = '''method ResolveRecord(ifindex: ?int, name: string, class: ?int, type: int, flags: ?int) -> (rrs: [](ifindex: ?int, rr: ?object, raw: string), flags: int)\\n\\
-          method DumpDNSConfiguration() -> (configuration: []object)\\n\\
-          error QueryAborted\\n\\
-          error QueryRefused\\n\\
-          error DNSSECValidationFailed(result: string, extendedDNSErrorCode: ?int, extendedDNSErrorMessage: ?string)\\n\\
-          error NoTrustAnchor\\n\\
-          error StubLoop\\n\\
-          error ResourceRecordTypeObsolete\\n\\
-          error InconsistentServiceRecords";
-          '''
-          if text.count(old_description_tail) != 1:
-              raise SystemExit("Varlink interface description anchor mismatch")
-          text = text.replace(old_description_tail, new_description_tail, 1)
-          old_dispatch = '''                "io.systemd.Resolve.ResolveRecord" => resolve_record(&parameters, resolver),
-                      "io.systemd.Resolve.ResolveService" => resolve_service(&parameters, resolver),
-                      "io.systemd.Resolve.FlushCaches" => control(can_control, || resolver.flush_cache()),
-          '''
-          new_dispatch = '''                "io.systemd.Resolve.ResolveRecord" => resolve_record(&parameters, resolver),
-                      "io.systemd.Resolve.ResolveService" => resolve_service(&parameters, resolver),
-                      "io.systemd.Resolve.DumpDNSConfiguration" => dump_dns_configuration(resolver),
-                      "io.systemd.Resolve.FlushCaches" => control(can_control, || resolver.flush_cache()),
-          '''
-          if text.count(old_dispatch) != 1:
-              raise SystemExit("Varlink dispatch anchor mismatch")
-          text = text.replace(old_dispatch, new_dispatch, 1)
+          varlink_path = Path("src/varlink.rs")
+          varlink = varlink_path.read_text(encoding="utf-8")
+          old_tail = 'method ResolveRecord(ifindex: ?int, name: string, class: ?int, type: int, flags: ?int) -> (rrs: [](ifindex: ?int, rr: ?object, raw: string), flags: int)";\n'
+          new_tail = lines(
+              'method ResolveRecord(ifindex: ?int, name: string, class: ?int, type: int, flags: ?int) -> (rrs: [](ifindex: ?int, rr: ?object, raw: string), flags: int)\\n\\',
+              'error QueryAborted\\n\\',
+              'error QueryRefused\\n\\',
+              'error DNSSECValidationFailed(result: string, extendedDNSErrorCode: ?int, extendedDNSErrorMessage: ?string)\\n\\',
+              'error NoTrustAnchor\\n\\',
+              'error StubLoop\\n\\',
+              'error ResourceRecordTypeObsolete\\n\\',
+              'error InconsistentServiceRecords";',
+          )
+          varlink = replace_once(varlink, old_tail, new_tail, "Varlink interface errors")
 
-          helper_anchor = "fn resolve_hostname(parameters: &Value, resolver: &Resolver) -> Value {\n"
-          helpers = r'''fn dump_dns_configuration(resolver: &Resolver) -> Value {
-              let config = resolver.config();
-              let mut configuration = vec![global_dns_configuration(config)];
-              configuration.extend(
-                  resolver
-                      .links()
-                      .into_iter()
-                      .map(|link| link_dns_configuration(&link)),
-              );
-              success(Value::object([(
-                  "configuration",
-                  Value::Array(configuration),
-              )]))
-          }
+          old_resolver_error = lines(
+              'fn resolver_error(error_value: &ResolveError) -> Value {',
+              '    if let ResolveError::DnsError { rcode, query } = error_value {',
+          )
+          new_resolver_error = lines(
+              'fn resolver_error(error_value: &ResolveError) -> Value {',
+              '    if let ResolveError::DnssecValidationFailed {',
+              '        result,',
+              '        extended_dns_error_code,',
+              '        extended_dns_error_message,',
+              '    } = error_value',
+              '    {',
+              '        return Value::object([',
+              '            (',
+              '                "error",',
+              '                Value::String("io.systemd.Resolve.DNSSECValidationFailed".to_owned()),',
+              '            ),',
+              '            (',
+              '                "parameters",',
+              '                Value::object([',
+              '                    ("result", Value::String(result.clone())),',
+              '                    (',
+              '                        "extendedDNSErrorCode",',
+              '                        extended_dns_error_code',
+              '                            .map_or(Value::Null, |code| Value::Number(i128::from(code))),',
+              '                    ),',
+              '                    (',
+              '                        "extendedDNSErrorMessage",',
+              '                        extended_dns_error_message',
+              '                            .as_ref()',
+              '                            .map_or(Value::Null, |message| Value::String(message.clone())),',
+              '                    ),',
+              '                ]),',
+              '            ),',
+              '        ]);',
+              '    }',
+              '    if let ResolveError::DnsError { rcode, query } = error_value {',
+          )
+          varlink = replace_once(
+              varlink,
+              old_resolver_error,
+              new_resolver_error,
+              "structured DNSSEC error",
+          )
 
-          fn global_dns_configuration(config: &crate::config::Config) -> Value {
-              let current_server = config
-                  .upstreams
-                  .first()
-                  .or_else(|| config.fallback_upstreams.first())
-                  .copied()
-                  .map_or(Value::Null, |server| dns_server_value(server, None, true));
-              Value::object([
-                  ("ifname", Value::Null),
-                  ("ifindex", Value::Null),
-                  ("delegate", Value::Null),
-                  ("defaultRoute", Value::Null),
-                  ("currentServer", current_server),
-                  (
-                      "servers",
-                      Value::Array(
-                          config
-                              .upstreams
-                              .iter()
-                              .copied()
-                              .map(|server| dns_server_value(server, None, true))
-                              .collect(),
-                      ),
-                  ),
-                  (
-                      "fallbackServers",
-                      Value::Array(
-                          config
-                              .fallback_upstreams
-                              .iter()
-                              .copied()
-                              .map(|server| dns_server_value(server, None, true))
-                              .collect(),
-                      ),
-                  ),
-                  (
-                      "searchDomains",
-                      Value::Array(
-                          config
-                              .domains
-                              .iter()
-                              .map(|domain| search_domain_value(domain, None))
-                              .collect(),
-                      ),
-                  ),
-                  ("negativeTrustAnchors", Value::Null),
-                  (
-                      "dnssec",
-                      Value::String(validation_mode_name(config.dnssec).to_owned()),
-                  ),
-                  ("dnssecSupported", Value::Null),
-                  (
-                      "dnsOverTLS",
-                      Value::String(tls_mode_name(config.dns_over_tls).to_owned()),
-                  ),
-                  (
-                      "llmnr",
-                      Value::String(support_mode_name(config.llmnr).to_owned()),
-                  ),
-                  (
-                      "mDNS",
-                      Value::String(support_mode_name(config.multicast_dns).to_owned()),
-                  ),
-                  ("resolvConfMode", Value::String("stub".to_owned())),
-                  ("scopes", Value::Null),
-              ])
-          }
-
-          fn link_dns_configuration(link: &crate::routing::LinkState) -> Value {
-              let accessible = link.kernel_relevant_unicast();
-              let current_server = link
-                  .dns_servers
-                  .first()
-                  .copied()
-                  .map_or(Value::Null, |server| {
-                      dns_server_value(server, Some(link.ifindex), accessible)
-                  });
-              Value::object([
-                  (
-                      "ifname",
-                      link.kernel.as_ref().map_or(Value::Null, |kernel| {
-                          Value::String(kernel.ifname.clone())
-                      }),
-                  ),
-                  ("ifindex", Value::Number(i128::from(link.ifindex))),
-                  ("delegate", Value::Null),
-                  ("defaultRoute", Value::Bool(link.effective_default_route())),
-                  ("currentServer", current_server),
-                  (
-                      "servers",
-                      Value::Array(
-                          link.dns_servers
-                              .iter()
-                              .copied()
-                              .map(|server| dns_server_value(server, Some(link.ifindex), accessible))
-                              .collect(),
-                      ),
-                  ),
-                  ("fallbackServers", Value::Null),
-                  (
-                      "searchDomains",
-                      Value::Array(
-                          link.domains
-                              .iter()
-                              .map(|domain| search_domain_value(domain, Some(link.ifindex)))
-                              .collect(),
-                      ),
-                  ),
-                  (
-                      "negativeTrustAnchors",
-                      Value::Array(
-                          link.dnssec_negative_trust_anchors
-                              .iter()
-                              .cloned()
-                              .map(Value::String)
-                              .collect(),
-                      ),
-                  ),
-                  (
-                      "dnssec",
-                      Value::String(validation_mode_name(link.dnssec).to_owned()),
-                  ),
-                  ("dnssecSupported", Value::Null),
-                  (
-                      "dnsOverTLS",
-                      Value::String(tls_mode_name(link.dns_over_tls).to_owned()),
-                  ),
-                  (
-                      "llmnr",
-                      Value::String(support_mode_name(link.llmnr).to_owned()),
-                  ),
-                  (
-                      "mDNS",
-                      Value::String(support_mode_name(link.multicast_dns).to_owned()),
-                  ),
-                  ("resolvConfMode", Value::Null),
-                  ("scopes", Value::Null),
-              ])
-          }
-
-          fn dns_server_value(server: SocketAddr, ifindex: Option<i32>, accessible: bool) -> Value {
-              let (family, bytes): (i32, Vec<u8>) = match server.ip() {
-                  IpAddr::V4(address) => (2, address.octets().to_vec()),
-                  IpAddr::V6(address) => (10, address.octets().to_vec()),
-              };
-              Value::object([
-                  (
-                      "address",
-                      Value::Array(
-                          bytes
-                              .into_iter()
-                              .map(|byte| Value::Number(i128::from(byte)))
-                              .collect(),
-                      ),
-                  ),
-                  ("addressString", Value::String(server.ip().to_string())),
-                  ("family", Value::Number(i128::from(family))),
-                  ("port", Value::Number(i128::from(server.port()))),
-                  (
-                      "ifindex",
-                      ifindex.map_or(Value::Null, |value| Value::Number(i128::from(value))),
-                  ),
-                  ("name", Value::Null),
-                  ("accessible", Value::Bool(accessible)),
-              ])
-          }
-
-          fn search_domain_value(domain: &crate::config::Domain, ifindex: Option<i32>) -> Value {
-              Value::object([
-                  ("name", Value::String(domain.name.clone())),
-                  ("routeOnly", Value::Bool(domain.route_only)),
-                  (
-                      "ifindex",
-                      ifindex.map_or(Value::Null, |value| Value::Number(i128::from(value))),
-                  ),
-              ])
-          }
-
-          const fn support_mode_name(mode: SupportMode) -> &'static str {
-              match mode {
-                  SupportMode::No => "no",
-                  SupportMode::Resolve => "resolve",
-                  SupportMode::Yes => "yes",
-              }
-          }
-
-          const fn validation_mode_name(mode: ValidationMode) -> &'static str {
-              match mode {
-                  ValidationMode::No => "no",
-                  ValidationMode::AllowDowngrade => "allow-downgrade",
-                  ValidationMode::Yes => "yes",
-              }
-          }
-
-          const fn tls_mode_name(mode: TlsMode) -> &'static str {
-              match mode {
-                  TlsMode::No => "no",
-                  TlsMode::Opportunistic => "opportunistic",
-                  TlsMode::Yes => "yes",
-              }
-          }
-
-          '''
-          if text.count(helper_anchor) != 1:
-              raise SystemExit("Varlink helper insertion anchor mismatch")
-          text = text.replace(helper_anchor, helpers + helper_anchor, 1)
-
-          old_resolver_error = '''fn resolver_error(error_value: &ResolveError) -> Value {
-              if let ResolveError::DnsError { rcode, query } = error_value {
-          '''
-          new_resolver_error = '''fn resolver_error(error_value: &ResolveError) -> Value {
-              if let ResolveError::DnssecValidationFailed {
-                  result,
-                  extended_dns_error_code,
-                  extended_dns_error_message,
-              } = error_value
-              {
-                  return Value::object([
-                      (
-                          "error",
-                          Value::String("io.systemd.Resolve.DNSSECValidationFailed".to_owned()),
-                      ),
-                      (
-                          "parameters",
-                          Value::object([
-                              ("result", Value::String(result.clone())),
-                              (
-                                  "extendedDNSErrorCode",
-                                  extended_dns_error_code.map_or(Value::Null, |code| {
-                                      Value::Number(i128::from(code))
-                                  }),
-                              ),
-                              (
-                                  "extendedDNSErrorMessage",
-                                  extended_dns_error_message.as_ref().map_or(
-                                      Value::Null,
-                                      |message| Value::String(message.clone()),
-                                  ),
-                              ),
-                          ]),
-                      ),
-                  ]);
-              }
-              if let ResolveError::DnsError { rcode, query } = error_value {
-          '''
-          if text.count(old_resolver_error) != 1:
-              raise SystemExit("Varlink resolver error anchor mismatch")
-          text = text.replace(old_resolver_error, new_resolver_error, 1)
-
-          test_anchor = '''    #[test]
-              fn txt_octescape_preserves_printable_bytes() {
-                  assert_eq!(octescape(b"path=/"), "path=/");
-                  assert_eq!(octescape(&[0, b'\\\\', 0xff]), "\\\\000\\\\134\\\\377");
-              }
-          '''
-          new_tests = r'''    #[test]
-              fn dump_dns_configuration_reports_global_and_link_state() {
-                  let config = Config {
-                      upstreams: vec!["192.0.2.53:9953".parse().expect("global DNS server")],
-                      fallback_upstreams: vec!["198.51.100.53:53"
-                          .parse()
-                          .expect("fallback DNS server")],
-                      domains: vec![crate::config::Domain {
-                          name: "example.test".to_owned(),
-                          route_only: false,
-                      }],
-                      dnssec: ValidationMode::Yes,
-                      dns_over_tls: TlsMode::Opportunistic,
-                      llmnr: SupportMode::Resolve,
-                      multicast_dns: SupportMode::Yes,
-                      ..Config::default()
-                  };
-                  let resolver = Resolver::new(config);
-                  resolver
-                      .sync_kernel_links(vec![crate::routing::KernelLinkState {
-                          ifindex: 7,
-                          ifname: "test7".to_owned(),
-                          flags: 0,
-                          mtu: 1500,
-                          operstate: 0,
-                          has_ipv4_global: false,
-                          has_ipv4_link_local: false,
-                          has_ipv6_global: false,
-                          has_ipv6_link_local: false,
-                      }])
-                      .expect("synchronize test link");
-                  resolver
-                      .set_link_dns(7, vec!["203.0.113.53:53".parse().expect("link DNS server")])
-                      .expect("set link DNS");
-                  resolver
-                      .set_link_domains(
-                          7,
-                          vec![crate::config::Domain {
-                              name: "corp.example".to_owned(),
-                              route_only: true,
-                          }],
-                      )
-                      .expect("set link domain");
-
-                  let reply = dispatch(
-                      r#"{"method":"io.systemd.Resolve.DumpDNSConfiguration","parameters":{}}"#,
-                      &resolver,
-                  );
-                  assert!(reply.get("error").is_none(), "{}", reply.to_json());
-                  let configuration = reply
-                      .get("parameters")
-                      .and_then(|parameters| parameters.get("configuration"))
-                      .and_then(Value::as_array)
-                      .expect("DNS configuration array");
-                  assert_eq!(configuration.len(), 2);
-                  assert_eq!(
-                      configuration[0]
-                          .get("servers")
-                          .and_then(Value::as_array)
-                          .and_then(|servers| servers.first())
-                          .and_then(|server| server.get("port"))
-                          .and_then(Value::as_u64),
-                      Some(9953)
-                  );
-                  assert_eq!(configuration[1].get("ifindex").and_then(Value::as_i64), Some(7));
-                  assert_eq!(
-                      configuration[1].get("ifname").and_then(Value::as_str),
-                      Some("test7")
-                  );
-                  assert_eq!(
-                      configuration[1]
-                          .get("searchDomains")
-                          .and_then(Value::as_array)
-                          .and_then(|domains| domains.first())
-                          .and_then(|domain| domain.get("routeOnly"))
-                          .and_then(Value::as_bool),
-                      Some(true)
-                  );
-              }
-
-              #[test]
-              fn pinned_varlink_errors_have_exact_identifiers() {
-                  let errors = [
-                      ResolveError::QueryAborted,
-                      ResolveError::QueryRefused,
-                      ResolveError::NoTrustAnchor,
-                      ResolveError::StubLoop,
-                      ResolveError::ResourceRecordTypeObsolete,
-                      ResolveError::InconsistentServiceRecords,
-                  ];
-                  let identifiers: Vec<_> = errors.iter().map(ResolveError::varlink_id).collect();
-                  assert_eq!(
-                      identifiers,
-                      vec![
-                          "io.systemd.Resolve.QueryAborted",
-                          "io.systemd.Resolve.QueryRefused",
-                          "io.systemd.Resolve.NoTrustAnchor",
-                          "io.systemd.Resolve.StubLoop",
-                          "io.systemd.Resolve.ResourceRecordTypeObsolete",
-                          "io.systemd.Resolve.InconsistentServiceRecords",
-                      ]
-                  );
-
-                  let dnssec = ResolveError::DnssecValidationFailed {
-                      result: "bogus".to_owned(),
-                      extended_dns_error_code: Some(6),
-                      extended_dns_error_message: Some("signature expired".to_owned()),
-                  };
-                  let reply = resolver_error(&dnssec);
-                  assert_eq!(
-                      reply.get("error").and_then(Value::as_str),
-                      Some("io.systemd.Resolve.DNSSECValidationFailed")
-                  );
-                  let parameters = reply.get("parameters").expect("DNSSEC error parameters");
-                  assert_eq!(parameters.get("result").and_then(Value::as_str), Some("bogus"));
-                  assert_eq!(
-                      parameters
-                          .get("extendedDNSErrorCode")
-                          .and_then(Value::as_u64),
-                      Some(6)
-                  );
-              }
-
-              #[test]
-              fn interface_description_lists_configuration_dump_and_pinned_errors() {
-                  let resolver = Resolver::new(Config::default());
-                  let reply = dispatch(
-                      r#"{"method":"org.varlink.service.GetInterfaceDescription","parameters":{"interface":"io.systemd.Resolve"}}"#,
-                      &resolver,
-                  );
-                  let description = reply
-                      .get("parameters")
-                      .and_then(|parameters| parameters.get("description"))
-                      .and_then(Value::as_str)
-                      .expect("interface description");
-                  for symbol in [
-                      "DumpDNSConfiguration",
-                      "DNSSECValidationFailed",
-                      "InconsistentServiceRecords",
-                      "NoTrustAnchor",
-                      "QueryAborted",
-                      "QueryRefused",
-                      "ResourceRecordTypeObsolete",
-                      "StubLoop",
-                  ] {
-                      assert!(description.contains(symbol), "missing {symbol}");
-                  }
-              }
-
-              #[test]
-              fn txt_octescape_preserves_printable_bytes() {
-                  assert_eq!(octescape(b"path=/"), "path=/");
-                  assert_eq!(octescape(&[0, b'\\', 0xff]), "\\000\\134\\377");
-              }
-          '''
-          if text.count(test_anchor) != 1:
-              raise SystemExit("Varlink test insertion anchor mismatch")
-          path.write_text(text.replace(test_anchor, new_tests, 1), encoding="utf-8")
+          old_test = lines(
+              '    #[test]',
+              '    fn txt_octescape_preserves_printable_bytes() {',
+              '        assert_eq!(octescape(b"path=/"), "path=/");',
+              '        assert_eq!(octescape(&[0, b\'\\\\\', 0xff]), "\\\\000\\\\134\\\\377");',
+              '    }',
+          )
+          new_test = lines(
+              '    #[test]',
+              '    fn pinned_error_identifiers_and_dnssec_parameters_are_exact() {',
+              '        let errors = [',
+              '            ResolveError::QueryAborted,',
+              '            ResolveError::QueryRefused,',
+              '            ResolveError::NoTrustAnchor,',
+              '            ResolveError::StubLoop,',
+              '            ResolveError::ResourceRecordTypeObsolete,',
+              '            ResolveError::InconsistentServiceRecords,',
+              '        ];',
+              '        let identifiers: Vec<_> = errors.iter().map(ResolveError::varlink_id).collect();',
+              '        assert_eq!(',
+              '            identifiers,',
+              '            vec![',
+              '                "io.systemd.Resolve.QueryAborted",',
+              '                "io.systemd.Resolve.QueryRefused",',
+              '                "io.systemd.Resolve.NoTrustAnchor",',
+              '                "io.systemd.Resolve.StubLoop",',
+              '                "io.systemd.Resolve.ResourceRecordTypeObsolete",',
+              '                "io.systemd.Resolve.InconsistentServiceRecords",',
+              '            ]',
+              '        );',
+              '',
+              '        let dnssec = ResolveError::DnssecValidationFailed {',
+              '            result: "bogus".to_owned(),',
+              '            extended_dns_error_code: Some(6),',
+              '            extended_dns_error_message: Some("signature expired".to_owned()),',
+              '        };',
+              '        let reply = resolver_error(&dnssec);',
+              '        assert_eq!(',
+              '            reply.get("error").and_then(Value::as_str),',
+              '            Some("io.systemd.Resolve.DNSSECValidationFailed")',
+              '        );',
+              '        let parameters = reply.get("parameters").expect("DNSSEC error parameters");',
+              '        assert_eq!(parameters.get("result").and_then(Value::as_str), Some("bogus"));',
+              '        assert_eq!(',
+              '            parameters.get("extendedDNSErrorCode").and_then(Value::as_u64),',
+              '            Some(6)',
+              '        );',
+              '        assert_eq!(',
+              '            parameters',
+              '                .get("extendedDNSErrorMessage")',
+              '                .and_then(Value::as_str),',
+              '            Some("signature expired")',
+              '        );',
+              '    }',
+              '',
+              '    #[test]',
+              '    fn interface_description_lists_pinned_error_identifiers() {',
+              '        let resolver = Resolver::new(Config::default());',
+              '        let reply = dispatch(',
+              '            r#"{"method":"org.varlink.service.GetInterfaceDescription","parameters":{"interface":"io.systemd.Resolve"}}"#,',
+              '            &resolver,',
+              '        );',
+              '        let description = reply',
+              '            .get("parameters")',
+              '            .and_then(|parameters| parameters.get("description"))',
+              '            .and_then(Value::as_str)',
+              '            .expect("interface description");',
+              '        for symbol in [',
+              '            "DNSSECValidationFailed",',
+              '            "InconsistentServiceRecords",',
+              '            "NoTrustAnchor",',
+              '            "QueryAborted",',
+              '            "QueryRefused",',
+              '            "ResourceRecordTypeObsolete",',
+              '            "StubLoop",',
+              '        ] {',
+              '            assert!(description.contains(symbol), "missing {symbol}");',
+              '        }',
+              '    }',
+              '',
+              '    #[test]',
+              '    fn txt_octescape_preserves_printable_bytes() {',
+              '        assert_eq!(octescape(b"path=/"), "path=/");',
+              '        assert_eq!(octescape(&[0, b\'\\\\\', 0xff]), "\\\\000\\\\134\\\\377");',
+              '    }',
+          )
+          varlink = replace_once(varlink, old_test, new_test, "Varlink error tests")
+          varlink_path.write_text(varlink, encoding="utf-8")
           PY
           cargo fmt --all
           rm -f .github/workflows/finalize-varlink-dns-configuration.yml
@@ -666,27 +347,19 @@ jobs:
           cargo test --all-targets --all-features --locked
           cargo build --release --all-features --locked
 
-      - name: Verify live contracts
+      - name: Verify live contracts and pinned surface reduction
         shell: bash
         run: |
           set -euo pipefail
           python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
           bash tests/dbus-introspection.sh target/release/systemd-resolved
-
-      - name: Verify pinned surface reduction
-        shell: bash
-        run: |
-          set -euo pipefail
           python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json
           python3 - <<'PY'
           import json
 
           with open("/tmp/upstream-surface-audit.json", encoding="utf-8") as stream:
               report = json.load(stream)
-          missing = report["missing"]
-          if "DumpDNSConfiguration" in missing["varlink_methods"]:
-              raise SystemExit("DumpDNSConfiguration remains missing")
-          required_errors = {
+          expected = {
               "DNSSECValidationFailed",
               "InconsistentServiceRecords",
               "NoTrustAnchor",
@@ -695,7 +368,7 @@ jobs:
               "ResourceRecordTypeObsolete",
               "StubLoop",
           }
-          unresolved = required_errors.intersection(missing["varlink_errors"])
+          unresolved = expected.intersection(report["missing"]["varlink_errors"])
           if unresolved:
               raise SystemExit(f"Varlink errors remain missing: {sorted(unresolved)}")
           PY
@@ -711,7 +384,7 @@ jobs:
           set -euo pipefail
           git add -A
           git diff --cached --check
-          git commit -m 'Expose DNS configuration through Resolve Varlink'
+          git commit -m 'Expose pinned Resolve Varlink errors'
           for attempt in 1 2 3 4 5; do
             git fetch origin main
             if ! git rebase origin/main; then
@@ -731,11 +404,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
-          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Varlink configuration parity passed' || 'Varlink configuration parity failed' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'Pinned Varlink error parity passed' || 'Pinned Varlink error parity failed' }}
           STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          payload=$(printf '{"state":"%s","context":"parity/varlink-configuration","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          payload=$(printf '{"state":"%s","context":"parity/varlink-errors","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
           curl --fail-with-body --silent --show-error \
             --request POST \
             --header "Accept: application/vnd.github+json" \
