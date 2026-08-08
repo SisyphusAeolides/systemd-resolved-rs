@@ -1,0 +1,106 @@
+name: Finalize simultaneous mDNS certification
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-mdns-duplex-certification.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - name: Check out and synchronize source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Synchronize with current main
+        run: |
+          git fetch origin main
+          git reset --hard origin/main
+      - name: Install build and namespace dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            gfortran iproute2 libssl-dev liburing-dev
+      - name: Validate duplex test and multicast implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile tests/live-mdns-duplex.py
+          cargo build --release --all-features --locked
+          python3 tests/live-mdns-duplex.py target/release/systemd-resolved
+      - name: Add duplex traffic to fail-closed certification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/certify-replacement.sh')
+          text = path.read_text(encoding='utf-8')
+          anchor = '''    run_gate live-mdns-responder \\
+        python3 "$ROOT/tests/live-mdns-responder.py" "$BINARY"
+'''
+          gate = '''    run_gate live-mdns-duplex \\
+        python3 "$ROOT/tests/live-mdns-duplex.py" "$BINARY"
+'''
+          if 'run_gate live-mdns-duplex' not in text:
+              if anchor not in text:
+                  raise SystemExit('cannot locate live mDNS responder gate')
+              text = text.replace(anchor, anchor + gate, 1)
+          if '    "live-mdns-duplex",\n' not in text:
+              expected = '    "live-mdns-responder",\n'
+              if expected not in text:
+                  raise SystemExit('cannot locate expected mDNS responder gate')
+              text = text.replace(
+                  expected,
+                  expected + '    "live-mdns-duplex",\n',
+                  1,
+              )
+          fail_anchor = '''    record live-mdns-responder fail disabled-or-passwordless-sudo-unavailable
+'''
+          fail_line = '''    record live-mdns-duplex fail disabled-or-passwordless-sudo-unavailable
+'''
+          if fail_line not in text:
+              if fail_anchor not in text:
+                  raise SystemExit('cannot locate disabled namespace gates')
+              text = text.replace(fail_anchor, fail_anchor + fail_line, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          bash -n scripts/certify-replacement.sh
+          git diff --check
+      - name: Commit verified duplex certification gate
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git rm --force .github/workflows/finalize-mdns-duplex-certification.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'Require simultaneous mDNS resolver and responder operation'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
