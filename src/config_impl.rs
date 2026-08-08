@@ -85,9 +85,13 @@ impl Config {
             }
             "CacheFromLocalhost" => self.cache_from_localhost = parse_bool(value)?,
             "DNSCacheSize" => {
-                self.cache_size = value
-                    .parse()
-                    .map_err(|_| ConfigError::InvalidValue(value.to_owned()))?;
+                self.cache_size = parse_cache_size(value)?;
+            }
+            "LLMNRCacheSize" => {
+                self.llmnr_cache_size = parse_cache_size(value)?;
+            }
+            "MulticastDNSCacheSize" => {
+                self.multicast_dns_cache_size = parse_cache_size(value)?;
             }
             "CacheMaxTTL" | "CacheMaxTTLSec" => {
                 self.cache_max_ttl = parse_duration(value)?;
@@ -174,10 +178,16 @@ impl Config {
                 "Workers must be between 1 and 4096".to_owned(),
             ));
         }
-        if self.cache_size > 1 << 24 {
-            return Err(ConfigError::InvalidValue(
-                "DNSCacheSize must not exceed 16777216".to_owned(),
-            ));
+        for (name, size) in [
+            ("DNSCacheSize", self.cache_size),
+            ("LLMNRCacheSize", self.llmnr_cache_size),
+            ("MulticastDNSCacheSize", self.multicast_dns_cache_size),
+        ] {
+            if size > 1 << 24 {
+                return Err(ConfigError::InvalidValue(format!(
+                    "{name} must not exceed 16777216"
+                )));
+            }
         }
         if self.query_timeout.is_zero() {
             return Err(ConfigError::InvalidValue(
