@@ -1,0 +1,126 @@
+name: Finalize replacement proof validation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/finalize-proof-validation.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out and synchronize source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize with current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install diagnostics
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck
+
+      - name: Use semantic proof validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s scripts/certify-replacement.sh
+          test -s scripts/validate-replacement-proof.py
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('scripts/certify-replacement.sh')
+          text = path.read_text(encoding='utf-8')
+          replacement = r'''verify_proof() {
+    local gate=$1
+    local proof="$PROOF_DIR/$gate.json"
+    local log="$LOG_DIR/proof-$gate.log"
+    if [[ ! -s $proof ]]; then
+        printf 'Missing proof: %s\n' "$proof" >"$log"
+        record "$gate" fail "$log"
+        return
+    fi
+    set +e
+    python3 "$ROOT/scripts/validate-replacement-proof.py" \
+        --proof "$proof" \
+        --gate "$gate" \
+        --source-tree "$SOURCE_TREE" \
+        --upstream-commit "$BASELINE_COMMIT" \
+        --proof-directory "$PROOF_DIR" \
+        >"$log" 2>&1
+    local status=$?
+    set -e
+    if ((status == 0)); then
+        cp -a "$proof" "$ARTIFACT_DIR/$gate.json"
+        record "$gate" pass "$proof"
+    else
+        record "$gate" fail "$log"
+    fi
+}
+
+verify_proof upstream-test-75'''
+          pattern = re.compile(
+              r'verify_proof\(\) \{.*?^\}\n\nverify_proof upstream-test-75',
+              re.S | re.M,
+          )
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit('cannot locate certificate proof validator')
+          path.write_text(text, encoding='utf-8')
+          PY
+          chmod 0755 scripts/validate-replacement-proof.py
+
+      - name: Validate final proof tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/certify-replacement.sh
+          python3 -m py_compile \
+            scripts/write-replacement-proof.py \
+            scripts/validate-replacement-proof.py
+          shellcheck --severity=error scripts/certify-replacement.sh
+          scripts/validate-replacement-proof.py --help >/dev/null
+          git diff --check
+
+      - name: Commit semantic validation
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git rm --force .github/workflows/finalize-proof-validation.yml
+          git add -A
+          git diff --cached --check
+          git commit -m 'Bind certification to semantic replacement proofs'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
