@@ -1,0 +1,614 @@
+name: Integrate resolvectl monitor verbs
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/integrate-resolvectl-monitor-verbs.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/resolvectl-monitor-verbs","description":"resolvectl monitor verbs in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Implement show-cache and show-server-state
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > src/bin/resolvectl_monitor.rs <<'EOF'
+          // SPDX-License-Identifier: LGPL-2.1-or-later
+          use resolved::json::{self, Value};
+          use std::env;
+          use std::io::{self, Read, Write};
+          use std::os::unix::net::UnixStream;
+          use std::path::{Path, PathBuf};
+          use std::time::Duration;
+
+          const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+          const DEFAULT_RESOLVE_SOCKET: &str = "/run/systemd/resolve/io.systemd.Resolve";
+          const DEFAULT_MONITOR_SOCKET: &str = "/run/systemd/resolve/io.systemd.Resolve.Monitor";
+
+          #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+          enum Command {
+              ShowCache,
+              ShowServerState,
+          }
+
+          #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+          enum JsonMode {
+              Off,
+              Short,
+              Pretty,
+          }
+
+          pub fn maybe_handle() -> Option<i32> {
+              let arguments: Vec<String> = env::args().skip(1).collect();
+              let command = arguments
+                  .iter()
+                  .enumerate()
+                  .filter_map(|(index, argument)| match argument.as_str() {
+                      "show-cache" => Some((index, Command::ShowCache)),
+                      "show-server-state" => Some((index, Command::ShowServerState)),
+                      _ => None,
+                  })
+                  .min_by_key(|(index, _)| *index)
+                  .map(|(_, command)| command)?;
+
+              Some(match run(command, &arguments) {
+                  Ok(output) => {
+                      print!("{output}");
+                      0
+                  }
+                  Err(error) => {
+                      eprintln!("resolvectl: {error}");
+                      1
+                  }
+              })
+          }
+
+          fn run(command: Command, arguments: &[String]) -> Result<String, String> {
+              let json_mode = json_mode(arguments)?;
+              let socket = monitor_socket(arguments)?;
+              let parameters = monitor_call(command, &socket).map_err(|error| error.to_string())?;
+              Ok(match json_mode {
+                  JsonMode::Off => match command {
+                      Command::ShowCache => render_cache(&parameters)?,
+                      Command::ShowServerState => render_server_state(&parameters)?,
+                  },
+                  JsonMode::Short => format!("{}\n", parameters.to_json()),
+                  JsonMode::Pretty => {
+                      let mut output = String::new();
+                      write_pretty_json(&parameters, 0, &mut output);
+                      output.push('\n');
+                      output
+                  }
+              })
+          }
+
+          fn json_mode(arguments: &[String]) -> Result<JsonMode, String> {
+              let mut mode = JsonMode::Off;
+              let mut index = 0;
+              while index < arguments.len() {
+                  let argument = &arguments[index];
+                  if let Some(value) = argument.strip_prefix("--json=") {
+                      mode = parse_json_mode(value)?;
+                  } else if argument == "--json" {
+                      let value = arguments
+                          .get(index + 1)
+                          .ok_or_else(|| "--json requires a mode".to_owned())?;
+                      mode = parse_json_mode(value)?;
+                      index += 1;
+                  }
+                  index += 1;
+              }
+              Ok(mode)
+          }
+
+          fn parse_json_mode(value: &str) -> Result<JsonMode, String> {
+              match value {
+                  "off" | "no" | "false" => Ok(JsonMode::Off),
+                  "short" | "yes" | "true" => Ok(JsonMode::Short),
+                  "pretty" => Ok(JsonMode::Pretty),
+                  _ => Err(format!("unsupported JSON mode: {value}")),
+              }
+          }
+
+          fn monitor_socket(arguments: &[String]) -> Result<PathBuf, String> {
+              if let Ok(path) = env::var("SYSTEMD_RESOLVED_MONITOR_SOCKET") {
+                  if !path.is_empty() {
+                      return Ok(PathBuf::from(path));
+                  }
+              }
+              let mut index = 0;
+              while index < arguments.len() {
+                  let argument = &arguments[index];
+                  if let Some(path) = argument.strip_prefix("--monitor-socket=") {
+                      return nonempty_path("--monitor-socket", path);
+                  }
+                  if argument == "--monitor-socket" {
+                      let path = arguments
+                          .get(index + 1)
+                          .ok_or_else(|| "--monitor-socket requires a path".to_owned())?;
+                      return nonempty_path("--monitor-socket", path);
+                  }
+                  if let Some(path) = argument.strip_prefix("--socket=") {
+                      return nonempty_path("--socket", path)
+                          .map(|path| monitor_path_for(&path));
+                  }
+                  if argument == "--socket" {
+                      let path = arguments
+                          .get(index + 1)
+                          .ok_or_else(|| "--socket requires a path".to_owned())?;
+                      return nonempty_path("--socket", path)
+                          .map(|path| monitor_path_for(&path));
+                  }
+                  index += 1;
+              }
+              if Path::new(DEFAULT_RESOLVE_SOCKET).exists()
+                  && !Path::new(DEFAULT_MONITOR_SOCKET).exists()
+              {
+                  return Ok(monitor_path_for(Path::new(DEFAULT_RESOLVE_SOCKET)));
+              }
+              Ok(PathBuf::from(DEFAULT_MONITOR_SOCKET))
+          }
+
+          fn nonempty_path(option: &str, path: &str) -> Result<PathBuf, String> {
+              if path.is_empty() {
+                  Err(format!("{option} requires a non-empty path"))
+              } else {
+                  Ok(PathBuf::from(path))
+              }
+          }
+
+          fn monitor_path_for(path: &Path) -> PathBuf {
+              if path.file_name().and_then(|name| name.to_str()) == Some("io.systemd.Resolve") {
+                  return path.with_file_name("io.systemd.Resolve.Monitor");
+              }
+              let mut value = path.as_os_str().to_os_string();
+              value.push(".Monitor");
+              PathBuf::from(value)
+          }
+
+          fn monitor_call(command: Command, socket: &Path) -> io::Result<Value> {
+              let method = match command {
+                  Command::ShowCache => "DumpCache",
+                  Command::ShowServerState => "DumpServerState",
+              };
+              let mut stream = UnixStream::connect(socket)?;
+              stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+              let request = format!(
+                  "{{\"method\":\"io.systemd.Resolve.Monitor.{method}\",\"parameters\":{{}}}}"
+              );
+              stream.write_all(request.as_bytes())?;
+              stream.write_all(&[0])?;
+
+              let mut message = Vec::new();
+              let mut chunk = [0; 8192];
+              loop {
+                  let length = stream.read(&mut chunk)?;
+                  if length == 0 {
+                      return Err(io::Error::new(
+                          io::ErrorKind::UnexpectedEof,
+                          "monitor closed before replying",
+                      ));
+                  }
+                  if let Some(end) = chunk[..length].iter().position(|byte| *byte == 0) {
+                      message.extend_from_slice(&chunk[..end]);
+                      break;
+                  }
+                  message.extend_from_slice(&chunk[..length]);
+                  if message.len() > MAX_MESSAGE_SIZE {
+                      return Err(io::Error::new(
+                          io::ErrorKind::InvalidData,
+                          "monitor reply is too large",
+                      ));
+                  }
+              }
+
+              let text = std::str::from_utf8(&message).map_err(|_| {
+                  io::Error::new(io::ErrorKind::InvalidData, "monitor reply is not UTF-8")
+              })?;
+              let reply = json::parse(text).map_err(|error| {
+                  io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+              })?;
+              if let Some(error) = reply.get("error").and_then(Value::as_str) {
+                  return Err(io::Error::other(error.to_owned()));
+              }
+              reply.get("parameters").cloned().ok_or_else(|| {
+                  io::Error::new(
+                      io::ErrorKind::InvalidData,
+                      "monitor reply has no parameters",
+                  )
+              })
+          }
+
+          fn render_cache(parameters: &Value) -> Result<String, String> {
+              let scopes = parameters
+                  .get("dump")
+                  .and_then(Value::as_array)
+                  .ok_or_else(|| "monitor cache reply has no dump array".to_owned())?;
+              let mut output = String::new();
+              for (index, scope) in scopes.iter().enumerate() {
+                  if index != 0 {
+                      output.push('\n');
+                  }
+                  output.push_str("Scope: ");
+                  output.push_str(scope.get("protocol").and_then(Value::as_str).unwrap_or("dns"));
+                  if let Some(ifindex) = scope.get("ifindex").and_then(Value::as_i64) {
+                      output.push_str(&format!(" on interface {ifindex}"));
+                  }
+                  if let Some(ifname) = scope.get("ifname").and_then(Value::as_str) {
+                      output.push_str(&format!(" ({ifname})"));
+                  }
+                  output.push('\n');
+                  let entries = scope
+                      .get("cache")
+                      .and_then(Value::as_array)
+                      .ok_or_else(|| "cache scope has no cache array".to_owned())?;
+                  if entries.is_empty() {
+                      output.push_str("  Cache is empty.\n");
+                      continue;
+                  }
+                  for entry in entries {
+                      output.push_str("  ");
+                      if let Some(key) = entry.get("key") {
+                          output.push_str(&key.to_json());
+                      } else {
+                          output.push_str("{}");
+                      }
+                      if let Some(kind) = entry.get("type").and_then(Value::as_str) {
+                          output.push_str(&format!(" {kind}"));
+                      }
+                      if let Some(until) = entry.get("until").and_then(Value::as_i64) {
+                          output.push_str(&format!(" until {until}"));
+                      }
+                      output.push('\n');
+                  }
+              }
+              Ok(output)
+          }
+
+          fn render_server_state(parameters: &Value) -> Result<String, String> {
+              let servers = parameters
+                  .get("dump")
+                  .and_then(Value::as_array)
+                  .ok_or_else(|| "monitor server-state reply has no dump array".to_owned())?;
+              let mut output = String::new();
+              for (index, server) in servers.iter().enumerate() {
+                  if index != 0 {
+                      output.push('\n');
+                  }
+                  for field in [
+                      "Server",
+                      "Type",
+                      "Interface",
+                      "InterfaceIndex",
+                      "VerifiedFeatureLevel",
+                      "PossibleFeatureLevel",
+                      "DNSSECMode",
+                      "DNSSECSupported",
+                      "ReceivedUDPFragmentMax",
+                      "FailedUDPAttempts",
+                      "FailedTCPAttempts",
+                      "PacketTruncated",
+                      "PacketBadOpt",
+                      "PacketRRSIGMissing",
+                      "PacketInvalid",
+                      "PacketDoOff",
+                  ] {
+                      let value = server.get(field).map_or("n/a".to_owned(), scalar_text);
+                      output.push_str(&format!("{field}: {value}\n"));
+                  }
+              }
+              Ok(output)
+          }
+
+          fn scalar_text(value: &Value) -> String {
+              match value {
+                  Value::Null => "n/a".to_owned(),
+                  Value::Bool(value) => if *value { "yes" } else { "no" }.to_owned(),
+                  Value::Number(value) => value.to_string(),
+                  Value::String(value) => value.clone(),
+                  Value::Array(_) | Value::Object(_) => value.to_json(),
+              }
+          }
+
+          fn write_pretty_json(value: &Value, depth: usize, output: &mut String) {
+              match value {
+                  Value::Null => output.push_str("null"),
+                  Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
+                  Value::Number(value) => output.push_str(&value.to_string()),
+                  Value::String(value) => output.push_str(&Value::String(value.clone()).to_json()),
+                  Value::Array(values) => {
+                      output.push('[');
+                      if !values.is_empty() {
+                          output.push('\n');
+                          for (index, value) in values.iter().enumerate() {
+                              output.push_str(&"  ".repeat(depth + 1));
+                              write_pretty_json(value, depth + 1, output);
+                              if index + 1 != values.len() {
+                                  output.push(',');
+                              }
+                              output.push('\n');
+                          }
+                          output.push_str(&"  ".repeat(depth));
+                      }
+                      output.push(']');
+                  }
+                  Value::Object(values) => {
+                      output.push('{');
+                      if !values.is_empty() {
+                          output.push('\n');
+                          for (index, (key, value)) in values.iter().enumerate() {
+                              output.push_str(&"  ".repeat(depth + 1));
+                              output.push_str(&Value::String(key.clone()).to_json());
+                              output.push_str(": ");
+                              write_pretty_json(value, depth + 1, output);
+                              if index + 1 != values.len() {
+                                  output.push(',');
+                              }
+                              output.push('\n');
+                          }
+                          output.push_str(&"  ".repeat(depth));
+                      }
+                      output.push('}');
+                  }
+              }
+          }
+
+          #[cfg(test)]
+          mod tests {
+              use super::*;
+
+              #[test]
+              fn derives_monitor_socket_from_custom_main_socket() {
+                  assert_eq!(
+                      monitor_path_for(Path::new("/tmp/resolved-test")),
+                      PathBuf::from("/tmp/resolved-test.Monitor")
+                  );
+                  assert_eq!(
+                      monitor_path_for(Path::new("/run/systemd/resolve/io.systemd.Resolve")),
+                      PathBuf::from("/run/systemd/resolve/io.systemd.Resolve.Monitor")
+                  );
+              }
+
+              #[test]
+              fn renders_empty_cache_scope() {
+                  let parameters = Value::object([(
+                      "dump",
+                      Value::Array(vec![Value::object([
+                          ("protocol", Value::String("dns".to_owned())),
+                          ("ifindex", Value::Number(7)),
+                          ("ifname", Value::String("test7".to_owned())),
+                          ("cache", Value::Array(Vec::new())),
+                      ])]),
+                  )]);
+                  let output = render_cache(&parameters).expect("cache output");
+                  assert!(output.contains("interface 7 (test7)"));
+                  assert!(output.contains("Cache is empty"));
+              }
+
+              #[test]
+              fn pretty_json_preserves_nested_values() {
+                  let value = Value::object([(
+                      "dump",
+                      Value::Array(vec![Value::Bool(true), Value::Number(7)]),
+                  )]);
+                  let mut output = String::new();
+                  write_pretty_json(&value, 0, &mut output);
+                  assert!(output.contains("\n"));
+                  assert_eq!(json::parse(&output).expect("pretty JSON"), value);
+              }
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("src/bin/resolvectl.rs")
+          text = path.read_text(encoding="utf-8")
+          if "mod resolvectl_monitor;" not in text:
+              lines = text.splitlines(keepends=True)
+              insertion = None
+              for index, line in enumerate(lines):
+                  stripped = line.lstrip()
+                  if stripped.startswith(("mod ", "use ", "fn main")):
+                      insertion = index
+                      break
+              if insertion is None:
+                  raise SystemExit("cannot locate resolvectl module insertion point")
+              lines.insert(insertion, "mod resolvectl_monitor;\n")
+              text = "".join(lines)
+
+          if "resolvectl_monitor::maybe_handle()" not in text:
+              match = re.search(r"(?m)^fn main\s*\([^)]*\)\s*(?:->\s*[^\{]+)?\{", text)
+              if match is None:
+                  raise SystemExit("resolvectl main function is missing")
+              insertion = '''
+              if let Some(status) = resolvectl_monitor::maybe_handle() {
+                  std::process::exit(status);
+              }
+          '''
+              text = text[: match.end()] + insertion + text[match.end() :]
+          path.write_text(text, encoding="utf-8")
+
+          exposed = False
+          for candidate in [Path("src/lib.rs"), Path("src/landing_glue.rs")]:
+              if not candidate.is_file():
+                  continue
+              source = candidate.read_text(encoding="utf-8")
+              if "pub mod json;" in source:
+                  exposed = True
+                  break
+              if "pub(crate) mod json;" in source:
+                  candidate.write_text(
+                      source.replace("pub(crate) mod json;", "pub mod json;", 1),
+                      encoding="utf-8",
+                  )
+                  exposed = True
+                  break
+              if re.search(r"(?m)^mod json;\s*$", source):
+                  candidate.write_text(
+                      re.sub(r"(?m)^mod json;\s*$", "pub mod json;", source, count=1),
+                      encoding="utf-8",
+                  )
+                  exposed = True
+                  break
+          if not exposed:
+              raise SystemExit("JSON module declaration is missing")
+
+          guard = Path("tests/pinned_resolvectl_monitor.rs")
+          guard.write_text(
+              '''// SPDX-License-Identifier: LGPL-2.1-or-later
+          const ENTRYPOINT: &str = include_str!("../src/bin/resolvectl.rs");
+          const MONITOR: &str = include_str!("../src/bin/resolvectl_monitor.rs");
+
+          #[test]
+          fn resolvectl_monitor_verbs_remain_wired() {
+              assert!(ENTRYPOINT.contains("resolvectl_monitor::maybe_handle"));
+              for symbol in [
+                  "show-cache",
+                  "show-server-state",
+                  "io.systemd.Resolve.Monitor.DumpCache",
+                  "io.systemd.Resolve.Monitor.DumpServerState",
+                  "--json=",
+                  "SYSTEMD_RESOLVED_MONITOR_SOCKET",
+              ] {
+                  assert!(MONITOR.contains(symbol), "missing monitor CLI symbol {symbol}");
+              }
+          }
+          ''',
+              encoding="utf-8",
+          )
+          PY
+
+          rm -f .github/workflows/integrate-resolvectl-monitor-verbs.yml
+          cargo fmt --all
+          git diff --check
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts and surface reduction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json
+          python3 - <<'PY'
+          import json
+
+          with open("/tmp/upstream-surface-audit.json", encoding="utf-8") as stream:
+              report = json.load(stream)
+          remaining = set(report["missing"]["resolvectl_verbs"])
+          expected_closed = {"show-cache", "show-server-state"}
+          still_missing = sorted(expected_closed & remaining)
+          if still_missing:
+              raise SystemExit(f"resolvectl monitor verbs remain missing: {still_missing}")
+          PY
+
+      - name: Commit verified resolvectl tranche
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Add resolvectl monitor dump commands'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'resolvectl monitor verbs passed' || 'resolvectl monitor verbs failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/resolvectl-monitor-verbs","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
