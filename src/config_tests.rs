@@ -33,6 +33,8 @@ mod tests {
         assert!(config.cache_negative);
         assert!(!config.cache_from_localhost);
         assert_eq!(config.cache_size, 4096);
+        assert_eq!(config.llmnr_cache_size, 4096);
+        assert_eq!(config.multicast_dns_cache_size, 4096);
         assert_eq!(config.cache_max_ttl, Duration::from_secs(2 * 60 * 60));
     }
 
@@ -46,6 +48,8 @@ mod tests {
                  Domains=example.test ~corp.test\n\
                  Cache=no\n\
                  DNSCacheSize=128\n\
+                 LLMNRCacheSize=64\n\
+                 MulticastDNSCacheSize=256\n\
                  ReadEtcHosts=no\n\
                  ReadStaticRecords=no\n",
             )
@@ -55,6 +59,8 @@ mod tests {
         assert!(!config.cache);
         assert!(!config.cache_negative);
         assert_eq!(config.cache_size, 128);
+        assert_eq!(config.llmnr_cache_size, 64);
+        assert_eq!(config.multicast_dns_cache_size, 256);
         assert!(!config.read_etc_hosts);
         assert!(!config.read_static_records);
     }
@@ -80,10 +86,12 @@ mod tests {
 
     #[test]
     fn rejects_oversized_dns_cache() {
-        let mut config = Config::default();
-        assert!(config
-            .apply_text("[Resolve]\nDNSCacheSize=16777217\n")
-            .is_err());
+        for key in ["DNSCacheSize", "LLMNRCacheSize", "MulticastDNSCacheSize"] {
+            let mut config = Config::default();
+            assert!(config
+                .apply_text(&format!("[Resolve]\n{key}=16777217\n"))
+                .is_err());
+        }
     }
 
     #[test]
