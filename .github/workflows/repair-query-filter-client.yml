@@ -1,0 +1,205 @@
+name: Repair pinned QueryFilter client integration
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/repair-query-filter-client.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: resolved-parity-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Publish pending status
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"pending","context":"parity/query-filter-client-repair","description":"QueryFilter client repair in progress","target_url":"%s"}' "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
+
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Synchronize source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git reset --hard origin/main
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            dbus gfortran libssl-dev liburing-dev openssl python3 systemd
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Recover source and enforce generated contract at runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! test -f src/query_filter.rs; then
+            test -f .github/workflows/finalize-query-filter-client.yml
+            python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path(".github/workflows/finalize-query-filter-client.yml")
+          lines = workflow.read_text(encoding="utf-8").splitlines()
+          marker = "      - name: Recover contract and implementation"
+          cursor = lines.index(marker)
+          while lines[cursor] != "        run: |":
+              cursor += 1
+          cursor += 1
+          end = cursor
+          while end < len(lines) and not lines[end].startswith("      - name: "):
+              end += 1
+          body = [line[10:] if line.startswith("          ") else "" for line in lines[cursor:end]]
+          Path("/tmp/recover-query-filter-final.sh").write_text(
+              "\n".join(body) + "\n", encoding="utf-8"
+          )
+          PY
+            bash -n /tmp/recover-query-filter-final.sh
+            bash /tmp/recover-query-filter-final.sh
+          fi
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("src/query_filter.rs")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace("use std::net::IpAddr;\n", "")
+          text = re.sub(
+              r"\npub\(crate\) fn pinned_input_fields\(\) -> &'static \[&'static str\] \{.*?\}\n\n"
+              r"pub\(crate\) fn pinned_output_fields\(\) -> &'static \[&'static str\] \{.*?\}\n",
+              "\n",
+              text,
+              flags=re.S,
+          )
+          anchor = "fn filter_decision(reply: &Value) -> FilterDecision {\n"
+          validation = '''fn filter_decision(reply: &Value) -> FilterDecision {
+              if !QUERY_FILTER_OUTPUT_FIELDS
+                  .iter()
+                  .any(|field| reply.get(field).is_some())
+              {
+                  return FilterDecision::Allow;
+              }
+          '''
+          if validation not in text:
+              if text.count(anchor) != 1:
+                  raise SystemExit("filter decision anchor mismatch")
+              text = text.replace(anchor, validation, 1)
+          text = text.replace(
+              "assert!(!pinned_input_fields().is_empty());\n                  assert!(!pinned_output_fields().is_empty());",
+              "assert!(!QUERY_FILTER_INPUT_FIELDS.is_empty());\n                  assert!(!QUERY_FILTER_OUTPUT_FIELDS.is_empty());",
+          )
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          rm -f \
+            .github/workflows/analyze-query-filter-contract.yml \
+            .github/workflows/integrate-query-filter-client.yml \
+            .github/workflows/finalize-query-filter-client.yml \
+            .github/workflows/repair-query-filter-client.yml
+          cargo fmt --all
+          git diff --check
+
+      - name: Verify native and package contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          make check-native
+          make check-packaging
+          make check-nss
+
+      - name: Verify Rust implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --all-targets --all-features --locked -- -D warnings
+          cargo test --all-targets --all-features --locked
+          cargo build --release --all-features --locked
+
+      - name: Verify live contracts and surface reduction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/live-dns.py target/release/systemd-resolved target/release/resolvectl
+          bash tests/dbus-introspection.sh target/release/systemd-resolved
+          python3 scripts/audit-upstream-resolver-surfaces.py --output /tmp/upstream-surface-audit.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("/tmp/upstream-surface-audit.json").read_text(encoding="utf-8"))
+          if "QueryFilter" in report["missing"]["varlink_methods"]:
+              raise SystemExit("QueryFilter remains missing")
+          PY
+
+      - name: Commit repaired QueryFilter client
+        shell: bash
+        env:
+          GIT_AUTHOR_NAME: SisyphusAeolides
+          GIT_AUTHOR_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+          GIT_COMMITTER_NAME: SisyphusAeolides
+          GIT_COMMITTER_EMAIL: 37166405+SisyphusAeolides@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          git add -A
+          git diff --cached --check
+          git commit -m 'Enforce the pinned QueryFilter reply contract'
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Publish final status
+        if: ${{ always() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          STATUS_DESCRIPTION: ${{ job.status == 'success' && 'QueryFilter client repair passed' || 'QueryFilter client repair failed' }}
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          payload=$(printf '{"state":"%s","context":"parity/query-filter-client-repair","description":"%s","target_url":"%s"}' "$STATUS_STATE" "$STATUS_DESCRIPTION" "$STATUS_URL")
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
